@@ -1,0 +1,85 @@
+{
+  "id": "franka-like",
+  "adapter": "franka_like",
+  "joint_names": ["panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"],
+  "units": {
+    "joint_position": "rad",
+    "joint_position_delta": "rad",
+    "gripper_width": "m",
+    "gripper_command": "m"
+  },
+  "limits": {
+    "joint_position_delta": {
+      "bounds": {
+        "lower": -0.15,
+        "upper": 0.15
+      },
+      "unit": "rad"
+    },
+    "gripper_command": {
+      "bounds": {
+        "lower": 0.0,
+        "upper": 0.08
+      },
+      "unit": "m"
+    }
+  },
+  "frame_info": {
+    "base": "franka_base",
+    "ee": "franka_hand"
+  },
+  "preprocess": [
+    {
+      "name": "mapping",
+      "params": {
+        "rules": [
+          {
+            "external_name": "joint_position",
+            "canonical_field": "joint_position",
+            "source_field": "arm.joint_position",
+            "unit": "rad",
+            "frame": "franka_base"
+          },
+          {
+            "external_name": "gripper_width",
+            "canonical_field": "gripper_width",
+            "source_field": "gripper.width",
+            "unit": "m"
+          },
+          {
+            "external_name": "task_text",
+            "canonical_field": "task_text",
+            "source_field": "task.text"
+          },
+          {
+            "external_name": "image",
+            "canonical_field": "image",
+            "source_field": "camera.front_rgb"
+          }
+        ]
+      }
+    }
+  ],
+  "postprocess": [
+    {
+      "name": "mapping",
+      "params": {
+        "rules": [
+          {
+            "external_name": "joint_position_delta",
+            "canonical_field": "joint_position_delta",
+            "source_field": "arm.joint_delta",
+            "unit": "rad",
+            "frame": "franka_base"
+          },
+          {
+            "external_name": "gripper_command",
+            "canonical_field": "gripper_command",
+            "source_field": "gripper.command",
+            "unit": "m"
+          }
+        ]
+      }
+    }
+  ]
+}

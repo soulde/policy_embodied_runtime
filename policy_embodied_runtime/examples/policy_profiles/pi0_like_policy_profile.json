@@ -1,0 +1,52 @@
+{
+  "id": "pi0-like-policy",
+  "version": "0.1.0",
+  "model_adapter": "pi0_like",
+  "model": {
+    "checkpoint": "pi0_like.ckpt",
+    "device": "cpu",
+    "precision": "fp16"
+  },
+  "canonical_observation_schema": [
+    {
+      "name": "image",
+      "semantic_type": "rgb_image",
+      "kind": "image"
+    },
+    {
+      "name": "joint_position",
+      "semantic_type": "robot_joint_position",
+      "kind": "vector",
+      "unit": "rad",
+      "ordering": ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7"]
+    },
+    {
+      "name": "task_text",
+      "semantic_type": "language_instruction",
+      "kind": "text"
+    }
+  ],
+  "canonical_action_schema": [
+    {
+      "name": "joint_position_delta",
+      "semantic_type": "robot_joint_position_delta",
+      "kind": "vector",
+      "unit": "rad",
+      "ordering": ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7"]
+    },
+    {
+      "name": "gripper_command",
+      "semantic_type": "gripper_command",
+      "kind": "scalar",
+      "unit": "m"
+    }
+  ],
+  "temporal": {
+    "mode": "chunked",
+    "action_horizon": 4,
+    "observation_history": 1
+  },
+  "preprocess": [],
+  "postprocess": [],
+  "safety": {}
+}

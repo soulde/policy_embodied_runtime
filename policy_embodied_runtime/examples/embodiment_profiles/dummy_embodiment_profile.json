@@ -1,0 +1,77 @@
+{
+  "id": "dummy-embodiment",
+  "adapter": "dummy",
+  "joint_names": ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7"],
+  "units": {
+    "joint_position": "rad",
+    "joint_position_delta": "rad",
+    "gripper_width": "m",
+    "gripper_command": "m"
+  },
+  "limits": {
+    "joint_position_delta": {
+      "bounds": {
+        "lower": -0.1,
+        "upper": 0.1
+      },
+      "unit": "rad"
+    },
+    "gripper_command": {
+      "bounds": {
+        "lower": 0.0,
+        "upper": 0.08
+      },
+      "unit": "m"
+    }
+  },
+  "frame_info": {
+    "base": "world"
+  },
+  "preprocess": [
+    {
+      "name": "mapping",
+      "params": {
+        "rules": [
+          {
+            "external_name": "joint_position",
+            "canonical_field": "joint_position",
+            "source_field": "joint_position",
+            "unit": "rad"
+          },
+          {
+            "external_name": "gripper_width",
+            "canonical_field": "gripper_width",
+            "source_field": "gripper_width",
+            "unit": "m"
+          },
+          {
+            "external_name": "task_text",
+            "canonical_field": "task_text",
+            "source_field": "task_text"
+          }
+        ]
+      }
+    }
+  ],
+  "postprocess": [
+    {
+      "name": "mapping",
+      "params": {
+        "rules": [
+          {
+            "external_name": "joint_position_delta",
+            "canonical_field": "joint_position_delta",
+            "source_field": "joint_position_delta",
+            "unit": "rad"
+          },
+          {
+            "external_name": "gripper_command",
+            "canonical_field": "gripper_command",
+            "source_field": "gripper_command",
+            "unit": "m"
+          }
+        ]
+      }
+    }
+  ]
+}

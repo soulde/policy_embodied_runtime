@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "policy-embodied-runtime"
+version = "0.1.0"
+description = "Plugin-centric embodied policy runtime with ZMQ+JSON transport and Python SDK."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.6,<3",
+    "pyzmq>=25,<27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = [
+    "policy_embodied_runtime",
+    "policy_embodied_runtime.*",
+]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "policy_embodied_runtime/server/tests",
+    "policy_embodied_runtime/sdk/tests",
+]
+pythonpath = ["."]
+addopts = "-ra"
+markers = [
+    "tcp_smoke: explicitly enabled TCP smoke tests for real subprocess and CLI validation",
+]
