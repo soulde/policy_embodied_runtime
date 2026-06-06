@@ -21,7 +21,7 @@ dev = [
     "pytest>=8.0,<9",
 ]
 [project.scripts]
-policy-zmq-rpc-host = "policy_embodied_runtime.apps.zmq_rpc_host:main"
+policy-runtime-host = "policy_embodied_runtime.apps.runtime_host:main"
 policy-soarm101-sim = "policy_embodied_runtime.sim.soarm101.cli:main"
 policy-soarm101-verify-serial = "policy_embodied_runtime.sim.soarm101.verify_serial:main"
 

@@ -73,10 +73,10 @@ source .venv/bin/activate
 pytest policy_embodied_runtime/tests
 ```
 
-Run the ZMQ policy RPC host:
+Run the robot runtime host:
 
 ```bash
-policy-zmq-rpc-host \
+policy-runtime-host \
   --policy-profile policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json
 ```
 

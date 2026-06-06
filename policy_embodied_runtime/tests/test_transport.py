@@ -4,7 +4,7 @@ import time
 
 import zmq
 
-from policy_embodied_runtime.apps.zmq_rpc_host import ZmqRpcRobotHost
+from policy_embodied_runtime.apps.runtime_host import RuntimeHost
 from policy_embodied_runtime.protocol.codec import decode_envelope, encode_envelope
 from policy_embodied_runtime.transport.zmq import ZmqReqTransport, resolve_endpoint
 from policy_embodied_runtime.protocol.messages import MessageEnvelope
@@ -36,7 +36,7 @@ def test_codec_roundtrip() -> None:
 def test_zmq_rpc_robot_host_handles_health_and_infer() -> None:
     endpoint = _endpoint_name("transport")
     context = zmq.Context()
-    host = ZmqRpcRobotHost(
+    host = RuntimeHost(
         endpoint=endpoint,
         policy_profile="policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json",
     )
@@ -102,7 +102,7 @@ def test_zmq_rpc_robot_host_handles_health_and_infer() -> None:
 def test_zmq_rpc_robot_host_handles_vla_observation() -> None:
     endpoint = _endpoint_name("transport-vla")
     context = zmq.Context()
-    host = ZmqRpcRobotHost(
+    host = RuntimeHost(
         endpoint=endpoint,
         policy_profile="policy_embodied_runtime/examples/policy_profiles/pi0_like_policy_profile.json",
     )
