@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from policy_embodied_runtime.protocol import St3215Status
 from policy_embodied_runtime.protocol.st3215 import St3215ProtocolError, read_u16_le
-from policy_embodied_runtime.robot.data import RobotData, ServoCommand, ServoFeedbackData
+from policy_embodied_runtime.robot.data import ServoFeedbackData
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,14 +50,6 @@ def radians_to_position_units(position_rad: float, max_position_units: int) -> i
 def position_units_to_radians(position_units: int, max_position_units: int) -> float:
     """Convert ST3215 position units into radians."""
     return position_units / max_position_units * math.tau
-
-
-def find_servo_command(data: RobotData, servo_id: int) -> ServoCommand | None:
-    """Find a servo command by servo id."""
-    for command in data.commands.get("servos", []):
-        if isinstance(command, ServoCommand) and command.servo_id == servo_id:
-            return command
-    return None
 
 
 def _parse_position(status: St3215Status) -> int:

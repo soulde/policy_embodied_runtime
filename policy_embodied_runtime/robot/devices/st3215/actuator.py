@@ -45,6 +45,12 @@ def servo_goal_command(config: St3215ServoConfig, data: RobotData):
         command.target_position_rad,
         config.max_position_units,
     )
+    return St3215Protocol.goal_position_command(
+        config.device_id,
+        position_units,
+        config.time_units,
+        config.speed_units,
+    )
 
 
 def _configured_servo_command(config: St3215ServoConfig, data: RobotData) -> ServoCommand | None:
@@ -60,9 +66,3 @@ def _configured_servo_command(config: St3215ServoConfig, data: RobotData) -> Ser
             enabled=bool(command.get("enabled", True)),
         )
     return None
-    return St3215Protocol.goal_position_command(
-        config.device_id,
-        position_units,
-        config.time_units,
-        config.speed_units,
-    )

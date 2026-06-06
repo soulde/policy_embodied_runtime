@@ -6,7 +6,7 @@
 
 This project does:
 
-- `policy_server` runtime and session lifecycle
+- robot-owned policy runtime and session lifecycle
 - model adapters
 - embodiment adapters
 - policy profile and embodiment profile validation
@@ -25,14 +25,14 @@ This project does not do:
 ## Architecture
 
 - `robot/`: robot layer inspired by `soulde/rustyRobot`; owns `RobotData`, `Sensor`, `Actuator`, `Policy`, session state, registry, and policy runtime orchestration
-- `transport/`: low-level communication implementations in the `rustyRobot` sense; examples include ZMQ, serial, CAN, USB2CAN, virtual serial, and in-memory channels
+- `transport/`: low-level communication implementations in the `rustyRobot` sense; examples include ZMQ, serial, CAN, USB2CAN, and virtual serial
 - `protocol/`: JSON policy RPC envelope and payload contracts plus protocol codec/errors
 - `apps/`: runnable entrypoints such as the ZMQ policy RPC robot host
 - `adapters/`, `models/`: plugin implementations consumed by the robot layer
 - `sim/`: simulators, including the migrated SO-ARM101 MuJoCo + virtual ST3215 serial simulator
-- `integrations/`: non-core usage examples only; ROS2 remains optional
+- `integrations/`: external usage examples only; ROS2 remains optional
 
-The project uses the same core vocabulary as `rustyRobot`:
+The project uses the same layer vocabulary as `rustyRobot`:
 
 ```text
 Robot Layer -> Sensor input, Actuator output, RobotData, policy runtime
@@ -120,5 +120,5 @@ For embodiment adapters that declare nested `source_field` paths such as `arm.jo
 Current implementation is staged:
 
 - Phase 1-2: scaffold, schemas, config loader, examples, validation tests
-- Phase 3-5: adapter registries, dummy adapters, runtime core, ZMQ transport
+- Phase 3-5: adapter registries, dummy adapters, robot runtime, ZMQ transport
 - Phase 6-9: robot I/O abstractions, example adapters, integration tests, documentation refinement
