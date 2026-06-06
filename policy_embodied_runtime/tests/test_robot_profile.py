@@ -1,12 +1,10 @@
 from pathlib import Path
 
 from policy_embodied_runtime.profiles.loader import load_policy_profile, load_robot_profile
-from policy_embodied_runtime.robot import ModelPolicy, RobotData
 from policy_embodied_runtime.robot.factory import build_robot
 from policy_embodied_runtime.robot.profile import RobotProfile
 from policy_embodied_runtime.robot.devices.st3215 import St3215ServoActuator
 from policy_embodied_runtime.robot.devices.st3215 import St3215ServoSensor
-from policy_embodied_runtime.robot.types import SessionContext
 
 
 def test_robot_profile_loads_json_with_unique_robot_data_names() -> None:
@@ -33,14 +31,12 @@ def test_robot_profile_loads_json_with_unique_robot_data_names() -> None:
                     "speed_units": 1000,
                 }
             ],
-            "policies": [{"name": "control", "type": "model_policy"}],
         }
     )
 
     assert profile.sensors[0].name == "servo3_position"
     assert profile.sensors[0].device_type == "st3215_servo_sensor"
     assert profile.actuators[0].args["speed_units"] == "1000"
-    assert profile.policies[0].device_type == "model_policy"
 
 
 def test_robot_factory_builds_st3215_sensor_and_actuator() -> None:
@@ -79,34 +75,6 @@ def test_robot_factory_builds_st3215_sensor_and_actuator() -> None:
     assert robot.actuators[0].config.command_field == "servo3_target"
 
 
-def test_robot_factory_builds_model_policy_from_profile() -> None:
-    profile = RobotProfile.from_mapping({"policies": [{"name": "control", "type": "model_policy"}]})
-
-    robot = build_robot(
-        profile,
-        policy_profile=load_policy_profile(
-            Path("policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json")
-        ),
-    )
-
-    assert isinstance(robot.policies[0], ModelPolicy)
-
-    data = RobotData.from_observation(
-        {
-            "joint_position": {
-                "values": [0.1, 0.0],
-                "joint_names": ["joint_1", "joint_2"],
-                "unit": "rad",
-            },
-            "gripper_width": {"value": 0.04, "unit": "m"},
-        }
-    )
-    robot.policies[0].infer(data, SessionContext("session-1"))
-
-    assert data.action is not None
-    assert data.commands.get("joint_position_delta")["values"] == [-0.01, 0.0]
-
-
 def test_soarm101_sim_profiles_bind_policy_to_unique_robot_data() -> None:
     robot_profile = load_robot_profile(
         "policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json"
@@ -126,6 +94,7 @@ def test_soarm101_sim_profiles_bind_policy_to_unique_robot_data() -> None:
 
     assert len(robot_data_names) == len(robot_profile.sensors) + len(robot_profile.actuators)
     assert bound_data_names == robot_data_names
+    assert policy_profile.model_adapter == "dummy"
     assert [binding.robot_data for binding in policy_profile.inputs] == [
         "shoulder_pan_position",
         "shoulder_lift_position",

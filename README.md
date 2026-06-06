@@ -93,10 +93,15 @@ It exposes a stable virtual serial path at `/tmp/rusty_robot_soarm101`.
 
 ## Config Files
 
+- `policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json`: SO-ARM101 sensors, actuators, serial transport, and ST3215 device IDs
+- `policy_embodied_runtime/examples/robot_profiles/default_rpc_robot_profile.json`: default RPC sensor/actuator robot I/O profile
 - `policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json`: MVP single-step dummy adapter
 - `policy_embodied_runtime/examples/policy_profiles/pi0_like_policy_profile.json`: placeholder chunked adapter shape
+- `policy_embodied_runtime/examples/policy_profiles/soarm101_sim_policy_profile.json`: policy bindings from SO-ARM101 robot data names to canonical model fields
 - `policy_embodied_runtime/examples/embodiment_profiles/dummy_embodiment_profile.json`: direct mapping profile
 - `policy_embodied_runtime/examples/embodiment_profiles/franka_like_profile.json`: Franka-like semantic field mapping
+
+Robot profiles describe robot data interfaces and hardware links only. Policy selection, model adapter choice, canonical input/output schemas, and preprocess/postprocess bindings belong to policy profiles.
 
 ## Protocol Contract
 

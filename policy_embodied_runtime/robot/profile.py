@@ -19,20 +19,18 @@ class DeviceConfig:
 
 @dataclass(frozen=True, slots=True)
 class RobotProfile:
-    """Robot profile describing sensors, actuators, and policies."""
+    """Robot profile describing robot inputs, outputs, and hardware links."""
 
     sensors: list[DeviceConfig] = field(default_factory=list)
     actuators: list[DeviceConfig] = field(default_factory=list)
-    policies: list[DeviceConfig] = field(default_factory=list)
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "RobotProfile":
         """Load a robot profile from a JSON-style mapping."""
         sensors = [_device_from_mapping("sensor", item) for item in data.get("sensors", [])]
         actuators = [_device_from_mapping("actuator", item) for item in data.get("actuators", [])]
-        policies = [_device_from_mapping("policy", item) for item in data.get("policies", [])]
-        _validate_unique_names(sensors, actuators, policies)
-        return cls(sensors=sensors, actuators=actuators, policies=policies)
+        _validate_unique_names(sensors, actuators)
+        return cls(sensors=sensors, actuators=actuators)
 
     @classmethod
     def from_json_file(cls, path: str | Path) -> "RobotProfile":
@@ -68,10 +66,9 @@ def _json_arg_value(value: Any) -> str:
 def _validate_unique_names(
     sensors: list[DeviceConfig],
     actuators: list[DeviceConfig],
-    policies: list[DeviceConfig],
 ) -> None:
     names: dict[str, str] = {}
-    for kind, devices in (("sensor", sensors), ("actuator", actuators), ("policy", policies)):
+    for kind, devices in (("sensor", sensors), ("actuator", actuators)):
         for device in devices:
             previous = names.setdefault(device.name, kind)
             if previous != kind:

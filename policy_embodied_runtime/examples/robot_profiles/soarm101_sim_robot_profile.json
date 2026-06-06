@@ -1,11 +1,4 @@
 {
-  "policies": [
-    {
-      "name": "control",
-      "type": "model_policy",
-      "model_adapter": "dummy"
-    }
-  ],
   "sensors": [
     {
       "name": "shoulder_pan_position",

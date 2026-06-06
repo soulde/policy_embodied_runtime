@@ -3,19 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from policy_embodied_runtime.robot.actuator import Actuator, RecordingActuator
 from policy_embodied_runtime.robot.devices.rpc import RpcActionActuator, RpcObservationSensor
 from policy_embodied_runtime.robot.devices.st3215 import St3215ServoActuator, St3215ServoConfig, St3215ServoSensor
-from policy_embodied_runtime.robot.policy import DummyPolicy, ModelPolicy, Policy
 from policy_embodied_runtime.robot.profile import DeviceConfig, RobotProfile
 from policy_embodied_runtime.robot.sensor import Sensor, StaticSensor
 from policy_embodied_runtime.transport import Transport
 from policy_embodied_runtime.transport.serial import SerialConfig, SerialTransport
-
-if TYPE_CHECKING:
-    from policy_embodied_runtime.protocol.policy_profile import PolicyProfile
 
 
 @dataclass(slots=True)
@@ -24,15 +20,13 @@ class BuiltRobot:
 
     sensors: list[Sensor]
     actuators: list[Actuator]
-    policies: list[Policy]
 
 
-def build_robot(profile: RobotProfile, *, policy_profile: PolicyProfile | None = None) -> BuiltRobot:
-    """Build sensors, actuators, and policies from a robot profile."""
+def build_robot(profile: RobotProfile) -> BuiltRobot:
+    """Build sensors and actuators from a robot profile."""
     return BuiltRobot(
         sensors=[build_sensor(device) for device in profile.sensors],
         actuators=[build_actuator(device) for device in profile.actuators],
-        policies=[build_policy(device, policy_profile=policy_profile) for device in profile.policies],
     )
 
 
@@ -69,18 +63,6 @@ def build_actuator(device: DeviceConfig) -> Actuator:
     raise ValueError(f"unsupported actuator type '{device.device_type}' for '{device.name}'")
 
 
-def build_policy(device: DeviceConfig, *, policy_profile: PolicyProfile | None = None) -> Policy:
-    """Build one policy from config."""
-    if device.device_type == "dummy_policy":
-        return DummyPolicy(device.name)
-    if device.device_type == "model_policy":
-        if policy_profile is None:
-            raise ValueError(f"policy '{device.name}' requires a policy profile")
-        adapter_name = device.args.get("model_adapter", policy_profile.model_adapter)
-        return ModelPolicy(device.name, _model_adapter(adapter_name, policy_profile=policy_profile))
-    raise ValueError(f"unsupported policy type '{device.device_type}' for '{device.name}'")
-
-
 def _transport(device: DeviceConfig) -> Transport:
     transport_type = device.args.get("transport", "serial")
     if transport_type == "serial":
@@ -100,20 +82,6 @@ def _st3215_config(device: DeviceConfig) -> St3215ServoConfig:
         speed_units=_int_arg(device, "speed_units", default=0),
         time_units=_int_arg(device, "time_units", default=0),
     )
-
-
-def _model_adapter(name: str, *, policy_profile: PolicyProfile) -> object:
-    import policy_embodied_runtime.models  # noqa: F401
-    from policy_embodied_runtime.models.base import BaseModelAdapter
-    from policy_embodied_runtime.robot.registry import create_registered
-
-    try:
-        adapter = create_registered("model_adapter", name, policy_profile=policy_profile)
-    except KeyError as exc:
-        raise ValueError(f"unknown model adapter: {name}") from exc
-    if not isinstance(adapter, BaseModelAdapter):
-        raise TypeError(f"model adapter {name} is not a BaseModelAdapter")
-    return adapter
 
 
 def _required(device: DeviceConfig, key: str) -> str:
