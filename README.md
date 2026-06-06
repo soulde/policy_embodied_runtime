@@ -1,6 +1,6 @@
 # Embodied Policy Runtime
 
-`policy_embodied_runtime` is an embodied policy runtime for VLA, imitation, and other policy inference workloads. The MVP is intentionally narrow: it provides a policy server runtime, model adapters, embodiment adapters, JSON schema/config validation, ZMQ transport, and a Python client SDK.
+`policy_embodied_runtime` is an embodied policy runtime for VLA, imitation, and other policy inference workloads. It provides a policy runtime, robot input/output abstractions, model adapters, embodiment adapters, JSON protocol validation, ZMQ transport, and SO-ARM101 simulation assets.
 
 ## Scope Boundary
 
@@ -10,24 +10,37 @@ This project does:
 - model adapters
 - embodiment adapters
 - policy profile and embodiment profile validation
-- ZMQ + JSON transport
+- ZMQ transport for policy RPC
 - preprocess, postprocess, and validation placeholders
-- Python client SDK for launching and talking to the server
+- robot `Sensor` and `Actuator` interfaces
+- SO-ARM101 MuJoCo simulator
 
 This project does not do:
 
 - robot drivers
 - ROS2 control
-- hardware integration
 - realtime servo loops
 - camera drivers
-- actuator interfaces
 
 ## Architecture
 
-- `server/`: runtime, adapters, models, schemas, transport, safety
-- `sdk/`: Python client API that hides ZMQ and process launch details
+- `robot/`: robot layer inspired by `soulde/rustyRobot`; owns `RobotData`, `Sensor`, `Actuator`, `Policy`, session state, registry, and policy runtime orchestration
+- `transport/`: low-level communication implementations in the `rustyRobot` sense; examples include ZMQ, serial, CAN, USB2CAN, virtual serial, and in-memory channels
+- `protocol/`: JSON policy RPC envelope and payload contracts plus protocol codec/errors
+- `apps/`: runnable entrypoints such as the ZMQ policy RPC robot host
+- `adapters/`, `models/`: plugin implementations consumed by the robot layer
+- `sim/`: simulators, including the migrated SO-ARM101 MuJoCo + virtual ST3215 serial simulator
 - `integrations/`: non-core usage examples only; ROS2 remains optional
+
+The project uses the same core vocabulary as `rustyRobot`:
+
+```text
+Robot Layer -> Sensor input, Actuator output, RobotData, policy runtime
+Protocol    -> schema-validated policy RPC envelopes and payloads
+Transport   -> low-level communication channel implementation
+```
+
+Anything that enters the robot is a `Sensor`, including physical sensors, remote controls, network links, simulator state, and policy RPC requests. Anything the robot outputs is an `Actuator`, including motors, grippers, serial/CAN commands, telemetry, logs, simulator commands, and policy RPC responses. `transport` is only the bottom communication mechanism used inside a sensor or actuator; for policy RPC the transport implementation is ZMQ.
 
 Server flow in MVP:
 
@@ -54,20 +67,29 @@ pytest
 
 ## Quickstart
 
-Validate schemas, server runtime, transport, and SDK:
+Validate schemas, runtime, transport, and robot I/O abstractions:
 
 ```bash
 source .venv/bin/activate
-pytest policy_embodied_runtime/server/tests policy_embodied_runtime/sdk/tests
+pytest policy_embodied_runtime/tests
 ```
 
-Run the dummy SDK example:
+Run the ZMQ policy RPC host:
 
 ```bash
-python -m policy_embodied_runtime.examples.sdk_dummy_roundtrip
+policy-zmq-rpc-host \
+  --policy-profile policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json \
+  --embodiment-profile policy_embodied_runtime/examples/embodiment_profiles/dummy_embodiment_profile.json
 ```
 
-The example launches a local server, loads the dummy policy profile and embodiment profile, resets a session, and performs one inference step.
+Run the SO-ARM101 MuJoCo simulator:
+
+```bash
+uv pip install -e ".[dev]"
+policy-soarm101-sim
+```
+
+It exposes a stable virtual serial path at `/tmp/rusty_robot_soarm101`.
 
 ## Config Files
 
@@ -76,7 +98,7 @@ The example launches a local server, loads the dummy policy profile and embodime
 - `policy_embodied_runtime/examples/embodiment_profiles/dummy_embodiment_profile.json`: direct mapping profile
 - `policy_embodied_runtime/examples/embodiment_profiles/franka_like_profile.json`: Franka-like semantic field mapping
 
-## Transport Contract
+## Protocol Contract
 
 All messages use a JSON envelope with:
 
@@ -91,7 +113,7 @@ All messages use a JSON envelope with:
 
 Observation and action payloads must use named semantic fields. Bare arrays are not permitted at protocol level.
 
-For embodiment adapters that declare nested `source_field` paths such as `arm.joint_position` or `camera.front_rgb`, the ZMQ observation payload may include those JSON object paths directly under `observation`. The runtime will map them into canonical fields before model inference.
+For embodiment adapters that declare nested `source_field` paths such as `arm.joint_position` or `camera.front_rgb`, the policy RPC observation payload may include those JSON object paths directly under `observation`. The runtime maps them into canonical fields before model inference.
 
 ## Status
 
@@ -99,4 +121,4 @@ Current implementation is staged:
 
 - Phase 1-2: scaffold, schemas, config loader, examples, validation tests
 - Phase 3-5: adapter registries, dummy adapters, runtime core, ZMQ transport
-- Phase 6-9: SDK, example adapters, integration tests, documentation refinement
+- Phase 6-9: robot I/O abstractions, example adapters, integration tests, documentation refinement

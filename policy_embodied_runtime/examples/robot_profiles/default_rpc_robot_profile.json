@@ -1,0 +1,15 @@
+{
+  "sensors": [
+    {
+      "name": "policy_rpc_observation",
+      "type": "policy_rpc_observation"
+    }
+  ],
+  "actuators": [
+    {
+      "name": "policy_rpc_action",
+      "type": "policy_rpc_action"
+    }
+  ],
+  "policies": []
+}

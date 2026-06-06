@@ -1,0 +1,150 @@
+{
+  "id": "soarm101-sim-policy",
+  "version": "0.1.0",
+  "model_adapter": "dummy",
+  "model": {
+    "robot_profile": "policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json"
+  },
+  "inputs": [
+    {
+      "name": "shoulder_pan_position_input",
+      "robot_data": "shoulder_pan_position",
+      "canonical_field": "joint_position",
+      "source_path": "position_rad",
+      "metadata": {"joint_name": "shoulder_pan", "index": 0}
+    },
+    {
+      "name": "shoulder_lift_position_input",
+      "robot_data": "shoulder_lift_position",
+      "canonical_field": "joint_position",
+      "source_path": "position_rad",
+      "metadata": {"joint_name": "shoulder_lift", "index": 1}
+    },
+    {
+      "name": "elbow_position_input",
+      "robot_data": "elbow_position",
+      "canonical_field": "joint_position",
+      "source_path": "position_rad",
+      "metadata": {"joint_name": "elbow", "index": 2}
+    },
+    {
+      "name": "wrist_pitch_position_input",
+      "robot_data": "wrist_pitch_position",
+      "canonical_field": "joint_position",
+      "source_path": "position_rad",
+      "metadata": {"joint_name": "wrist_pitch", "index": 3}
+    },
+    {
+      "name": "wrist_roll_position_input",
+      "robot_data": "wrist_roll_position",
+      "canonical_field": "joint_position",
+      "source_path": "position_rad",
+      "metadata": {"joint_name": "wrist_roll", "index": 4}
+    },
+    {
+      "name": "gripper_position_input",
+      "robot_data": "gripper_position",
+      "canonical_field": "joint_position",
+      "source_path": "position_rad",
+      "metadata": {"joint_name": "gripper", "index": 5}
+    }
+  ],
+  "outputs": [
+    {
+      "name": "shoulder_pan_target_output",
+      "robot_data": "shoulder_pan_target",
+      "canonical_field": "joint_position_delta",
+      "target_path": "target_position_rad",
+      "metadata": {"joint_name": "shoulder_pan", "index": 0, "servo_id": 1}
+    },
+    {
+      "name": "shoulder_lift_target_output",
+      "robot_data": "shoulder_lift_target",
+      "canonical_field": "joint_position_delta",
+      "target_path": "target_position_rad",
+      "metadata": {"joint_name": "shoulder_lift", "index": 1, "servo_id": 2}
+    },
+    {
+      "name": "elbow_target_output",
+      "robot_data": "elbow_target",
+      "canonical_field": "joint_position_delta",
+      "target_path": "target_position_rad",
+      "metadata": {"joint_name": "elbow", "index": 2, "servo_id": 3}
+    },
+    {
+      "name": "wrist_pitch_target_output",
+      "robot_data": "wrist_pitch_target",
+      "canonical_field": "joint_position_delta",
+      "target_path": "target_position_rad",
+      "metadata": {"joint_name": "wrist_pitch", "index": 3, "servo_id": 4}
+    },
+    {
+      "name": "wrist_roll_target_output",
+      "robot_data": "wrist_roll_target",
+      "canonical_field": "joint_position_delta",
+      "target_path": "target_position_rad",
+      "metadata": {"joint_name": "wrist_roll", "index": 4, "servo_id": 5}
+    },
+    {
+      "name": "gripper_target_output",
+      "robot_data": "gripper_target",
+      "canonical_field": "joint_position_delta",
+      "target_path": "target_position_rad",
+      "metadata": {"joint_name": "gripper", "index": 5, "servo_id": 6}
+    }
+  ],
+  "canonical_observation_schema": [
+    {
+      "name": "joint_position",
+      "semantic_type": "robot_joint_position",
+      "kind": "vector",
+      "unit": "rad",
+      "ordering": [
+        "shoulder_pan",
+        "shoulder_lift",
+        "elbow",
+        "wrist_pitch",
+        "wrist_roll",
+        "gripper"
+      ]
+    }
+  ],
+  "canonical_action_schema": [
+    {
+      "name": "joint_position_delta",
+      "semantic_type": "robot_joint_position_delta",
+      "kind": "vector",
+      "unit": "rad",
+      "ordering": [
+        "shoulder_pan",
+        "shoulder_lift",
+        "elbow",
+        "wrist_pitch",
+        "wrist_roll",
+        "gripper"
+      ]
+    }
+  ],
+  "temporal": {
+    "mode": "single_step",
+    "action_horizon": 1,
+    "observation_history": 1
+  },
+  "preprocess": [
+    {
+      "name": "robot_inputs_to_canonical",
+      "params": {
+        "bindings": "inputs"
+      }
+    }
+  ],
+  "postprocess": [
+    {
+      "name": "canonical_to_robot_outputs",
+      "params": {
+        "bindings": "outputs"
+      }
+    }
+  ],
+  "safety": {}
+}
