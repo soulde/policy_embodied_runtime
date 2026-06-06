@@ -1,7 +1,7 @@
 {
   "id": "pi0-like-policy",
   "version": "0.1.0",
-  "model_adapter": "pi0_like",
+  "policy": "pi0_like",
   "model": {
     "checkpoint": "pi0_like.ckpt",
     "device": "cpu",

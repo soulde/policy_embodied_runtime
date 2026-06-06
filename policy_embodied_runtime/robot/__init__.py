@@ -14,11 +14,11 @@ from policy_embodied_runtime.robot.data import (
     ServoCommand,
     ServoFeedbackData,
 )
-from policy_embodied_runtime.robot.devices.rpc import RpcActionActuator, RpcObservationSensor
+from policy_embodied_runtime.robot.devices.rpc import RpcActionActuator, RpcFeedbackActuator, RpcObservationSensor
 from policy_embodied_runtime.robot.devices.st3215 import St3215ServoActuator, St3215ServoConfig, St3215ServoSensor
 from policy_embodied_runtime.robot.factory import BuiltRobot, build_actuator, build_robot, build_sensor
 from policy_embodied_runtime.robot.policy import DummyPolicy, ModelPolicy, Policy
-from policy_embodied_runtime.robot.profile import DeviceConfig, RobotProfile
+from policy_embodied_runtime.robot.profile import DeviceConfig, DeviceLink, RobotProfile
 from policy_embodied_runtime.robot.sensor import Sensor, StaticSensor
 
 __all__ = [
@@ -26,6 +26,7 @@ __all__ = [
     "ActuatorCommands",
     "BuiltRobot",
     "DeviceConfig",
+    "DeviceLink",
     "DummyPolicy",
     "ModelPolicy",
     "Policy",
@@ -35,6 +36,7 @@ __all__ = [
     "RobotObservation",
     "RobotProfile",
     "RpcActionActuator",
+    "RpcFeedbackActuator",
     "RpcObservationSensor",
     "Sensor",
     "SensorData",

@@ -1,114 +1,101 @@
 {
   "sensors": [
     {
+      "name": "shoulder_pan_command",
+      "device": {"type": "rpc", "path": "127.0.0.1:5555"},
+      "args": {}
+    },
+    {
+      "name": "shoulder_lift_command",
+      "device": {"type": "rpc", "path": "127.0.0.1:5555"},
+      "args": {}
+    },
+    {
+      "name": "elbow_command",
+      "device": {"type": "rpc", "path": "127.0.0.1:5555"},
+      "args": {}
+    },
+    {
+      "name": "wrist_pitch_command",
+      "device": {"type": "rpc", "path": "127.0.0.1:5555"},
+      "args": {}
+    },
+    {
+      "name": "wrist_roll_command",
+      "device": {"type": "rpc", "path": "127.0.0.1:5555"},
+      "args": {}
+    },
+    {
+      "name": "gripper_command",
+      "device": {"type": "rpc", "path": "127.0.0.1:5555"},
+      "args": {}
+    },
+    {
       "name": "shoulder_pan_position",
-      "type": "st3215_servo_sensor",
-      "transport": "serial",
-      "path": "/tmp/soarm101-serial",
-      "baud_rate": 1000000,
-      "device_id": 1,
-      "servo_id": 1
+      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "args": {"baud_rate": 1000000, "device_id": 1, "servo_id": 1}
     },
     {
       "name": "shoulder_lift_position",
-      "type": "st3215_servo_sensor",
-      "transport": "serial",
-      "path": "/tmp/soarm101-serial",
-      "baud_rate": 1000000,
-      "device_id": 2,
-      "servo_id": 2
+      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "args": {"baud_rate": 1000000, "device_id": 2, "servo_id": 2}
     },
     {
       "name": "elbow_position",
-      "type": "st3215_servo_sensor",
-      "transport": "serial",
-      "path": "/tmp/soarm101-serial",
-      "baud_rate": 1000000,
-      "device_id": 3,
-      "servo_id": 3
+      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "args": {"baud_rate": 1000000, "device_id": 3, "servo_id": 3}
     },
     {
       "name": "wrist_pitch_position",
-      "type": "st3215_servo_sensor",
-      "transport": "serial",
-      "path": "/tmp/soarm101-serial",
-      "baud_rate": 1000000,
-      "device_id": 4,
-      "servo_id": 4
+      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "args": {"baud_rate": 1000000, "device_id": 4, "servo_id": 4}
     },
     {
       "name": "wrist_roll_position",
-      "type": "st3215_servo_sensor",
-      "transport": "serial",
-      "path": "/tmp/soarm101-serial",
-      "baud_rate": 1000000,
-      "device_id": 5,
-      "servo_id": 5
+      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "args": {"baud_rate": 1000000, "device_id": 5, "servo_id": 5}
     },
     {
       "name": "gripper_position",
-      "type": "st3215_servo_sensor",
-      "transport": "serial",
-      "path": "/tmp/soarm101-serial",
-      "baud_rate": 1000000,
-      "device_id": 6,
-      "servo_id": 6
+      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "args": {"baud_rate": 1000000, "device_id": 6, "servo_id": 6}
     }
   ],
   "actuators": [
     {
+      "name": "arm_feedback",
+      "device": {"type": "rpc", "path": "127.0.0.1:5555"},
+      "args": {"mode": "feedback"}
+    },
+    {
       "name": "shoulder_pan_target",
-      "type": "st3215_servo_actuator",
-      "transport": "serial",
-      "path": "/tmp/soarm101-serial",
-      "baud_rate": 1000000,
-      "device_id": 1,
-      "servo_id": 1
+      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "args": {"baud_rate": 1000000, "device_id": 1, "servo_id": 1}
     },
     {
       "name": "shoulder_lift_target",
-      "type": "st3215_servo_actuator",
-      "transport": "serial",
-      "path": "/tmp/soarm101-serial",
-      "baud_rate": 1000000,
-      "device_id": 2,
-      "servo_id": 2
+      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "args": {"baud_rate": 1000000, "device_id": 2, "servo_id": 2}
     },
     {
       "name": "elbow_target",
-      "type": "st3215_servo_actuator",
-      "transport": "serial",
-      "path": "/tmp/soarm101-serial",
-      "baud_rate": 1000000,
-      "device_id": 3,
-      "servo_id": 3
+      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "args": {"baud_rate": 1000000, "device_id": 3, "servo_id": 3}
     },
     {
       "name": "wrist_pitch_target",
-      "type": "st3215_servo_actuator",
-      "transport": "serial",
-      "path": "/tmp/soarm101-serial",
-      "baud_rate": 1000000,
-      "device_id": 4,
-      "servo_id": 4
+      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "args": {"baud_rate": 1000000, "device_id": 4, "servo_id": 4}
     },
     {
       "name": "wrist_roll_target",
-      "type": "st3215_servo_actuator",
-      "transport": "serial",
-      "path": "/tmp/soarm101-serial",
-      "baud_rate": 1000000,
-      "device_id": 5,
-      "servo_id": 5
+      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "args": {"baud_rate": 1000000, "device_id": 5, "servo_id": 5}
     },
     {
       "name": "gripper_target",
-      "type": "st3215_servo_actuator",
-      "transport": "serial",
-      "path": "/tmp/soarm101-serial",
-      "baud_rate": 1000000,
-      "device_id": 6,
-      "servo_id": 6
+      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "args": {"baud_rate": 1000000, "device_id": 6, "servo_id": 6}
     }
   ]
 }

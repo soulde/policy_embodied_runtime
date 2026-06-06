@@ -34,13 +34,13 @@ class RobotPolicyBinding(BaseModel):
 
 
 class PolicyProfile(BaseModel):
-    """Describes which model adapter to use and its canonical I/O contract."""
+    """Describes which policy to use and its canonical I/O contract."""
 
     model_config = ConfigDict(extra="forbid")
 
     id: str
     version: str
-    model_adapter: str
+    policy: str
     model: dict[str, Any] = Field(default_factory=dict)
     inputs: list[RobotPolicyBinding] = Field(default_factory=list)
     outputs: list[RobotPolicyBinding] = Field(default_factory=list)
@@ -63,10 +63,12 @@ class PolicyProfile(BaseModel):
         _validate_unique_bindings(self.outputs, "outputs")
         _validate_bound_fields(self.inputs, set(obs_names), "inputs")
         _validate_bound_fields(self.outputs, set(action_names), "outputs")
+        if bool(self.inputs) != bool(self.outputs) or len(self.inputs) != len(self.outputs):
+            raise ValueError("policy inputs and outputs must be declared as equal-length pairs")
         if not self.id.strip():
             raise ValueError("id must be non-empty")
-        if not self.model_adapter.strip():
-            raise ValueError("model_adapter must be non-empty")
+        if not self.policy.strip():
+            raise ValueError("policy must be non-empty")
         return self
 
 

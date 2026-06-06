@@ -10,7 +10,7 @@ from pathlib import Path
 import zmq
 from zmq.error import Again, ZMQError
 
-from policy_embodied_runtime.profiles.loader import load_embodiment_profile, load_policy_profile, load_robot_profile
+from policy_embodied_runtime.profiles.loader import load_policy_profile, load_robot_profile
 from policy_embodied_runtime.robot.policy_runtime import PolicyRuntime
 from policy_embodied_runtime.protocol.messages import MessageEnvelope, SCHEMA_VERSION
 from policy_embodied_runtime.protocol.codec import decode_envelope, encode_envelope
@@ -29,12 +29,10 @@ class ZmqRpcRobotHost:
         endpoint: str = "embodied-policy-runtime",
         timeout_ms: int = 100,
         policy_profile: str | Path,
-        embodiment_profile: str | Path,
         robot_profile: str | Path | None = None,
     ) -> None:
         self.runtime = PolicyRuntime(
             policy_profile=load_policy_profile(policy_profile),
-            embodiment_profile=load_embodiment_profile(embodiment_profile),
         )
         self.robot = _load_or_default_robot(robot_profile)
         self.endpoint = resolve_endpoint(endpoint)
@@ -126,7 +124,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--endpoint", default="embodied-policy-runtime")
     parser.add_argument("--timeout-ms", type=int, default=100)
     parser.add_argument("--policy-profile", required=True)
-    parser.add_argument("--embodiment-profile", required=True)
     parser.add_argument("--robot-profile")
     return parser
 
@@ -138,7 +135,6 @@ def main() -> None:
         endpoint=args.endpoint,
         timeout_ms=args.timeout_ms,
         policy_profile=args.policy_profile,
-        embodiment_profile=args.embodiment_profile,
         robot_profile=args.robot_profile,
     )
     try:

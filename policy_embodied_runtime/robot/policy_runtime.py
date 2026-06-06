@@ -7,16 +7,13 @@ from typing import Any
 
 from pydantic import ValidationError
 
-import policy_embodied_runtime.adapters  # noqa: F401
 import policy_embodied_runtime.models  # noqa: F401
 
-from policy_embodied_runtime.adapters.base import BaseEmbodimentAdapter
 from policy_embodied_runtime.robot.registry import create_registered
 from policy_embodied_runtime.robot.errors import ValidationRuntimeError
-from policy_embodied_runtime.models.base import BaseModelAdapter
+from policy_embodied_runtime.models.policy import BaseInferencePolicy
 from policy_embodied_runtime.robot.policy import ModelPolicy, Policy
 from policy_embodied_runtime.robot.runtime import EmbodiedRobotRuntime
-from policy_embodied_runtime.protocol.embodiment_profile import EmbodimentProfile
 from policy_embodied_runtime.protocol.messages import (
     ActionPayload,
     ActionResponse,
@@ -35,20 +32,16 @@ from policy_embodied_runtime.protocol.policy_profile import PolicyProfile
 class PolicyRuntime:
     """Embodied policy runtime."""
 
-    def __init__(self, *, policy_profile: PolicyProfile, embodiment_profile: EmbodimentProfile) -> None:
+    def __init__(self, *, policy_profile: PolicyProfile) -> None:
         self._policy_profile = policy_profile
-        self._embodiment_profile = embodiment_profile
-        self._policy = _create_policy(
+        self._policy = _create_robot_policy(
             "control",
-            policy_profile.model_adapter,
+            policy_profile.policy,
             policy_profile=policy_profile,
         )
-        self._adapter = _create_embodiment_adapter(embodiment_profile.adapter)
         self._robot_runtime = EmbodiedRobotRuntime(
             policy_profile=policy_profile,
-            embodiment_profile=embodiment_profile,
             policy=self._policy,
-            adapter=self._adapter,
         )
 
     def health(self) -> HealthResponse:
@@ -72,7 +65,7 @@ class PolicyRuntime:
 
     def infer(self, session_id: str, request: ObservationRequest) -> ActionResponse:
         """Execute one inference step."""
-        obs_msg = request.observation.as_adapter_input()
+        obs_msg = request.observation.as_policy_input()
         embodiment_action = self._robot_runtime.infer(session_id, obs_msg)
         return ActionResponse(ok=True, action=ActionPayload.model_validate(embodiment_action))
 
@@ -158,28 +151,19 @@ class PolicyRuntime:
             raise ValidationRuntimeError(f"unknown request type: {request_type}") from exc
 
 
-def _create_model_adapter(name: str, *, policy_profile: PolicyProfile) -> BaseModelAdapter:
+def _create_inference_policy(name: str, *, policy_profile: PolicyProfile) -> BaseInferencePolicy:
     try:
-        adapter = create_registered("model_adapter", name, policy_profile=policy_profile)
+        policy = create_registered("policy", name, policy_profile=policy_profile)
     except KeyError as exc:
-        raise ValidationRuntimeError(f"unknown model adapter: {name}") from exc
-    if not isinstance(adapter, BaseModelAdapter):
-        raise TypeError(f"adapter {name} is not a BaseModelAdapter")
-    return adapter
+        raise ValidationRuntimeError(f"unknown policy: {name}") from exc
+    if not isinstance(policy, BaseInferencePolicy):
+        raise TypeError(f"policy {name} is not a BaseInferencePolicy")
+    return policy
 
 
-def _create_policy(name: str, model_adapter_name: str, *, policy_profile: PolicyProfile) -> Policy:
+def _create_robot_policy(name: str, policy_name: str, *, policy_profile: PolicyProfile) -> Policy:
     return ModelPolicy(
         name=name,
-        model_adapter=_create_model_adapter(model_adapter_name, policy_profile=policy_profile),
+        inference_policy=_create_inference_policy(policy_name, policy_profile=policy_profile),
     )
 
-
-def _create_embodiment_adapter(name: str) -> BaseEmbodimentAdapter:
-    try:
-        adapter = create_registered("embodiment_adapter", name)
-    except KeyError as exc:
-        raise ValidationRuntimeError(f"unknown embodiment adapter: {name}") from exc
-    if not isinstance(adapter, BaseEmbodimentAdapter):
-        raise TypeError(f"adapter {name} is not a BaseEmbodimentAdapter")
-    return adapter

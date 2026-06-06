@@ -19,7 +19,6 @@ class RpcObservationSensor:
 
     observation: dict[str, Any]
     sensor_name: str = "policy_rpc_observation"
-    field_name: str = "rpc_observation"
 
     def name(self) -> str:
         """Return the sensor name."""
@@ -27,5 +26,8 @@ class RpcObservationSensor:
 
     def read(self, data: RobotData) -> None:
         """Write the RPC observation into robot data."""
-        data.sensors.update(self.field_name, dict(self.observation))
+        if self.sensor_name in self.observation:
+            data.sensors.update(self.sensor_name, self.observation[self.sensor_name])
+            return
+        data.sensors.update(self.sensor_name, dict(self.observation))
         data.observation = data.observation.__class__(dict(self.observation))

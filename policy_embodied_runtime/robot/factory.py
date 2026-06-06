@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from policy_embodied_runtime.robot.actuator import Actuator, RecordingActuator
-from policy_embodied_runtime.robot.devices.rpc import RpcActionActuator, RpcObservationSensor
+from policy_embodied_runtime.robot.devices.rpc import RpcActionActuator, RpcFeedbackActuator, RpcObservationSensor
 from policy_embodied_runtime.robot.devices.st3215 import St3215ServoActuator, St3215ServoConfig, St3215ServoSensor
-from policy_embodied_runtime.robot.profile import DeviceConfig, RobotProfile
+from policy_embodied_runtime.robot.profile import DeviceConfig, DeviceLink, RobotProfile
 from policy_embodied_runtime.robot.sensor import Sensor, StaticSensor
 from policy_embodied_runtime.transport import Transport
 from policy_embodied_runtime.transport.serial import SerialConfig, SerialTransport
@@ -24,60 +24,69 @@ class BuiltRobot:
 
 def build_robot(profile: RobotProfile) -> BuiltRobot:
     """Build sensors and actuators from a robot profile."""
+    transport_cache: dict[DeviceLink, Transport] = {}
     return BuiltRobot(
-        sensors=[build_sensor(device) for device in profile.sensors],
-        actuators=[build_actuator(device) for device in profile.actuators],
+        sensors=[build_sensor(device, transport_cache) for device in profile.sensors],
+        actuators=[build_actuator(device, transport_cache) for device in profile.actuators],
     )
 
 
-def build_sensor(device: DeviceConfig) -> Sensor:
+def build_sensor(device: DeviceConfig, transport_cache: dict[DeviceLink, Transport] | None = None) -> Sensor:
     """Build one sensor from config."""
-    if device.device_type == "static_sensor":
+    if device.device.type == "static":
         return StaticSensor(
             device.name,
-            _required(device, "field"),
+            device.name,
             _coerce_arg(device.args.get("value", "")),
         )
-    if device.device_type == "policy_rpc_observation":
+    if device.device.type == "rpc":
         return RpcObservationSensor(
             {},
             sensor_name=device.name,
-            field_name=device.args.get("field", "rpc_observation"),
         )
-    if device.device_type == "st3215_servo_sensor":
-        return St3215ServoSensor(device.name, _st3215_config(device), _transport(device))
-    raise ValueError(f"unsupported sensor type '{device.device_type}' for '{device.name}'")
+    if device.device.type == "st3215":
+        return St3215ServoSensor(device.name, _st3215_config(device, is_sensor=True), _transport(device, transport_cache))
+    raise ValueError(f"unsupported sensor device type '{device.device.type}' for '{device.name}'")
 
 
-def build_actuator(device: DeviceConfig) -> Actuator:
+def build_actuator(device: DeviceConfig, transport_cache: dict[DeviceLink, Transport] | None = None) -> Actuator:
     """Build one actuator from config."""
-    if device.device_type == "recording_actuator":
+    if device.device.type == "recording":
         return RecordingActuator(device.name)
-    if device.device_type == "policy_rpc_action":
-        return RpcActionActuator(
-            actuator_name=device.name,
-            field_name=device.args.get("field", "rpc_action"),
-        )
-    if device.device_type == "st3215_servo_actuator":
-        return St3215ServoActuator(device.name, _st3215_config(device), _transport(device))
-    raise ValueError(f"unsupported actuator type '{device.device_type}' for '{device.name}'")
+    if device.device.type == "rpc":
+        mode = device.args.get("mode", "feedback")
+        if mode == "action":
+            return RpcActionActuator(actuator_name=device.name)
+        if mode == "feedback":
+            return RpcFeedbackActuator(actuator_name=device.name)
+        raise ValueError(f"unsupported rpc actuator mode '{mode}' for '{device.name}'")
+    if device.device.type == "st3215":
+        return St3215ServoActuator(device.name, _st3215_config(device, is_sensor=False), _transport(device, transport_cache))
+    raise ValueError(f"unsupported actuator device type '{device.device.type}' for '{device.name}'")
 
 
-def _transport(device: DeviceConfig) -> Transport:
-    transport_type = device.args.get("transport", "serial")
-    if transport_type == "serial":
-        return SerialTransport(SerialConfig.from_args(device.args))
-    raise ValueError(f"unsupported transport type '{transport_type}' for '{device.name}'")
+def _transport(
+    device: DeviceConfig,
+    transport_cache: dict[DeviceLink, Transport] | None = None,
+) -> Transport:
+    if device.device.type == "st3215":
+        cache = transport_cache if transport_cache is not None else {}
+        if device.device not in cache:
+            cache[device.device] = SerialTransport(
+                SerialConfig.from_args({"path": device.device.path, **device.args})
+            )
+        return cache[device.device]
+    raise ValueError(f"device '{device.name}' does not use a transport")
 
 
-def _st3215_config(device: DeviceConfig) -> St3215ServoConfig:
+def _st3215_config(device: DeviceConfig, *, is_sensor: bool) -> St3215ServoConfig:
     servo_id = _int_arg(device, "servo_id", fallback="device_id")
     device_id = _int_arg(device, "device_id", fallback="servo_id")
     return St3215ServoConfig(
         servo_id=servo_id,
         device_id=device_id,
-        feedback_field=device.name if device.device_type.endswith("_sensor") else None,
-        command_field=device.name if device.device_type.endswith("_actuator") else None,
+        feedback_field=device.name if is_sensor else None,
+        command_field=device.name if not is_sensor else None,
         max_position_units=_int_arg(device, "max_position_units", default=4095),
         speed_units=_int_arg(device, "speed_units", default=0),
         time_units=_int_arg(device, "time_units", default=0),

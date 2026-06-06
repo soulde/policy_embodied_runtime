@@ -7,8 +7,8 @@ class PolicyRuntimeError(Exception):
     """Base runtime error."""
 
 
-class AdapterNotFoundError(PolicyRuntimeError):
-    """Raised when a configured adapter is not registered."""
+class PluginNotFoundError(PolicyRuntimeError):
+    """Raised when a configured plugin is not registered."""
 
 
 class SessionNotFoundError(PolicyRuntimeError):

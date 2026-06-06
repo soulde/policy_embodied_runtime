@@ -9,11 +9,19 @@ from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
+class DeviceLink:
+    """Physical device link shared by robot sensors and actuators."""
+
+    type: str
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
 class DeviceConfig:
-    """Robot device configuration."""
+    """Robot sensor or actuator configuration."""
 
     name: str
-    device_type: str
+    device: DeviceLink
     args: dict[str, str] = field(default_factory=dict)
 
 
@@ -42,17 +50,31 @@ def _device_from_mapping(kind: str, data: dict[str, Any]) -> DeviceConfig:
     if not isinstance(data, dict):
         raise ValueError(f"{kind} entry must be an object")
     name = str(data.get("name", "")).strip()
-    device_type = str(data.get("type", "")).strip()
     if not name:
         raise ValueError(f"{kind} entry is missing name")
-    if not device_type:
-        raise ValueError(f"{kind}.{name} is missing type")
+    device = _device_link_from_mapping(kind, name, data.get("device"))
+    raw_args = data.get("args", {})
+    if raw_args is None:
+        raw_args = {}
+    if not isinstance(raw_args, dict):
+        raise ValueError(f"{kind}.{name}.args must be an object")
     args = {
         str(key): _json_arg_value(value)
-        for key, value in data.items()
-        if key not in {"name", "type"}
+        for key, value in raw_args.items()
     }
-    return DeviceConfig(name=name, device_type=device_type, args=args)
+    return DeviceConfig(name=name, device=device, args=args)
+
+
+def _device_link_from_mapping(kind: str, name: str, data: Any) -> DeviceLink:
+    if not isinstance(data, dict):
+        raise ValueError(f"{kind}.{name}.device must be an object")
+    device_type = str(data.get("type", "")).strip()
+    path = str(data.get("path", "")).strip()
+    if not device_type:
+        raise ValueError(f"{kind}.{name}.device is missing type")
+    if not path:
+        raise ValueError(f"{kind}.{name}.device is missing path")
+    return DeviceLink(type=device_type, path=path)
 
 
 def _json_arg_value(value: Any) -> str:

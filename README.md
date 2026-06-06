@@ -1,15 +1,14 @@
 # Embodied Policy Runtime
 
-`policy_embodied_runtime` is an embodied policy runtime for VLA, imitation, and other policy inference workloads. It provides a policy runtime, robot input/output abstractions, model adapters, embodiment adapters, JSON protocol validation, ZMQ transport, and SO-ARM101 simulation assets.
+`policy_embodied_runtime` is an embodied policy runtime for VLA, imitation, and other policy inference workloads. It provides a policy runtime, robot input/output abstractions, policy implementations, JSON protocol validation, ZMQ transport, and SO-ARM101 simulation assets.
 
 ## Scope Boundary
 
 This project does:
 
 - robot-owned policy runtime and session lifecycle
-- model adapters
-- embodiment adapters
-- policy profile and embodiment profile validation
+- policy implementations
+- policy profile validation
 - ZMQ transport for policy RPC
 - preprocess, postprocess, and validation placeholders
 - robot `Sensor` and `Actuator` interfaces
@@ -28,7 +27,7 @@ This project does not do:
 - `transport/`: low-level communication implementations in the `rustyRobot` sense; examples include ZMQ, serial, CAN, USB2CAN, and virtual serial
 - `protocol/`: JSON policy RPC envelope and payload contracts plus protocol codec/errors
 - `apps/`: runnable entrypoints such as the ZMQ policy RPC robot host
-- `adapters/`, `models/`: plugin implementations consumed by the robot layer
+- `models/`: policy implementations consumed by the robot layer
 - `sim/`: simulators, including the migrated SO-ARM101 MuJoCo + virtual ST3215 serial simulator
 - `integrations/`: external usage examples only; ROS2 remains optional
 
@@ -45,13 +44,13 @@ Anything that enters the robot is a `Sensor`, including physical sensors, remote
 Server flow in MVP:
 
 1. Decode and validate request envelope.
-2. Validate embodiment-specific input.
+2. Validate policy input.
 3. Map incoming observation into canonical observation.
 4. Run preprocess pipeline.
-5. Call model adapter inference.
+5. Call policy inference.
 6. Run postprocess pipeline such as action clipping.
 7. Validate and package the response.
-8. Map canonical action into embodiment action.
+8. Return policy action.
 9. Encode response envelope.
 
 ## Development
@@ -78,8 +77,7 @@ Run the ZMQ policy RPC host:
 
 ```bash
 policy-zmq-rpc-host \
-  --policy-profile policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json \
-  --embodiment-profile policy_embodied_runtime/examples/embodiment_profiles/dummy_embodiment_profile.json
+  --policy-profile policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json
 ```
 
 Run the SO-ARM101 MuJoCo simulator:
@@ -95,13 +93,23 @@ It exposes a stable virtual serial path at `/tmp/rusty_robot_soarm101`.
 
 - `policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json`: SO-ARM101 sensors, actuators, serial transport, and ST3215 device IDs
 - `policy_embodied_runtime/examples/robot_profiles/default_rpc_robot_profile.json`: default RPC sensor/actuator robot I/O profile
-- `policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json`: MVP single-step dummy adapter
-- `policy_embodied_runtime/examples/policy_profiles/pi0_like_policy_profile.json`: placeholder chunked adapter shape
+- `policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json`: MVP single-step dummy policy
+- `policy_embodied_runtime/examples/policy_profiles/pi0_like_policy_profile.json`: placeholder chunked policy shape
 - `policy_embodied_runtime/examples/policy_profiles/soarm101_sim_policy_profile.json`: policy bindings from SO-ARM101 robot data names to canonical model fields
-- `policy_embodied_runtime/examples/embodiment_profiles/dummy_embodiment_profile.json`: direct mapping profile
-- `policy_embodied_runtime/examples/embodiment_profiles/franka_like_profile.json`: Franka-like semantic field mapping
 
-Robot profiles describe robot data interfaces and hardware links only. Policy selection, model adapter choice, canonical input/output schemas, and preprocess/postprocess bindings belong to policy profiles.
+Robot profiles describe robot data interfaces and hardware links only. Policy selection, policy choice, canonical input/output schemas, and preprocess/postprocess bindings belong to policy profiles.
+
+Robot profile entries use the same shape for sensors and actuators:
+
+```json
+{
+  "name": "shoulder_pan_position",
+  "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+  "args": {"baud_rate": 1000000, "device_id": 1, "servo_id": 1}
+}
+```
+
+`name` is the unique robot data field. `device.type` selects the hardware/network device model, and `device.path` is the physical endpoint, such as a serial path or RPC address. Sensors or actuators with the same device type and path reuse the same underlying transport. Device-specific options live under `args`.
 
 ## Protocol Contract
 
@@ -118,12 +126,12 @@ All messages use a JSON envelope with:
 
 Observation and action payloads must use named semantic fields. Bare arrays are not permitted at protocol level.
 
-For embodiment adapters that declare nested `source_field` paths such as `arm.joint_position` or `camera.front_rgb`, the policy RPC observation payload may include those JSON object paths directly under `observation`. The runtime maps them into canonical fields before model inference.
+Policy RPC observations and actions use the canonical fields declared by the active policy profile.
 
 ## Status
 
 Current implementation is staged:
 
 - Phase 1-2: scaffold, schemas, config loader, examples, validation tests
-- Phase 3-5: adapter registries, dummy adapters, robot runtime, ZMQ transport
-- Phase 6-9: robot I/O abstractions, example adapters, integration tests, documentation refinement
+- Phase 3-5: policy registry, dummy policy, robot runtime, ZMQ transport
+- Phase 6-9: robot I/O abstractions, example policies, integration tests, documentation refinement

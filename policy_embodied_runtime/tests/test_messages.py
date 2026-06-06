@@ -29,7 +29,7 @@ def test_message_envelope_requires_non_empty_request_id() -> None:
         )
 
 
-def test_observation_request_accepts_adapter_specific_nested_fields() -> None:
+def test_observation_request_accepts_policy_specific_nested_fields() -> None:
     request = ObservationRequest.model_validate(
         {
             "observation": {
@@ -44,6 +44,6 @@ def test_observation_request_accepts_adapter_specific_nested_fields() -> None:
             }
         }
     )
-    adapter_input = request.observation.as_adapter_input()
-    assert adapter_input["arm"]["joint_position"]["unit"] == "rad"
-    assert adapter_input["task"]["text"]["text"] == "pick"
+    policy_input = request.observation.as_policy_input()
+    assert policy_input["arm"]["joint_position"]["unit"] == "rad"
+    assert policy_input["task"]["text"]["text"] == "pick"

@@ -1,5 +1,5 @@
-"""Configuration loaders for policy and embodiment profiles."""
+"""Configuration loaders for robot and policy profiles."""
 
-from policy_embodied_runtime.profiles.loader import load_embodiment_profile, load_policy_profile
+from policy_embodied_runtime.profiles.loader import load_policy_profile, load_robot_profile
 
-__all__ = ["load_policy_profile", "load_embodiment_profile"]
+__all__ = ["load_policy_profile", "load_robot_profile"]

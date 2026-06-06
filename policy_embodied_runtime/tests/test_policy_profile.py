@@ -30,7 +30,7 @@ def test_policy_profile_rejects_duplicate_schema_names() -> None:
             {
                 "id": "bad",
                 "version": "0.1.0",
-                "model_adapter": "dummy",
+                "policy": "dummy",
                 "canonical_observation_schema": [
                     {
                         "name": "joint_position",

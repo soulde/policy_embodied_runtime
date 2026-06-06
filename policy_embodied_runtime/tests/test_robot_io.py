@@ -25,7 +25,7 @@ def test_rpc_is_modeled_as_sensor_and_actuator() -> None:
     data.set_action(RobotAction({"joint_position_delta": {"values": [0.1]}}))
     actuator.write(data)
 
-    assert data.sensors.get("rpc_observation") == {"joint_position": {"values": [0.0]}}
+    assert data.sensors.get("policy_rpc_observation") == {"joint_position": {"values": [0.0]}}
     assert actuator.response == {"joint_position_delta": {"values": [0.1]}}
 
 

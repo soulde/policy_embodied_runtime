@@ -73,8 +73,8 @@ class ObservationPayload(BaseModel):
     image: ImageValue | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
 
-    def as_adapter_input(self) -> dict[str, Any]:
-        """Return the observation payload including adapter-specific extra fields."""
+    def as_policy_input(self) -> dict[str, Any]:
+        """Return the observation payload including policy-specific extra fields."""
         payload = self.model_dump(exclude_none=True)
         extra_fields = getattr(self, "__pydantic_extra__", None) or {}
         for key, value in extra_fields.items():
@@ -85,7 +85,7 @@ class ObservationPayload(BaseModel):
 class ActionPayload(BaseModel):
     """Named action fields returned by the server."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     joint_position_delta: JointStateValue | None = None
     gripper_command: GripperValue | None = None
@@ -94,7 +94,13 @@ class ActionPayload(BaseModel):
 
     @model_validator(mode="after")
     def validate_action_modes(self) -> "ActionPayload":
-        if not self.action_chunk and self.joint_position_delta is None and self.gripper_command is None:
+        extra_fields = getattr(self, "__pydantic_extra__", None) or {}
+        if (
+            not extra_fields
+            and not self.action_chunk
+            and self.joint_position_delta is None
+            and self.gripper_command is None
+        ):
             raise ValueError("action payload must contain a single-step action or an action_chunk")
         return self
 

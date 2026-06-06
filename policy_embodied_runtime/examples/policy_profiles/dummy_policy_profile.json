@@ -1,7 +1,7 @@
 {
   "id": "dummy-policy",
   "version": "0.1.0",
-  "model_adapter": "dummy",
+  "policy": "dummy",
   "model": {
     "checkpoint": "dummy.ckpt",
     "device": "cpu",

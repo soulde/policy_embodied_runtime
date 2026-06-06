@@ -1,4 +1,4 @@
-"""Global auto-registration for adapters and processors."""
+"""Global auto-registration for plugins and processors."""
 
 from __future__ import annotations
 

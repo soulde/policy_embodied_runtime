@@ -1,29 +1,28 @@
 import pytest
 
-import policy_embodied_runtime.adapters  # noqa: F401
 import policy_embodied_runtime.models  # noqa: F401
 
 from policy_embodied_runtime.robot.registry import AutoRegisteringMeta, create_registered, get_registry_entries
-from policy_embodied_runtime.models.base import BaseModelAdapter
+from policy_embodied_runtime.models.policy import BaseInferencePolicy
 from policy_embodied_runtime.preprocess.base import BasePreprocessor
 from policy_embodied_runtime.protocol.policy_profile import PolicyProfile
 
 
-def test_model_adapter_auto_registry_builds_dummy() -> None:
-    adapter = create_registered("model_adapter", "dummy", policy_profile=_dummy_policy_profile())
-    assert isinstance(adapter, BaseModelAdapter)
-    assert adapter.capabilities()["backend"] == "dummy"
+def test_policy_auto_registry_builds_dummy() -> None:
+    policy = create_registered("policy", "dummy", policy_profile=_dummy_policy_profile())
+    assert isinstance(policy, BaseInferencePolicy)
+    assert policy.capabilities()["backend"] == "dummy"
 
 
-def test_auto_registry_rejects_unknown_adapter() -> None:
+def test_auto_registry_rejects_unknown_policy() -> None:
     with pytest.raises(KeyError):
-        create_registered("embodiment_adapter", "missing")
+        create_registered("policy", "missing", policy_profile=_dummy_policy_profile())
 
 
 def test_auto_registry_exposes_registered_names() -> None:
-    entries = get_registry_entries("embodiment_adapter")
+    entries = get_registry_entries("policy")
     assert "dummy" in entries
-    assert "franka_like" in entries
+    assert "pi0_like" in entries
 
 
 def test_auto_registry_defaults_to_snake_case_class_name() -> None:
@@ -40,7 +39,7 @@ def _dummy_policy_profile() -> PolicyProfile:
         {
             "id": "dummy-policy",
             "version": "0.1.0",
-            "model_adapter": "dummy",
+            "policy": "dummy",
             "canonical_observation_schema": [
                 {
                     "name": "joint_position",

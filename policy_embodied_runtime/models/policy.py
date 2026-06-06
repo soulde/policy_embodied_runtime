@@ -1,4 +1,4 @@
-"""Base model adapter interface."""
+"""Base policy interface."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ from policy_embodied_runtime.robot.registry import AutoRegisteringMeta
 from policy_embodied_runtime.robot.types import SessionContext
 
 
-class BaseModelAdapter(ABC, metaclass=AutoRegisteringMeta):
-    """Base interface for model adapters."""
+class BaseInferencePolicy(ABC, metaclass=AutoRegisteringMeta):
+    """Base interface for policies."""
 
-    __registry_category__ = "model_adapter"
+    __registry_category__ = "policy"
 
     @abstractmethod
     def reset(self, session_id: str) -> None:

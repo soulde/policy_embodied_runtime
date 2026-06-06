@@ -1,13 +1,13 @@
-"""Pi0-like placeholder model adapter."""
+"""Pi0-like placeholder policy."""
 
 from __future__ import annotations
 
 from policy_embodied_runtime.robot.types import SessionContext
-from policy_embodied_runtime.models.pipeline import BasePipelineModelAdapter
+from policy_embodied_runtime.models.pipeline_policy import BasePipelinePolicy
 from policy_embodied_runtime.protocol.policy_profile import PolicyProfile
 
 
-class Pi0LikeModelAdapter(BasePipelineModelAdapter):
+class Pi0LikePolicy(BasePipelinePolicy):
     """Structured placeholder for a future Pi0-style model backend."""
 
     __registry_name__ = "pi0_like"

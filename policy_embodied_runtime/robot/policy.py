@@ -45,18 +45,18 @@ class DummyPolicy(Policy):
 
 @dataclass(slots=True)
 class ModelPolicy(Policy):
-    """Policy implementation backed by the project's model adapter registry."""
+    """Robot policy backed by a registered inference policy."""
 
     name: str
-    model_adapter: Any
+    inference_policy: Any
 
     def reset(self, session_id: str) -> None:
-        self.model_adapter.reset(session_id)
+        self.inference_policy.reset(session_id)
 
     def infer(self, data: RobotData, session_ctx: SessionContext) -> None:
-        action = self.model_adapter.infer(data.observation.as_dict(), session_ctx)
+        action = self.inference_policy.infer(data.observation.as_dict(), session_ctx)
         data.set_action(RobotAction(action))
 
     def capabilities(self) -> dict[str, Any]:
-        capabilities = self.model_adapter.capabilities()
+        capabilities = self.inference_policy.capabilities()
         return {"name": self.name, **capabilities}

@@ -39,7 +39,6 @@ def test_zmq_rpc_robot_host_handles_health_and_infer() -> None:
     host = ZmqRpcRobotHost(
         endpoint=endpoint,
         policy_profile="policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json",
-        embodiment_profile="policy_embodied_runtime/examples/embodiment_profiles/dummy_embodiment_profile.json",
     )
     thread = threading.Thread(target=host.serve_forever, daemon=True)
     thread.start()
@@ -100,13 +99,12 @@ def test_zmq_rpc_robot_host_handles_health_and_infer() -> None:
         context.term()
 
 
-def test_zmq_rpc_robot_host_handles_nested_vla_observation() -> None:
+def test_zmq_rpc_robot_host_handles_vla_observation() -> None:
     endpoint = _endpoint_name("transport-vla")
     context = zmq.Context()
     host = ZmqRpcRobotHost(
         endpoint=endpoint,
         policy_profile="policy_embodied_runtime/examples/policy_profiles/pi0_like_policy_profile.json",
-        embodiment_profile="policy_embodied_runtime/examples/embodiment_profiles/franka_like_profile.json",
     )
     thread = threading.Thread(target=host.serve_forever, daemon=True)
     thread.start()
@@ -126,29 +124,25 @@ def test_zmq_rpc_robot_host_handles_nested_vla_observation() -> None:
                         timestamp_ns=1,
                         payload={
                             "observation": {
-                                "arm": {
-                                    "joint_position": {
-                                        "values": [0.0] * 7,
-                                        "joint_names": [
-                                            "panda_joint1",
-                                            "panda_joint2",
-                                            "panda_joint3",
-                                            "panda_joint4",
-                                            "panda_joint5",
-                                            "panda_joint6",
-                                            "panda_joint7",
-                                        ],
-                                        "unit": "rad",
-                                    }
+                                "joint_position": {
+                                    "values": [0.0] * 7,
+                                    "joint_names": [
+                                        "panda_joint1",
+                                        "panda_joint2",
+                                        "panda_joint3",
+                                        "panda_joint4",
+                                        "panda_joint5",
+                                        "panda_joint6",
+                                        "panda_joint7",
+                                    ],
+                                    "unit": "rad",
                                 },
-                                "gripper": {"width": {"value": 0.04, "unit": "m"}},
-                                "task": {"text": {"text": "move to the cup"}},
-                                "camera": {
-                                    "front_rgb": {
-                                        "encoding": "uri",
-                                        "data": "memory://rgb/front",
-                                        "mime_type": "image/jpeg",
-                                    }
+                                "gripper_width": {"value": 0.04, "unit": "m"},
+                                "task_text": {"text": "move to the cup"},
+                                "image": {
+                                    "encoding": "uri",
+                                    "data": "memory://rgb/front",
+                                    "mime_type": "image/jpeg",
                                 },
                                 "meta": {"source": "transport-vla-test"},
                             }
