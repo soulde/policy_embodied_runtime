@@ -17,6 +17,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="SO-ARM101 MuJoCo ST3215 serial simulator")
     parser.add_argument("--scene", type=Path, default=DEFAULT_SCENE)
     parser.add_argument("--hz", type=float, default=200.0)
+    parser.add_argument("--gui", action="store_true")
     args = parser.parse_args()
 
     sim = SoArm101Sim(args.scene)
@@ -27,18 +28,51 @@ def main() -> None:
         try:
             print(f"{VIRTUAL_SERIAL_PATH} -> {serial.path}", flush=True)
             bus = St3215SerialBus(serial, sim)
-            next_step = time.monotonic()
-            while True:
+            try:
+                if args.gui:
+                    run_gui_loop(sim, bus, period)
+                else:
+                    run_loop(sim, bus, period)
+            except KeyboardInterrupt:
+                pass
+        finally:
+            remove_symlink(VIRTUAL_SERIAL_PATH, serial.path)
+
+
+def run_loop(sim: SoArm101Sim, bus: St3215SerialBus, period: float) -> None:
+    next_step = time.monotonic()
+    try:
+        while True:
+            bus.poll()
+            sim.step()
+            next_step += period
+            sleep_for = next_step - time.monotonic()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            else:
+                next_step = time.monotonic()
+    except KeyboardInterrupt:
+        pass
+
+
+def run_gui_loop(sim: SoArm101Sim, bus: St3215SerialBus, period: float) -> None:
+    import mujoco.viewer
+
+    next_step = time.monotonic()
+    try:
+        with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:
+            while viewer.is_running():
                 bus.poll()
                 sim.step()
+                viewer.sync()
                 next_step += period
                 sleep_for = next_step - time.monotonic()
                 if sleep_for > 0:
                     time.sleep(sleep_for)
                 else:
                     next_step = time.monotonic()
-        finally:
-            remove_symlink(VIRTUAL_SERIAL_PATH, serial.path)
+    except KeyboardInterrupt:
+        pass
 
 
 def create_symlink(link: Path, target: str) -> None:

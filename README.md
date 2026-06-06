@@ -73,21 +73,31 @@ source .venv/bin/activate
 pytest policy_embodied_runtime/tests
 ```
 
-Run the robot runtime host:
+The basic runtime flow has three roles:
+
+1. An environment or hardware process exposes the robot devices declared by the robot profile. In simulation this is `policy-soarm101-sim`; on real hardware this is the physical serial/CAN/network device.
+2. `policy-runtime-host` loads the robot profile and policy profile, builds sensors/actuators, runs the sensor threads, calls policy inference, and writes actuator commands.
+3. An upstream input publisher sends robot inputs, such as remote-control commands, network commands, or task requests. For SO-ARM101 simulation this is `policy-soarm101-command-publisher`.
+
+Run a minimal runtime host:
 
 ```bash
 policy-runtime-host \
   --policy-profile policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json
 ```
 
-Run the SO-ARM101 MuJoCo simulator:
+Run the SO-ARM101 flow with simulation as the environment:
 
 ```bash
 uv pip install -e ".[dev]"
-policy-soarm101-sim
+policy-soarm101-sim --gui
+policy-runtime-host \
+  --policy-profile policy_embodied_runtime/examples/policy_profiles/soarm101_sim_policy_profile.json \
+  --robot-profile policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json
+policy-soarm101-command-publisher
 ```
 
-It exposes a stable virtual serial path at `/tmp/rusty_robot_soarm101`.
+The simulator exposes a stable virtual serial path at `/tmp/rusty_robot_soarm101`, matching the SO-ARM101 robot profile. In a real deployment, keep the same runtime host flow and replace the simulator/profile path, policy profile, and input publisher with the real robot and policy.
 
 ## Config Files
 

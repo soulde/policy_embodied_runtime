@@ -129,6 +129,8 @@ def main() -> None:
     )
     try:
         host.serve_forever()
+    except KeyboardInterrupt:
+        pass
     finally:
         host.stop()
 

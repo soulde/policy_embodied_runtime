@@ -115,7 +115,7 @@ class St3215Protocol:
 
     def decode_reading(self, frame: ProtocolFrame) -> DeviceReading:
         """Decode an ST3215 packet frame into a device reading."""
-        packet = decode_packet(frame.payload)
+        packet = decode_packet(first_complete_packet(frame.payload))
         return DeviceReading(
             device_id=packet.device_id,
             payload=bytes([packet.instruction_or_status]) + packet.parameters,
@@ -159,6 +159,22 @@ def decode_packet(packet: bytes) -> _DecodedPacket:
             f"invalid ST3215 checksum: expected 0x{expected:02x}, got 0x{actual:02x}"
         )
     return _DecodedPacket(device_id, instruction_or_status, parameters)
+
+
+def first_complete_packet(payload: bytes) -> bytes:
+    """Return the first complete ST3215 packet from a serial payload."""
+    header_index = payload.find(HEADER)
+    if header_index < 0:
+        raise St3215ProtocolError("invalid ST3215 packet header")
+    payload = payload[header_index:]
+    if len(payload) < 4:
+        raise St3215ProtocolError(f"ST3215 packet is too short: {len(payload)}")
+    expected_len = payload[3] + 4
+    if len(payload) < expected_len:
+        raise St3215ProtocolError(
+            f"incomplete ST3215 packet: expected {expected_len}, got {len(payload)}"
+        )
+    return payload[:expected_len]
 
 
 def checksum(device_id: int, length: int, instruction_or_status: int, parameters: bytes) -> int:

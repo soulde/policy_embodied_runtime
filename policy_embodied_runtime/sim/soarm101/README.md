@@ -12,7 +12,7 @@ uv pip install -e ".[dev]"
 Run the simulator:
 
 ```bash
-policy-soarm101-sim
+policy-soarm101-sim --gui
 ```
 
 The simulator creates `/tmp/rusty_robot_soarm101` as a stable symlink to the
@@ -26,6 +26,16 @@ Verify the virtual serial loop:
 
 ```bash
 policy-soarm101-verify-serial
+```
+
+Run the full three-process control flow:
+
+```bash
+policy-soarm101-sim --gui
+policy-runtime-host \
+  --policy-profile policy_embodied_runtime/examples/policy_profiles/soarm101_sim_policy_profile.json \
+  --robot-profile policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json
+policy-soarm101-command-publisher
 ```
 
 Supported ST3215 subset:

@@ -30,10 +30,14 @@ class St3215ServoSensor:
         self.endpoint.send_command(
             St3215Protocol.read_present_position_command(self.config.device_id)
         )
-        reading = self.endpoint.receive_reading()
-        if reading is None:
-            return
-        status = St3215Protocol.parse_status(reading)
         if not self.config.feedback_field:
             raise ValueError(f"ST3215 sensor '{self._name}' is missing robot data field")
-        data.sensors.update(self.config.feedback_field, servo_feedback_from_status(self.config, status))
+        for _ in range(12):
+            reading = self.endpoint.receive_reading()
+            if reading is None:
+                return
+            status = St3215Protocol.parse_status(reading)
+            if status.device_id != self.config.device_id or len(status.parameters) < 2:
+                continue
+            data.sensors.update(self.config.feedback_field, servo_feedback_from_status(self.config, status))
+            return
