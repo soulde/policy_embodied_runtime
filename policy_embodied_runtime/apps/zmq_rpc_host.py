@@ -10,13 +10,10 @@ from pathlib import Path
 import zmq
 from zmq.error import Again, ZMQError
 
-from policy_embodied_runtime.profiles.loader import load_policy_profile, load_robot_profile
-from policy_embodied_runtime.robot.policy_runtime import PolicyRuntime
+from policy_embodied_runtime.robot.runtime import Runtime
 from policy_embodied_runtime.protocol.messages import MessageEnvelope, SCHEMA_VERSION
 from policy_embodied_runtime.protocol.codec import decode_envelope, encode_envelope
 from policy_embodied_runtime.protocol.errors import ProtocolError
-from policy_embodied_runtime.robot.devices.rpc import RpcActionActuator, RpcObservationSensor
-from policy_embodied_runtime.robot.factory import BuiltRobot, build_robot
 from policy_embodied_runtime.transport.zmq import ZmqRepTransport, resolve_endpoint
 
 
@@ -31,10 +28,11 @@ class ZmqRpcRobotHost:
         policy_profile: str | Path,
         robot_profile: str | Path | None = None,
     ) -> None:
-        self.runtime = PolicyRuntime(
-            policy_profile=load_policy_profile(policy_profile),
+        self.runtime = Runtime.from_profiles(
+            policy_profile=policy_profile,
+            robot_profile=_default_robot_profile(robot_profile),
         )
-        self.robot = _load_or_default_robot(robot_profile)
+        self.runtime.open()
         self.endpoint = resolve_endpoint(endpoint)
         self.timeout_ms = timeout_ms
         self._context = zmq.Context()
@@ -61,6 +59,7 @@ class ZmqRpcRobotHost:
         """Stop the host and close sockets."""
         self._stop_event.set()
         self._wake_host()
+        self.runtime.close()
 
     def _serve_socket(self) -> None:
         try:
@@ -78,14 +77,7 @@ class ZmqRpcRobotHost:
         self._socket.send(encode_envelope(response))
 
     def _handle_rpc_envelope(self, envelope: MessageEnvelope) -> MessageEnvelope:
-        if envelope.type == "observation_request":
-            sensor = _rpc_sensor(self.robot)
-            sensor.observation = envelope.payload.get("observation", {})
-        response = self.runtime.handle_envelope(envelope)
-        if response.type == "action_response":
-            actuator = _rpc_actuator(self.robot)
-            actuator.response = dict(response.payload.get("action", {}))
-        return response
+        return self.runtime.handle_envelope(envelope)
 
     def _wake_host(self) -> None:
         wake_context = zmq.Context()
@@ -142,28 +134,10 @@ def main() -> None:
     finally:
         host.stop()
 
-def _load_or_default_robot(path: str | Path | None) -> BuiltRobot:
-    if path is None:
-        profile = load_robot_profile(
-            Path("policy_embodied_runtime/examples/robot_profiles/default_rpc_robot_profile.json")
-        )
-    else:
-        profile = load_robot_profile(path)
-    return build_robot(profile)
-
-
-def _rpc_sensor(robot: BuiltRobot) -> RpcObservationSensor:
-    for sensor in robot.sensors:
-        if isinstance(sensor, RpcObservationSensor):
-            return sensor
-    raise RuntimeError("robot profile does not define a policy_rpc sensor")
-
-
-def _rpc_actuator(robot: BuiltRobot) -> RpcActionActuator:
-    for actuator in robot.actuators:
-        if isinstance(actuator, RpcActionActuator):
-            return actuator
-    raise RuntimeError("robot profile does not define a policy_rpc actuator")
+def _default_robot_profile(path: str | Path | None) -> str | Path:
+    if path is not None:
+        return path
+    return Path("policy_embodied_runtime/examples/robot_profiles/default_rpc_robot_profile.json")
 
 
 if __name__ == "__main__":

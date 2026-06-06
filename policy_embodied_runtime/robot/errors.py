@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 
-class PolicyRuntimeError(Exception):
+class RobotRuntimeError(Exception):
     """Base runtime error."""
 
 
-class PluginNotFoundError(PolicyRuntimeError):
+class PluginNotFoundError(RobotRuntimeError):
     """Raised when a configured plugin is not registered."""
 
 
-class SessionNotFoundError(PolicyRuntimeError):
+class SessionNotFoundError(RobotRuntimeError):
     """Raised when a referenced session does not exist."""
 
 
-class ValidationRuntimeError(PolicyRuntimeError):
+class ValidationRuntimeError(RobotRuntimeError):
     """Raised when request payload validation fails."""

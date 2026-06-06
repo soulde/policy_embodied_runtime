@@ -20,6 +20,8 @@ class BuiltRobot:
 
     sensors: list[Sensor]
     actuators: list[Actuator]
+    sensor_devices: dict[str, DeviceLink]
+    actuator_devices: dict[str, DeviceLink]
 
 
 def build_robot(profile: RobotProfile) -> BuiltRobot:
@@ -28,6 +30,8 @@ def build_robot(profile: RobotProfile) -> BuiltRobot:
     return BuiltRobot(
         sensors=[build_sensor(device, transport_cache) for device in profile.sensors],
         actuators=[build_actuator(device, transport_cache) for device in profile.actuators],
+        sensor_devices={device.name: device.device for device in profile.sensors},
+        actuator_devices={device.name: device.device for device in profile.actuators},
     )
 
 
