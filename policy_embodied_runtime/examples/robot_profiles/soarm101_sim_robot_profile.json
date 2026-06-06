@@ -32,32 +32,32 @@
     },
     {
       "name": "shoulder_pan_position",
-      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "device": {"type": "st3215", "path": "/tmp/rusty_robot_soarm101"},
       "args": {"baud_rate": 1000000, "device_id": 1, "servo_id": 1}
     },
     {
       "name": "shoulder_lift_position",
-      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "device": {"type": "st3215", "path": "/tmp/rusty_robot_soarm101"},
       "args": {"baud_rate": 1000000, "device_id": 2, "servo_id": 2}
     },
     {
       "name": "elbow_position",
-      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "device": {"type": "st3215", "path": "/tmp/rusty_robot_soarm101"},
       "args": {"baud_rate": 1000000, "device_id": 3, "servo_id": 3}
     },
     {
       "name": "wrist_pitch_position",
-      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "device": {"type": "st3215", "path": "/tmp/rusty_robot_soarm101"},
       "args": {"baud_rate": 1000000, "device_id": 4, "servo_id": 4}
     },
     {
       "name": "wrist_roll_position",
-      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "device": {"type": "st3215", "path": "/tmp/rusty_robot_soarm101"},
       "args": {"baud_rate": 1000000, "device_id": 5, "servo_id": 5}
     },
     {
       "name": "gripper_position",
-      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "device": {"type": "st3215", "path": "/tmp/rusty_robot_soarm101"},
       "args": {"baud_rate": 1000000, "device_id": 6, "servo_id": 6}
     }
   ],
@@ -69,32 +69,32 @@
     },
     {
       "name": "shoulder_pan_target",
-      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "device": {"type": "st3215", "path": "/tmp/rusty_robot_soarm101"},
       "args": {"baud_rate": 1000000, "device_id": 1, "servo_id": 1}
     },
     {
       "name": "shoulder_lift_target",
-      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "device": {"type": "st3215", "path": "/tmp/rusty_robot_soarm101"},
       "args": {"baud_rate": 1000000, "device_id": 2, "servo_id": 2}
     },
     {
       "name": "elbow_target",
-      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "device": {"type": "st3215", "path": "/tmp/rusty_robot_soarm101"},
       "args": {"baud_rate": 1000000, "device_id": 3, "servo_id": 3}
     },
     {
       "name": "wrist_pitch_target",
-      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "device": {"type": "st3215", "path": "/tmp/rusty_robot_soarm101"},
       "args": {"baud_rate": 1000000, "device_id": 4, "servo_id": 4}
     },
     {
       "name": "wrist_roll_target",
-      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "device": {"type": "st3215", "path": "/tmp/rusty_robot_soarm101"},
       "args": {"baud_rate": 1000000, "device_id": 5, "servo_id": 5}
     },
     {
       "name": "gripper_target",
-      "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+      "device": {"type": "st3215", "path": "/tmp/rusty_robot_soarm101"},
       "args": {"baud_rate": 1000000, "device_id": 6, "servo_id": 6}
     }
   ]

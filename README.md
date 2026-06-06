@@ -104,7 +104,7 @@ Robot profile entries use the same shape for sensors and actuators:
 ```json
 {
   "name": "shoulder_pan_position",
-  "device": {"type": "st3215", "path": "/tmp/soarm101-serial"},
+  "device": {"type": "st3215", "path": "/tmp/rusty_robot_soarm101"},
   "args": {"baud_rate": 1000000, "device_id": 1, "servo_id": 1}
 }
 ```
