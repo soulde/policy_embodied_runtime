@@ -141,45 +141,31 @@ Result<void> check_peer_fd(int socket_fd) {
     return Result<void>::success();
   }
 
-  bool unexpected_packet = false;
-  bool disconnected = false;
   if ((descriptor.revents & POLLIN) != 0) {
     std::array<std::byte, 64> discarded{};
-    for (;;) {
-      const auto received = recv(socket_fd, discarded.data(), discarded.size(),
-                                 MSG_DONTWAIT);
-      if (received > 0) {
-        unexpected_packet = true;
-        continue;
-      }
-      if (received == 0) {
-        if ((descriptor.revents & (POLLHUP | POLLRDHUP)) != 0) {
-          disconnected = true;
-        } else {
-          unexpected_packet = true;
-        }
-        break;
-      }
-      if (errno == EINTR) {
-        continue;
-      }
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        break;
-      }
-      if (errno == ECONNRESET || errno == ENOTCONN) {
-        disconnected = true;
-        break;
-      }
+    iovec vector{discarded.data(), discarded.size()};
+    msghdr message{};
+    message.msg_iov = &vector;
+    message.msg_iovlen = 1;
+    ssize_t received{};
+    do {
+      // MSG_TRUNC returns the original packet length while SOCK_SEQPACKET
+      // atomically consumes the whole packet, even when it exceeds discarded.
+      received = recvmsg(socket_fd, &message, MSG_DONTWAIT | MSG_TRUNC);
+    } while (received < 0 && errno == EINTR);
+    if (received > 0 ||
+        (received == 0 &&
+         (descriptor.revents & (POLLHUP | POLLRDHUP)) == 0)) {
       return Result<void>::failure(
-          system_error(ErrorCode::io, "recv(unexpected IPC packet)"));
+          {ErrorCode::protocol, "unexpected packet after IPC setup"});
+    }
+    if (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+        errno != ECONNRESET && errno != ENOTCONN) {
+      return Result<void>::failure(
+          system_error(ErrorCode::io, "recvmsg(unexpected IPC packet)"));
     }
   }
-  if (unexpected_packet) {
-    return Result<void>::failure(
-        {ErrorCode::protocol, "unexpected packet after IPC setup"});
-  }
-  if (disconnected ||
-      (descriptor.revents & (POLLRDHUP | POLLHUP | POLLERR | POLLNVAL)) != 0) {
+  if ((descriptor.revents & (POLLRDHUP | POLLHUP | POLLERR | POLLNVAL)) != 0) {
     return Result<void>::failure({ErrorCode::unavailable, "IPC peer disconnected"});
   }
   return Result<void>::success();

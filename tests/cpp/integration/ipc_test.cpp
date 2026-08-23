@@ -695,6 +695,125 @@ TEST(IpcTest, UnexpectedPacketThenDisconnectCannotMaskEndpointFailure) {
   }
 }
 
+TEST(IpcTest, PeerCheckConsumesOnlyOneCompleteUnexpectedPacket) {
+  {
+    auto sockets = make_socket_pair();
+    const int inspection_fd = dup(sockets[0]);
+    const int peer = dup(sockets[1]);
+    ASSERT_GE(inspection_fd, 0);
+    ASSERT_GE(peer, 0);
+    auto server_result = RobotIoIpcServer::create(sockets[0], 1, kGeneration);
+    ASSERT_TRUE(server_result.has_value());
+    auto server = std::move(server_result.value());
+    ASSERT_TRUE(server.send_setup().has_value());
+    auto client_result = RobotIoClient::connect(sockets[1], kGeneration);
+    ASSERT_TRUE(client_result.has_value());
+    auto client = std::move(client_result.value());
+
+    std::array<std::byte, 4096> oversized{};
+    oversized.fill(std::byte{0xa5});
+    const std::byte marker{0x3c};
+    ASSERT_EQ(send(peer, oversized.data(), oversized.size(), MSG_NOSIGNAL),
+              static_cast<ssize_t>(oversized.size()));
+    ASSERT_EQ(send(peer, &marker, sizeof(marker), MSG_NOSIGNAL), 1);
+
+    auto health = server.check_peer();
+    ASSERT_FALSE(health.has_value());
+    EXPECT_EQ(health.error().code, ErrorCode::protocol);
+    std::byte received{};
+    ASSERT_EQ(recv(inspection_fd, &received, sizeof(received), MSG_DONTWAIT), 1);
+    EXPECT_EQ(received, marker);
+    EXPECT_EQ(close(inspection_fd), 0);
+    EXPECT_EQ(close(peer), 0);
+  }
+
+  {
+    auto sockets = make_socket_pair();
+    const int peer = dup(sockets[0]);
+    const int inspection_fd = dup(sockets[1]);
+    ASSERT_GE(peer, 0);
+    ASSERT_GE(inspection_fd, 0);
+    auto server_result = RobotIoIpcServer::create(sockets[0], 1, kGeneration);
+    ASSERT_TRUE(server_result.has_value());
+    auto server = std::move(server_result.value());
+    ASSERT_TRUE(server.send_setup().has_value());
+    auto client_result = RobotIoClient::connect(sockets[1], kGeneration);
+    ASSERT_TRUE(client_result.has_value());
+    auto client = std::move(client_result.value());
+
+    std::array<std::byte, 4096> oversized{};
+    oversized.fill(std::byte{0x5a});
+    const std::byte marker{0xc3};
+    ASSERT_EQ(send(peer, oversized.data(), oversized.size(), MSG_NOSIGNAL),
+              static_cast<ssize_t>(oversized.size()));
+    ASSERT_EQ(send(peer, &marker, sizeof(marker), MSG_NOSIGNAL), 1);
+
+    auto health = client.check_peer();
+    ASSERT_FALSE(health.has_value());
+    EXPECT_EQ(health.error().code, ErrorCode::protocol);
+    std::byte received{};
+    ASSERT_EQ(recv(inspection_fd, &received, sizeof(received), MSG_DONTWAIT), 1);
+    EXPECT_EQ(received, marker);
+    EXPECT_EQ(close(peer), 0);
+    EXPECT_EQ(close(inspection_fd), 0);
+  }
+}
+
+TEST(IpcTest, FloodingPeerCannotDelayEndpointOperation) {
+  auto sockets = make_socket_pair();
+  const int peer = dup(sockets[1]);
+  ASSERT_GE(peer, 0);
+  auto server_result = RobotIoIpcServer::create(sockets[0], 1, kGeneration);
+  ASSERT_TRUE(server_result.has_value());
+  auto server = std::move(server_result.value());
+  ASSERT_TRUE(server.send_setup().has_value());
+  auto client_result = RobotIoClient::connect(sockets[1], kGeneration);
+  ASSERT_TRUE(client_result.has_value());
+  auto client = std::move(client_result.value());
+
+  const int flags = fcntl(peer, F_GETFL);
+  ASSERT_GE(flags, 0);
+  ASSERT_EQ(fcntl(peer, F_SETFL, flags | O_NONBLOCK), 0);
+  const std::byte unexpected{0x7e};
+  std::size_t queued = 0;
+  while (send(peer, &unexpected, sizeof(unexpected), MSG_NOSIGNAL) == 1) {
+    ++queued;
+  }
+  ASSERT_GT(queued, 0U);
+  ASSERT_TRUE(errno == EAGAIN || errno == EWOULDBLOCK);
+
+  std::atomic<bool> stop{false};
+  std::vector<std::thread> flooders;
+  for (int index = 0; index < 8; ++index) {
+    flooders.emplace_back([&] {
+      while (!stop.load(std::memory_order_relaxed)) {
+        if (send(peer, &unexpected, sizeof(unexpected), MSG_NOSIGNAL) < 0 &&
+            errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+          stop.store(true, std::memory_order_relaxed);
+        }
+      }
+    });
+  }
+  std::thread deadline([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stop.store(true, std::memory_order_relaxed);
+  });
+
+  const auto started = std::chrono::steady_clock::now();
+  auto read = server.read_commands();
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  stop.store(true, std::memory_order_relaxed);
+  for (auto& flooder : flooders) {
+    flooder.join();
+  }
+  deadline.join();
+
+  ASSERT_FALSE(read.has_value());
+  EXPECT_EQ(read.error().code, ErrorCode::protocol);
+  EXPECT_LT(elapsed, std::chrono::milliseconds(50));
+  EXPECT_EQ(close(peer), 0);
+}
+
 TEST(IpcTest, ReportsPeerDisconnectWithoutBlocking) {
   auto sockets = make_socket_pair();
   auto server_result = RobotIoIpcServer::create(sockets[0], 0, kGeneration);
