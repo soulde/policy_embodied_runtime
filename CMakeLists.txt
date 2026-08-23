@@ -5,6 +5,7 @@ project(policy_runtime LANGUAGES CXX)
 option(POLICY_RUNTIME_BUILD_TESTS "Build policy runtime unit tests" ON)
 
 include(cmake/ProjectOptions.cmake)
+include(FetchContent)
 
 find_package(nlohmann_json 3.11.3 CONFIG QUIET)
 if(NOT TARGET nlohmann_json::nlohmann_json)

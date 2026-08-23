@@ -28,11 +28,21 @@ struct GripperValue {
   std::string unit;
 };
 
+struct TaskTextValue {
+  std::string text;
+};
+
+struct ImageValue {
+  std::string encoding = "base64";
+  std::string data;
+  std::string mime_type = "image/jpeg";
+};
+
 struct ObservationPayload {
   std::optional<JointStateValue> joint_position;
   std::optional<GripperValue> gripper_width;
-  nlohmann::json task_text;
-  nlohmann::json image;
+  std::optional<TaskTextValue> task_text;
+  std::optional<ImageValue> image;
   nlohmann::json meta = nlohmann::json::object();
   nlohmann::json extra = nlohmann::json::object();
 };
