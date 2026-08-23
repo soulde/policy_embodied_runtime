@@ -20,7 +20,8 @@ endif()
 add_library(policy_runtime_core
     src/common/result.cpp
     src/profiles/loader.cpp
-    src/protocol/rpc/codec.cpp)
+    src/protocol/rpc/codec.cpp
+    src/robot_io/transport_scheduler.cpp)
 target_include_directories(policy_runtime_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
@@ -63,8 +64,18 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         PRIVATE POLICY_RUNTIME_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     policy_runtime_configure_target(profile_loader_test)
 
+    add_executable(transport_scheduler_test tests/cpp/unit/transport_scheduler_test.cpp)
+    target_link_libraries(transport_scheduler_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(transport_scheduler_test)
+
     include(GoogleTest)
-    gtest_discover_tests(policy_runtime_unit_tests TEST_PREFIX result_test.)
-    gtest_discover_tests(rpc_codec_test TEST_PREFIX rpc_codec_test.)
-    gtest_discover_tests(profile_loader_test TEST_PREFIX profile_loader_test.)
+    gtest_discover_tests(policy_runtime_unit_tests TEST_PREFIX result_test.
+        DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(rpc_codec_test TEST_PREFIX rpc_codec_test.
+        DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(profile_loader_test TEST_PREFIX profile_loader_test.
+        DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(transport_scheduler_test TEST_PREFIX transport_scheduler_test.
+        DISCOVERY_MODE PRE_TEST)
 endif()
