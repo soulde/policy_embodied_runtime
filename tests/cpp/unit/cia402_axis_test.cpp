@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 
 #include <gtest/gtest.h>
 
@@ -50,7 +51,9 @@ TEST(Cia402UnitsTest, ConvertsEngineeringValuesWithCheckedRoundingAndRange) {
   EXPECT_EQ(policy_runtime::position_to_device_units(1.25, 1000.0), 1250);
   EXPECT_EQ(policy_runtime::position_to_device_units(-0.0015, 1000.0), -2);
   EXPECT_EQ(policy_runtime::torque_to_device_units(2.5, 100.0), 250);
-  EXPECT_DOUBLE_EQ(policy_runtime::device_units_to_engineering(-125, 1000.0), -0.125);
+  const auto engineering = policy_runtime::device_units_to_engineering(-125, 1000.0);
+  ASSERT_TRUE(engineering.has_value());
+  EXPECT_DOUBLE_EQ(*engineering, -0.125);
 
   EXPECT_FALSE(policy_runtime::position_to_device_units(
                    std::numeric_limits<double>::quiet_NaN(), 1000.0)
@@ -58,6 +61,31 @@ TEST(Cia402UnitsTest, ConvertsEngineeringValuesWithCheckedRoundingAndRange) {
   EXPECT_FALSE(policy_runtime::position_to_device_units(1.0e20, 1000.0).has_value());
   EXPECT_FALSE(policy_runtime::torque_to_device_units(40.0, 1000.0).has_value());
   EXPECT_FALSE(policy_runtime::position_to_device_units(1.0, 0.0).has_value());
+  EXPECT_FALSE(policy_runtime::device_units_to_engineering(1, 1.0e-320).has_value());
+  EXPECT_FALSE(policy_runtime::device_units_to_engineering(
+                   1, std::numeric_limits<double>::quiet_NaN())
+                   .has_value());
+  EXPECT_FALSE(policy_runtime::device_units_to_engineering(
+                   1, std::numeric_limits<double>::infinity())
+                   .has_value());
+}
+
+TEST(Cia402AxisTest, NeverPublishesNonfiniteFeedbackFromCheckedReverseConversion) {
+  auto axis_config = config(Cia402Mode::csp);
+  axis_config.scale = 1.0e-320;
+  Cia402Axis axis{axis_config};
+  auto pdo = operational(Cia402Mode::csp);
+  pdo.actual_position = 1;
+  pdo.actual_velocity = 1;
+  pdo.actual_torque = 1;
+
+  const auto feedback = axis.cycle(enable(0.0), pdo);
+
+  EXPECT_TRUE(std::isfinite(feedback.position));
+  EXPECT_TRUE(std::isfinite(feedback.velocity));
+  EXPECT_TRUE(std::isfinite(feedback.effort));
+  EXPECT_NE(feedback.flags & kAxisFeedbackInvalidCommand, 0U);
+  EXPECT_EQ(pdo.control_word, 0x0002);
 }
 
 TEST(Cia402AxisTest, ScalesFeedbackAndAppliesClampThenPerCycleSlewInCsp) {
@@ -136,16 +164,41 @@ TEST(Cia402AxisTest, QuickStopsOnFollowingErrorOrInvalidTarget) {
   EXPECT_NE(feedback.flags & kAxisFeedbackInvalidCommand, 0U);
 }
 
-TEST(Cia402AxisTest, TreatsNegativeInfiniteSafetyLimitsAsInvalid) {
-  auto axis_config = config(Cia402Mode::csp);
-  axis_config.slew_limit = -std::numeric_limits<double>::infinity();
-  Cia402Axis axis{axis_config};
-  auto pdo = operational(Cia402Mode::csp);
+TEST(Cia402AxisTest, BlocksOperationEnableTransitionsOnExcessiveFollowingError) {
+  for (const std::uint16_t status_word : {std::uint16_t{0x0023}, std::uint16_t{0x0007}}) {
+    auto axis_config = config(Cia402Mode::csp);
+    axis_config.slew_limit = 2.0;
+    axis_config.following_error_limit = 0.1;
+    Cia402Axis axis{axis_config};
+    auto pdo = operational(Cia402Mode::csp);
+    pdo.status_word = status_word;
 
-  const auto feedback = axis.cycle(enable(0.2), pdo);
+    const auto feedback = axis.cycle(enable(0.2), pdo);
 
-  EXPECT_EQ(pdo.control_word, 0x0002);
-  EXPECT_NE(feedback.flags & kAxisFeedbackInvalidCommand, 0U);
+    EXPECT_EQ(pdo.control_word, 0x0002) << "status word: " << status_word;
+    EXPECT_NE(feedback.flags & kAxisFeedbackFollowingError, 0U)
+        << "status word: " << status_word;
+  }
+}
+
+TEST(Cia402AxisTest, RejectsNonpositiveOrNonfiniteSafetyLimitsAtConstruction) {
+  constexpr double kInvalidLimits[] = {
+      0.0,
+      -1.0,
+      std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::infinity(),
+      -std::numeric_limits<double>::infinity(),
+  };
+
+  for (const double invalid : kInvalidLimits) {
+    auto slew_config = config(Cia402Mode::csp);
+    slew_config.slew_limit = invalid;
+    EXPECT_THROW({ Cia402Axis axis{slew_config}; }, std::invalid_argument);
+
+    auto following_config = config(Cia402Mode::csp);
+    following_config.following_error_limit = invalid;
+    EXPECT_THROW({ Cia402Axis axis{following_config}; }, std::invalid_argument);
+  }
 }
 
 TEST(Cia402AxisTest, RejectsAmbiguousFlagsAndAllowsExplicitFaultReset) {

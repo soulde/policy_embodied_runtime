@@ -15,3 +15,10 @@ Verification:
 - `git diff --check`: clean.
 
 Concern: `slew_limit` is explicitly engineering units per daemon cycle because the mandated axis interface does not receive a cycle duration; production profiles should calculate it for the configured 1 kHz period.
+
+## Fix round 1
+
+- Made unit conversion checked in both directions. A nonfinite raw-to-engineering result (including finite tiny positive scales such as `1e-320`) is never published; the feedback stays finite, is marked invalid, and drives the safe request path.
+- Added construction-time rejection for zero, negative, NaN, and positive/negative infinite slew and following-error limits, so manually built `AxisConfig` values cannot disable those protections.
+- Applied following-error gating before every controlword path that can enter or remain Operation Enabled (`Switched On`, `Operation Enabled`, and `Quick Stop Active`).
+- Verified the fixes with RED→GREEN regression tests. Debug CTest passed 76/76, Python passed 28/28, and ASan/UBSan CTest passed 76/76. TSan rebuilt successfully but its test binary remains unavailable in this container due to `ThreadSanitizer: unexpected memory mapping`; `git diff --check` is clean.

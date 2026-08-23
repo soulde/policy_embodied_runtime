@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 #include "policy_runtime/common/result.hpp"
 #include "policy_runtime/profiles/robot_profile.hpp"
@@ -23,13 +24,14 @@ inline constexpr std::uint32_t kAxisFeedbackInvalidCommand = 1U << 4U;
 
 class Cia402Axis {
  public:
+  // Construction occurs before the realtime loop and rejects unsafe limits.
   explicit Cia402Axis(profiles::AxisConfig config);
 
   AxisFeedback cycle(const AxisCommand& command, Cia402PdoView& pdo) noexcept;
   Result<void> verify_mode(std::int8_t mode_display) const;
 
  private:
-  double actual_setpoint(const Cia402PdoView& pdo) const noexcept;
+  std::optional<double> actual_setpoint(const Cia402PdoView& pdo) const noexcept;
   bool stage_setpoint(double value, Cia402PdoView& pdo) const noexcept;
 
   profiles::AxisConfig config_;

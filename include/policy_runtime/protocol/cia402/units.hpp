@@ -45,12 +45,19 @@ inline std::optional<std::int16_t> torque_to_device_units(double value,
 }
 
 template <typename Integer>
-double device_units_to_engineering(Integer value, double scale) noexcept {
+std::optional<double> device_units_to_engineering(Integer value, double scale) noexcept {
   static_assert(std::is_integral_v<Integer>);
   if (!std::isfinite(scale) || scale <= 0.0) {
-    return 0.0;
+    return std::nullopt;
   }
-  return static_cast<double>(value) / scale;
+  const long double converted = static_cast<long double>(value) / scale;
+  if (!std::isfinite(converted) ||
+      converted < -static_cast<long double>(std::numeric_limits<double>::max()) ||
+      converted > static_cast<long double>(std::numeric_limits<double>::max())) {
+    return std::nullopt;
+  }
+  const double result = static_cast<double>(converted);
+  return std::isfinite(result) ? std::optional<double>{result} : std::nullopt;
 }
 
 }  // namespace policy_runtime

@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
+#include <stdexcept>
 #include <utility>
 
 #include "policy_runtime/protocol/cia402/units.hpp"
@@ -41,13 +41,17 @@ AxisRequest requested_action(std::uint32_t flags, bool& invalid) noexcept {
 }
 
 bool valid_positive_limit(double value) noexcept {
-  return (std::isfinite(value) && value > 0.0) ||
-         value == std::numeric_limits<double>::infinity();
+  return std::isfinite(value) && value > 0.0;
 }
 
 }  // namespace
 
-Cia402Axis::Cia402Axis(profiles::AxisConfig config) : config_(std::move(config)) {}
+Cia402Axis::Cia402Axis(profiles::AxisConfig config) : config_(std::move(config)) {
+  if (!valid_positive_limit(config_.slew_limit) ||
+      !valid_positive_limit(config_.following_error_limit)) {
+    throw std::invalid_argument("CiA 402 safety limits must be finite and positive");
+  }
+}
 
 Result<void> Cia402Axis::verify_mode(std::int8_t mode_display) const {
   if (mode_display != static_cast<std::int8_t>(config_.mode)) {
@@ -57,7 +61,7 @@ Result<void> Cia402Axis::verify_mode(std::int8_t mode_display) const {
   return Result<void>::success();
 }
 
-double Cia402Axis::actual_setpoint(const Cia402PdoView& pdo) const noexcept {
+std::optional<double> Cia402Axis::actual_setpoint(const Cia402PdoView& pdo) const noexcept {
   switch (config_.mode) {
     case profiles::Cia402Mode::csp:
       return device_units_to_engineering(pdo.actual_position, config_.scale);
@@ -66,7 +70,7 @@ double Cia402Axis::actual_setpoint(const Cia402PdoView& pdo) const noexcept {
     case profiles::Cia402Mode::cst:
       return device_units_to_engineering(pdo.actual_torque, config_.scale);
   }
-  return 0.0;
+  return std::nullopt;
 }
 
 bool Cia402Axis::stage_setpoint(double value, Cia402PdoView& pdo) const noexcept {
@@ -106,9 +110,12 @@ AxisFeedback Cia402Axis::cycle(const AxisCommand& command, Cia402PdoView& pdo) n
   AxisFeedback feedback{};
   feedback.sequence = command.sequence;
   feedback.timestamp_ns = command.timestamp_ns;
-  feedback.position = device_units_to_engineering(pdo.actual_position, config_.scale);
-  feedback.velocity = device_units_to_engineering(pdo.actual_velocity, config_.scale);
-  feedback.effort = device_units_to_engineering(pdo.actual_torque, config_.scale);
+  const auto position = device_units_to_engineering(pdo.actual_position, config_.scale);
+  const auto velocity = device_units_to_engineering(pdo.actual_velocity, config_.scale);
+  const auto effort = device_units_to_engineering(pdo.actual_torque, config_.scale);
+  feedback.position = position.value_or(0.0);
+  feedback.velocity = velocity.value_or(0.0);
+  feedback.effort = effort.value_or(0.0);
   feedback.status_word = pdo.status_word;
   feedback.mode_display = static_cast<std::uint8_t>(pdo.mode_display);
 
@@ -118,7 +125,13 @@ AxisFeedback Cia402Axis::cycle(const AxisCommand& command, Cia402PdoView& pdo) n
     feedback.flags |= kAxisFeedbackInvalidCommand;
   }
 
-  const double actual = actual_setpoint(pdo);
+  const auto converted_actual = actual_setpoint(pdo);
+  const bool invalid_feedback = !position || !velocity || !effort || !converted_actual;
+  if (invalid_feedback) {
+    feedback.flags |= kAxisFeedbackInvalidCommand;
+    request = AxisRequest::quick_stop;
+  }
+  const double actual = converted_actual.value_or(0.0);
   if (!has_last_target_) {
     last_target_ = actual;
     has_last_target_ = true;
@@ -147,7 +160,10 @@ AxisFeedback Cia402Axis::cycle(const AxisCommand& command, Cia402PdoView& pdo) n
         }
         staged_target = slew_target;
       }
-      if (Cia402StateMachine::decode(pdo.status_word) == DriveState::operation_enabled &&
+      const auto drive_state = Cia402StateMachine::decode(pdo.status_word);
+      if ((drive_state == DriveState::switched_on ||
+           drive_state == DriveState::operation_enabled ||
+           drive_state == DriveState::quick_stop_active) &&
           std::isfinite(config_.following_error_limit) &&
           std::abs(staged_target - actual) > config_.following_error_limit) {
         feedback.flags |= kAxisFeedbackFollowingError;
