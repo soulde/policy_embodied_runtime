@@ -31,8 +31,7 @@ class Transport {
   virtual TransportHealth health() const noexcept = 0;
   virtual SchedulingClass scheduling_class() const noexcept = 0;
 
-  // Performs cyclic physical I/O (for example EtherCAT PDO exchange). A capability
-  // with a separately scheduled service method documents that service's I/O contract.
+  // This is the only transport operation permitted to perform physical I/O.
   virtual void cycle(const CycleContext& context) noexcept = 0;
 };
 

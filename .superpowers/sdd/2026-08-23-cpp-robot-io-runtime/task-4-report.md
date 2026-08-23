@@ -88,8 +88,7 @@ GoogleTest discovery to CTest preserves that distinction.
 ## Self-review and concerns
 
 - The transport capability headers have no dependency on policy/robot runtime
-  logic; an EtherCAT implementation can combine cyclic and object-dictionary
-  capabilities while serial can expose only frame capability.
+  logic; serial can expose only frame capability.
 - The scheduler owns neither transports nor threads, avoiding lifecycle and
   blocking-I/O behavior outside this task's scope.
 - The pre-existing untracked `Elmo+ECAT+00010420+V12.xml` ESI file was left
@@ -154,3 +153,56 @@ TSan configure and build passed with the updated sources. Its CTest invocation
 again stopped during GoogleTest discovery with `FATAL: ThreadSanitizer:
 unexpected memory mapping`, which is the known container runtime limitation,
 not a compile or link failure.
+
+## Review Fix Round 2
+
+### Root cause and RED
+
+The initial mailbox interface added `service_mailbox()` as another physical-I/O
+entry point. That weakened the governing `Transport::cycle()` invariant and
+allowed a concrete transport to conflate hard-real-time PDO and potentially
+blocking mailbox work.
+
+Focused tests were changed first so an OD endpoint is blocking-event-driven,
+advances requests only through `cycle()`, retains a successful upload payload,
+and removes the replacement transport before placement-storage teardown. The
+test target failed before the API update with the expected missing state and
+obsolete pure-interface requirements:
+
+```text
+error: 'struct policy_runtime::MailboxRequestStatus' has no member named 'uploaded_bytes'
+note: pure virtual 'service_mailbox()'
+```
+
+### Green implementation
+
+- Restored the strong base rule: only `Transport::cycle()` may perform physical
+  I/O. `ObjectDictionaryTransport` no longer exposes `service_mailbox()`.
+- Made OD a separately scheduled transport endpoint: its inherited
+  `scheduling_class()` must be `blocking_event_driven` or `asynchronous`, and
+  its inherited `cycle()` services its queued OD requests.
+- Added owned `uploaded_bytes` to `MailboxRequestStatus`, so a completed upload
+  exposes its response data alongside queued/completed/failed state and error.
+- Documented the composition boundary: one concrete endpoint must not combine
+  `CyclicTransport` and `ObjectDictionaryTransport`; endpoints may share a
+  lower backend only when that backend serializes access outside the PDO
+  hard-real-time critical window.
+
+### Verification
+
+```bash
+uv run --with cmake cmake --build --preset default --target transport_scheduler_test
+uv run --with cmake ctest --preset default -R 'transport_scheduler_test|ObjectDictionaryTransportTest' --output-on-failure
+uv run --with cmake cmake --build --preset default
+uv run --with cmake ctest --preset default --output-on-failure
+uv run --no-sync pytest
+git diff --check
+```
+
+Results: focused transport/scheduler CTest passed 4/4; full CTest passed
+45/45; Python pytest passed 28/28; `git diff --check` produced no output.
+
+TSan configure/build completed, including the updated transport test. CTest
+could not initialize its TSan-instrumented binaries because the container again
+reported `FATAL: ThreadSanitizer: unexpected memory mapping`; this remains an
+environment runtime limitation rather than a build defect.

@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <new>
 #include <unordered_map>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -52,65 +53,66 @@ class FakeObjectDictionaryTransport final : public policy_runtime::ObjectDiction
   }
 
   policy_runtime::SchedulingClass scheduling_class() const noexcept override {
-    return policy_runtime::SchedulingClass::hard_realtime_periodic;
+    return policy_runtime::SchedulingClass::blocking_event_driven;
   }
 
-  void cycle(const policy_runtime::CycleContext&) noexcept override {}
-
-  policy_runtime::MailboxSchedulingClass mailbox_scheduling_class() const noexcept override {
-    return policy_runtime::MailboxSchedulingClass::blocking_event_driven;
-  }
-
-  policy_runtime::Result<policy_runtime::MailboxRequestId> queue_download(
-      policy_runtime::ObjectAddress, std::span<const std::byte>) override {
-    return enqueue();
-  }
-
-  policy_runtime::Result<policy_runtime::MailboxRequestId> queue_upload(
-      policy_runtime::ObjectAddress) override {
-    return enqueue();
-  }
-
-  std::optional<policy_runtime::MailboxRequestStatus> mailbox_status(
-      policy_runtime::MailboxRequestId request_id) const override {
-    const auto status = statuses_.find(request_id);
-    return status == statuses_.end() ? std::nullopt
-                                     : std::optional<policy_runtime::MailboxRequestStatus>{
-                                           status->second};
-  }
-
-  void service_mailbox() noexcept override {
-    for (auto& [request_id, status] : statuses_) {
+  void cycle(const policy_runtime::CycleContext&) noexcept override {
+    for (auto& [request_id, request] : requests_) {
       (void)request_id;
+      auto& status = request.status;
       if (status.state != policy_runtime::MailboxRequestState::queued) {
         continue;
       }
       if (fail_next_request_) {
         status = policy_runtime::MailboxRequestStatus{
             policy_runtime::MailboxRequestState::failed,
-            policy_runtime::Error{policy_runtime::ErrorCode::io, "mailbox failure"}};
+            policy_runtime::Error{policy_runtime::ErrorCode::io, "mailbox failure"}, {}};
         fail_next_request_ = false;
       } else {
-        status = {policy_runtime::MailboxRequestState::completed, std::nullopt};
+        status.state = policy_runtime::MailboxRequestState::completed;
+        if (request.is_upload) {
+          status.uploaded_bytes = {std::byte{0x12}, std::byte{0x34}};
+        }
       }
     }
+  }
+
+  policy_runtime::Result<policy_runtime::MailboxRequestId> queue_download(
+      policy_runtime::ObjectAddress, std::span<const std::byte>) override {
+    return enqueue(false);
+  }
+
+  policy_runtime::Result<policy_runtime::MailboxRequestId> queue_upload(
+      policy_runtime::ObjectAddress) override {
+    return enqueue(true);
+  }
+
+  std::optional<policy_runtime::MailboxRequestStatus> mailbox_status(
+      policy_runtime::MailboxRequestId request_id) const override {
+    const auto status = requests_.find(request_id);
+    return status == requests_.end() ? std::nullopt
+                                     : std::optional<policy_runtime::MailboxRequestStatus>{
+                                           status->second.status};
   }
 
   void fail_next_request() { fail_next_request_ = true; }
 
  private:
-  policy_runtime::Result<policy_runtime::MailboxRequestId> enqueue() {
+  policy_runtime::Result<policy_runtime::MailboxRequestId> enqueue(bool is_upload) {
     const auto request_id = next_request_id_++;
-    statuses_.emplace(request_id,
-                      policy_runtime::MailboxRequestStatus{
-                          policy_runtime::MailboxRequestState::queued, std::nullopt});
+    requests_.emplace(request_id, Request{is_upload,
+                                          {policy_runtime::MailboxRequestState::queued,
+                                           std::nullopt, {}}});
     return policy_runtime::Result<policy_runtime::MailboxRequestId>::success(request_id);
   }
 
+  struct Request {
+    bool is_upload;
+    policy_runtime::MailboxRequestStatus status;
+  };
+
   policy_runtime::MailboxRequestId next_request_id_{1};
-  std::unordered_map<policy_runtime::MailboxRequestId,
-                     policy_runtime::MailboxRequestStatus>
-      statuses_;
+  std::unordered_map<policy_runtime::MailboxRequestId, Request> requests_;
   bool fail_next_request_{false};
 };
 
@@ -169,6 +171,8 @@ TEST(TransportSchedulerTest, RemoveClearsAssignmentBeforeAddressReuse) {
   ASSERT_TRUE(scheduler.add(*replacement).has_value());
   ASSERT_TRUE(scheduler.executor_id(*replacement).has_value());
   EXPECT_EQ(*scheduler.executor_id(*replacement), policy_runtime::ExecutorId::blocking_event);
+  ASSERT_TRUE(scheduler.remove(*replacement).has_value());
+  EXPECT_FALSE(scheduler.executor_id(*replacement).has_value());
   replacement->~FakeTransport();
 }
 
@@ -177,9 +181,7 @@ TEST(ObjectDictionaryTransportTest, QueuesMailboxRequestsAndReportsCompletionOrE
   const std::array<std::byte, 1> value{std::byte{0x01}};
 
   EXPECT_EQ(transport.scheduling_class(),
-            policy_runtime::SchedulingClass::hard_realtime_periodic);
-  EXPECT_EQ(transport.mailbox_scheduling_class(),
-            policy_runtime::MailboxSchedulingClass::blocking_event_driven);
+            policy_runtime::SchedulingClass::blocking_event_driven);
 
   auto download = transport.queue_download({0x6040, 0}, value);
   ASSERT_TRUE(download.has_value());
@@ -188,17 +190,27 @@ TEST(ObjectDictionaryTransportTest, QueuesMailboxRequestsAndReportsCompletionOrE
   EXPECT_EQ(queued->state, policy_runtime::MailboxRequestState::queued);
   EXPECT_FALSE(queued->error.has_value());
 
-  transport.service_mailbox();
+  transport.cycle({});
   const auto complete = transport.mailbox_status(download.value());
   ASSERT_TRUE(complete.has_value());
   EXPECT_EQ(complete->state, policy_runtime::MailboxRequestState::completed);
   EXPECT_FALSE(complete->error.has_value());
+  EXPECT_TRUE(complete->uploaded_bytes.empty());
 
-  transport.fail_next_request();
   auto upload = transport.queue_upload({0x6064, 0});
   ASSERT_TRUE(upload.has_value());
-  transport.service_mailbox();
-  const auto failed = transport.mailbox_status(upload.value());
+  transport.cycle({});
+  const auto uploaded = transport.mailbox_status(upload.value());
+  ASSERT_TRUE(uploaded.has_value());
+  EXPECT_EQ(uploaded->state, policy_runtime::MailboxRequestState::completed);
+  EXPECT_EQ(uploaded->uploaded_bytes,
+            (std::vector<std::byte>{std::byte{0x12}, std::byte{0x34}}));
+
+  transport.fail_next_request();
+  auto failed_upload = transport.queue_upload({0x6064, 0});
+  ASSERT_TRUE(failed_upload.has_value());
+  transport.cycle({});
+  const auto failed = transport.mailbox_status(failed_upload.value());
   ASSERT_TRUE(failed.has_value());
   EXPECT_EQ(failed->state, policy_runtime::MailboxRequestState::failed);
   ASSERT_TRUE(failed->error.has_value());
