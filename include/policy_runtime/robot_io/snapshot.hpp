@@ -25,7 +25,9 @@ struct alignas(kCacheLineSize) PublicationControl {
   std::atomic<std::uint32_t> active_index{kNoActiveSlot};
   std::uint32_t reserved0{};
   std::atomic<std::uint64_t> publish_epoch{0};
-  std::array<std::byte, 48> reserved{};
+  std::atomic<std::uint64_t> published_sequence{0};
+  std::atomic<std::int64_t> published_timestamp_ns{0};
+  std::array<std::byte, 32> reserved{};
 };
 
 struct alignas(kCacheLineSize) SlotControl {
@@ -52,6 +54,8 @@ static_assert(std::is_standard_layout_v<PublicationControl>);
 static_assert(std::is_standard_layout_v<SlotControl>);
 static_assert(offsetof(PublicationControl, active_index) == 0);
 static_assert(offsetof(PublicationControl, publish_epoch) == 8);
+static_assert(offsetof(PublicationControl, published_sequence) == 16);
+static_assert(offsetof(PublicationControl, published_timestamp_ns) == 24);
 static_assert(offsetof(SlotControl, guard) == 0);
 static_assert(offsetof(SlotControl, sequence) == 8);
 static_assert(offsetof(SlotControl, timestamp_ns) == 16);
@@ -128,6 +132,17 @@ struct Snapshot {
   std::uint32_t axis_count{};
   std::array<T, kRobotIoMaximumAxes> axes{};
 };
+
+enum class SnapshotMappingAccess : std::uint8_t {
+  read_only,
+  read_write,
+};
+
+template <class T>
+class SnapshotReader;
+
+template <class T>
+class SnapshotWriter;
 
 template <class T>
 class SnapshotRegion {
@@ -219,9 +234,26 @@ class SnapshotRegion {
     return Result<SnapshotRegion>::success(region);
   }
 
+  SnapshotReader<T> reader() const noexcept { return SnapshotReader<T>(*this); }
+  SnapshotWriter<T> writer() const noexcept { return SnapshotWriter<T>(*this); }
+
+  std::uint32_t axis_count() const noexcept { return axis_count_; }
+  std::uint32_t generation() const noexcept {
+    return header_ == nullptr ? 0 : expected_generation_;
+  }
+
+ private:
+  friend class SnapshotReader<T>;
+  friend class SnapshotWriter<T>;
+
   Result<void> publish(std::span<const T> axes, std::uint64_t sequence,
                        std::int64_t timestamp_ns) noexcept {
-    if (publication_ == nullptr || axes.size() != axis_count_) {
+    const auto topology = validate_topology();
+    if (!topology.has_value()) {
+      return topology;
+    }
+    if (axes.size() != axis_count_ || timestamp_ns < 0 ||
+        (sequence == 0 && timestamp_ns != 0)) {
       // An empty diagnostic keeps the post-mapping real-time path free of
       // dynamic string storage even when the caller supplies the wrong span.
       return Result<void>::failure({ErrorCode::invalid_argument, {}});
@@ -234,6 +266,17 @@ class SnapshotRegion {
     // the old even guard from observing payload stores ordered after the new odd
     // guard. This avoids both torn payloads and C++ data races without a mutex.
     const auto active = publication_->active_index.load(std::memory_order_seq_cst);
+    // (0, 0) is an explicitly valid initial publication. Once a slot is
+    // active, later publications are independently nondecreasing in both fields.
+    if (active < 2) {
+      const auto current_sequence =
+          publication_->published_sequence.load(std::memory_order_seq_cst);
+      const auto current_timestamp =
+          publication_->published_timestamp_ns.load(std::memory_order_seq_cst);
+      if (sequence < current_sequence || timestamp_ns < current_timestamp) {
+        return Result<void>::failure({ErrorCode::invalid_argument, {}});
+      }
+    }
     const std::uint32_t target = active < 2 ? 1U - active : 0U;
     auto* target_slot = slot(target);
     const auto epoch = publication_->publish_epoch.fetch_add(2, std::memory_order_seq_cst) + 2;
@@ -253,13 +296,20 @@ class SnapshotRegion {
     target_slot->sequence.store(sequence, std::memory_order_seq_cst);
     target_slot->timestamp_ns.store(timestamp_ns, std::memory_order_seq_cst);
     target_slot->guard.store(epoch, std::memory_order_seq_cst);
+    // The shared publication metadata describes exactly the slot committed by
+    // the following active-index store. Readers reject any transition where
+    // these values do not match the selected slot before and after copying.
+    publication_->published_sequence.store(sequence, std::memory_order_seq_cst);
+    publication_->published_timestamp_ns.store(timestamp_ns,
+                                                std::memory_order_seq_cst);
     publication_->active_index.store(target, std::memory_order_seq_cst);
     return Result<void>::success();
   }
 
   Result<Snapshot<T>> read_latest() const noexcept {
-    if (publication_ == nullptr) {
-      return Result<Snapshot<T>>::failure({ErrorCode::unavailable, {}});
+    const auto topology = validate_topology();
+    if (!topology.has_value()) {
+      return Result<Snapshot<T>>::failure(topology.error());
     }
     for (unsigned int attempt = 0; attempt < detail::kSnapshotReadAttempts; ++attempt) {
       // The bounded reader accepts a slot only when the two guard observations
@@ -269,6 +319,10 @@ class SnapshotRegion {
       if (active >= 2) {
         return Result<Snapshot<T>>::failure({ErrorCode::unavailable, {}});
       }
+      const auto published_sequence =
+          publication_->published_sequence.load(std::memory_order_seq_cst);
+      const auto published_timestamp =
+          publication_->published_timestamp_ns.load(std::memory_order_seq_cst);
       const auto* source_slot = slot(active);
       const auto first_guard = source_slot->guard.load(std::memory_order_seq_cst);
       if ((first_guard & 1U) != 0) {
@@ -290,19 +344,22 @@ class SnapshotRegion {
         std::memcpy(&snapshot.axes[axis], bytes.data(), sizeof(T));
       }
       const auto second_guard = source_slot->guard.load(std::memory_order_seq_cst);
-      if (first_guard == second_guard && (second_guard & 1U) == 0) {
+      const auto final_sequence =
+          publication_->published_sequence.load(std::memory_order_seq_cst);
+      const auto final_timestamp =
+          publication_->published_timestamp_ns.load(std::memory_order_seq_cst);
+      const auto final_active =
+          publication_->active_index.load(std::memory_order_seq_cst);
+      if (first_guard == second_guard && (second_guard & 1U) == 0 &&
+          active == final_active && snapshot.sequence == published_sequence &&
+          snapshot.timestamp_ns == published_timestamp &&
+          published_sequence == final_sequence && published_timestamp == final_timestamp) {
         return Result<Snapshot<T>>::success(snapshot);
       }
     }
     return Result<Snapshot<T>>::failure({ErrorCode::unavailable, {}});
   }
 
-  std::uint32_t axis_count() const noexcept { return axis_count_; }
-  std::uint32_t generation() const noexcept {
-    return header_ == nullptr ? 0 : header_->generation;
-  }
-
- private:
   static Result<void> validate_address(void* address) {
     if (address == nullptr ||
         reinterpret_cast<std::uintptr_t>(address) % detail::kCacheLineSize != 0) {
@@ -324,12 +381,33 @@ class SnapshotRegion {
     region.words_per_axis_ = layout.words_per_axis;
     region.header_ = header;
     region.publication_ = publication;
+    region.expected_generation_ = header->generation;
+    region.expected_kind_ = static_cast<IpcRegionKind>(header->region_kind);
     return region;
+  }
+
+  Result<void> validate_topology() const noexcept {
+    if (base_ == nullptr || header_ == nullptr || publication_ == nullptr) {
+      return Result<void>::failure({ErrorCode::unavailable, {}});
+    }
+    if (header_->magic != kRobotIoIpcMagic ||
+        header_->abi_version != kRobotIoIpcAbiVersion ||
+        header_->generation != expected_generation_ || header_->axis_count != axis_count_ ||
+        header_->axis_count > kRobotIoMaximumAxes || header_->axis_stride != sizeof(T) ||
+        header_->region_kind != static_cast<std::uint32_t>(expected_kind_) ||
+        header_->header_size != sizeof(IpcHeader) || header_->slot_stride != slot_stride_ ||
+        header_->mapping_size != size_ || header_->reserved0 != 0 ||
+        header_->reserved1 != 0) {
+      return Result<void>::failure({ErrorCode::protocol, {}});
+    }
+    return Result<void>::success();
   }
 
   bool atomics_are_lock_free() const noexcept {
     if (!publication_->active_index.is_lock_free() ||
-        !publication_->publish_epoch.is_lock_free()) {
+        !publication_->publish_epoch.is_lock_free() ||
+        !publication_->published_sequence.is_lock_free() ||
+        !publication_->published_timestamp_ns.is_lock_free()) {
       return false;
     }
     for (std::uint32_t slot_index = 0; slot_index < 2; ++slot_index) {
@@ -361,6 +439,47 @@ class SnapshotRegion {
   std::size_t words_per_axis_{};
   IpcHeader* header_{};
   detail::PublicationControl* publication_{};
+  std::uint32_t expected_generation_{};
+  IpcRegionKind expected_kind_{IpcRegionKind::command};
+};
+
+template <class T>
+class SnapshotReader {
+ public:
+  SnapshotReader() = default;
+
+  Result<Snapshot<T>> read_latest() const noexcept { return region_.read_latest(); }
+  SnapshotMappingAccess mapping_access() const noexcept {
+    return SnapshotMappingAccess::read_only;
+  }
+  std::uint32_t axis_count() const noexcept { return region_.axis_count(); }
+  std::uint32_t generation() const noexcept { return region_.generation(); }
+
+ private:
+  friend class SnapshotRegion<T>;
+  explicit SnapshotReader(SnapshotRegion<T> region) noexcept : region_(region) {}
+  SnapshotRegion<T> region_{};
+};
+
+template <class T>
+class SnapshotWriter {
+ public:
+  SnapshotWriter() = default;
+
+  Result<void> publish(std::span<const T> axes, std::uint64_t sequence,
+                       std::int64_t timestamp_ns) noexcept {
+    return region_.publish(axes, sequence, timestamp_ns);
+  }
+  SnapshotMappingAccess mapping_access() const noexcept {
+    return SnapshotMappingAccess::read_write;
+  }
+  std::uint32_t axis_count() const noexcept { return region_.axis_count(); }
+  std::uint32_t generation() const noexcept { return region_.generation(); }
+
+ private:
+  friend class SnapshotRegion<T>;
+  explicit SnapshotWriter(SnapshotRegion<T> region) noexcept : region_(region) {}
+  SnapshotRegion<T> region_{};
 };
 
 template <class T>

@@ -31,30 +31,34 @@ class RobotIoClient {
 
   std::uint32_t axis_count() const noexcept { return axis_count_; }
   std::uint32_t generation() const noexcept { return generation_; }
-  int command_fd() const noexcept { return command_fd_; }
-  int feedback_fd() const noexcept { return feedback_fd_; }
+  const SnapshotWriter<AxisCommand>& command_writer() const noexcept {
+    return command_writer_;
+  }
+  const SnapshotReader<AxisFeedback>& feedback_reader() const noexcept {
+    return feedback_reader_;
+  }
 
  private:
-  RobotIoClient(int socket_fd, int command_fd, int feedback_fd,
+  RobotIoClient(int socket_fd, int command_writer_fd, int feedback_reader_fd,
                 void* command_mapping, std::size_t command_mapping_size,
                 void* feedback_mapping, std::size_t feedback_mapping_size,
                 std::uint32_t axis_count, std::uint32_t generation,
-                SnapshotRegion<AxisCommand> command_region,
-                SnapshotRegion<AxisFeedback> feedback_region) noexcept;
+                SnapshotWriter<AxisCommand> command_writer,
+                SnapshotReader<AxisFeedback> feedback_reader) noexcept;
 
   void release_noexcept() noexcept;
 
   int socket_fd_{-1};
-  int command_fd_{-1};
-  int feedback_fd_{-1};
+  int command_writer_fd_{-1};
+  int feedback_reader_fd_{-1};
   void* command_mapping_{};
   std::size_t command_mapping_size_{};
   void* feedback_mapping_{};
   std::size_t feedback_mapping_size_{};
   std::uint32_t axis_count_{};
   std::uint32_t generation_{};
-  SnapshotRegion<AxisCommand> command_region_{};
-  SnapshotRegion<AxisFeedback> feedback_region_{};
+  SnapshotWriter<AxisCommand> command_writer_{};
+  SnapshotReader<AxisFeedback> feedback_reader_{};
 };
 
 }  // namespace policy_runtime

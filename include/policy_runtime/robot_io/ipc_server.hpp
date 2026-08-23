@@ -12,8 +12,8 @@ namespace policy_runtime {
 class RobotIoIpcServer {
  public:
   // Consumes connected_socket on every return path. The socket must be a connected
-  // AF_UNIX SOCK_STREAM or SOCK_SEQPACKET descriptor. The returned object owns both
-  // daemon-created memfds, their mappings, and the socket.
+  // AF_UNIX SOCK_SEQPACKET descriptor. The returned object owns daemon-created
+  // role-specific memfd descriptions, their mappings, and the socket.
   static Result<RobotIoIpcServer> create(int connected_socket, std::uint32_t axis_count,
                                          std::uint32_t generation);
 
@@ -24,39 +24,46 @@ class RobotIoIpcServer {
   ~RobotIoIpcServer();
 
   Result<void> send_setup();
-  Result<Snapshot<AxisCommand>> read_commands() const noexcept;
+  Result<Snapshot<AxisCommand>> read_commands() const;
   Result<void> publish_feedback(std::span<const AxisFeedback> axes,
                                 std::uint64_t sequence,
-                                std::int64_t timestamp_ns) noexcept;
+                                std::int64_t timestamp_ns);
   Result<void> check_peer() const;
   Result<void> close();
 
   std::uint32_t axis_count() const noexcept { return axis_count_; }
   std::uint32_t generation() const noexcept { return generation_; }
-  int command_fd() const noexcept { return command_fd_; }
-  int feedback_fd() const noexcept { return feedback_fd_; }
+  const SnapshotReader<AxisCommand>& command_reader() const noexcept {
+    return command_reader_;
+  }
+  const SnapshotWriter<AxisFeedback>& feedback_writer() const noexcept {
+    return feedback_writer_;
+  }
 
  private:
-  RobotIoIpcServer(int socket_fd, int command_fd, int feedback_fd,
+  RobotIoIpcServer(int socket_fd, int command_transfer_fd, int command_reader_fd,
+                   int feedback_writer_fd, int feedback_transfer_fd,
                    void* command_mapping, std::size_t command_mapping_size,
                    void* feedback_mapping, std::size_t feedback_mapping_size,
                    std::uint32_t axis_count, std::uint32_t generation,
-                   SnapshotRegion<AxisCommand> command_region,
-                   SnapshotRegion<AxisFeedback> feedback_region) noexcept;
+                   SnapshotReader<AxisCommand> command_reader,
+                   SnapshotWriter<AxisFeedback> feedback_writer) noexcept;
 
   void release_noexcept() noexcept;
 
   int socket_fd_{-1};
-  int command_fd_{-1};
-  int feedback_fd_{-1};
+  int command_transfer_fd_{-1};
+  int command_reader_fd_{-1};
+  int feedback_writer_fd_{-1};
+  int feedback_transfer_fd_{-1};
   void* command_mapping_{};
   std::size_t command_mapping_size_{};
   void* feedback_mapping_{};
   std::size_t feedback_mapping_size_{};
   std::uint32_t axis_count_{};
   std::uint32_t generation_{};
-  SnapshotRegion<AxisCommand> command_region_{};
-  SnapshotRegion<AxisFeedback> feedback_region_{};
+  SnapshotReader<AxisCommand> command_reader_{};
+  SnapshotWriter<AxisFeedback> feedback_writer_{};
   bool setup_sent_{false};
 };
 
