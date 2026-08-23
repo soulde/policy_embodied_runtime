@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 
 #include "policy_runtime/common/result.hpp"
@@ -31,12 +32,6 @@ class RobotIoClient {
 
   std::uint32_t axis_count() const noexcept { return axis_count_; }
   std::uint32_t generation() const noexcept { return generation_; }
-  const SnapshotWriter<AxisCommand>& command_writer() const noexcept {
-    return command_writer_;
-  }
-  const SnapshotReader<AxisFeedback>& feedback_reader() const noexcept {
-    return feedback_reader_;
-  }
 
  private:
   RobotIoClient(int socket_fd, int command_writer_fd, int feedback_reader_fd,
@@ -57,8 +52,8 @@ class RobotIoClient {
   std::size_t feedback_mapping_size_{};
   std::uint32_t axis_count_{};
   std::uint32_t generation_{};
-  SnapshotWriter<AxisCommand> command_writer_{};
-  SnapshotReader<AxisFeedback> feedback_reader_{};
+  std::optional<SnapshotWriter<AxisCommand>> command_writer_;
+  std::optional<SnapshotReader<AxisFeedback>> feedback_reader_;
 };
 
 }  // namespace policy_runtime

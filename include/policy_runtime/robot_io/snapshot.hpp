@@ -9,6 +9,7 @@
 #include <memory>
 #include <span>
 #include <type_traits>
+#include <utility>
 
 #include "policy_runtime/common/result.hpp"
 #include "policy_runtime/robot_io/ipc_protocol.hpp"
@@ -181,7 +182,8 @@ class SnapshotRegion {
 
     auto* publication = std::construct_at(reinterpret_cast<detail::PublicationControl*>(
         base + sizeof(IpcHeader)));
-    auto region = from_layout(base, size, axis_count, header, publication, layout.value());
+    auto region = from_layout(base, size, axis_count, header, publication,
+                              layout.value(), SnapshotMappingAccess::read_write);
     for (std::uint32_t slot_index = 0; slot_index < 2; ++slot_index) {
       auto* slot = std::construct_at(region.slot(slot_index));
       (void)slot;
@@ -202,7 +204,8 @@ class SnapshotRegion {
   static Result<SnapshotRegion> attach(void* address, std::size_t size,
                                        std::uint32_t expected_generation,
                                        std::uint32_t expected_axis_count,
-                                       IpcRegionKind expected_kind) {
+                                       IpcRegionKind expected_kind,
+                                       SnapshotMappingAccess mapping_access) {
     auto address_check = validate_address(address);
     if (!address_check.has_value()) {
       return Result<SnapshotRegion>::failure(address_check.error());
@@ -226,7 +229,7 @@ class SnapshotRegion {
     auto* publication = reinterpret_cast<detail::PublicationControl*>(
         base + sizeof(IpcHeader));
     auto region = from_layout(base, size, expected_axis_count, header, publication,
-                              layout.value());
+                              layout.value(), mapping_access);
     if (!region.atomics_are_lock_free()) {
       return Result<SnapshotRegion>::failure(
           {ErrorCode::unavailable, "process-shared IPC atomics are not lock-free"});
@@ -234,8 +237,8 @@ class SnapshotRegion {
     return Result<SnapshotRegion>::success(region);
   }
 
-  SnapshotReader<T> reader() const noexcept { return SnapshotReader<T>(*this); }
-  SnapshotWriter<T> writer() const noexcept { return SnapshotWriter<T>(*this); }
+  Result<SnapshotReader<T>> reader() const noexcept;
+  Result<SnapshotWriter<T>> writer() const noexcept;
 
   std::uint32_t axis_count() const noexcept { return axis_count_; }
   std::uint32_t generation() const noexcept {
@@ -252,8 +255,7 @@ class SnapshotRegion {
     if (!topology.has_value()) {
       return topology;
     }
-    if (axes.size() != axis_count_ || timestamp_ns < 0 ||
-        (sequence == 0 && timestamp_ns != 0)) {
+    if (axes.size() != axis_count_ || timestamp_ns < 0) {
       // An empty diagnostic keeps the post-mapping real-time path free of
       // dynamic string storage even when the caller supplies the wrong span.
       return Result<void>::failure({ErrorCode::invalid_argument, {}});
@@ -266,8 +268,9 @@ class SnapshotRegion {
     // the old even guard from observing payload stores ordered after the new odd
     // guard. This avoids both torn payloads and C++ data races without a mutex.
     const auto active = publication_->active_index.load(std::memory_order_seq_cst);
-    // (0, 0) is an explicitly valid initial publication. Once a slot is
-    // active, later publications are independently nondecreasing in both fields.
+    // The active index distinguishes the uninitialized state, so a first
+    // publication may use sequence zero with any nonnegative monotonic timestamp.
+    // Once active, later publications are independently nondecreasing in both.
     if (active < 2) {
       const auto current_sequence =
           publication_->published_sequence.load(std::memory_order_seq_cst);
@@ -372,7 +375,8 @@ class SnapshotRegion {
   static SnapshotRegion from_layout(std::byte* base, std::size_t size,
                                     std::uint32_t axis_count, IpcHeader* header,
                                     detail::PublicationControl* publication,
-                                    const detail::SnapshotLayout<T>& layout) {
+                                    const detail::SnapshotLayout<T>& layout,
+                                    SnapshotMappingAccess mapping_access) {
     SnapshotRegion region;
     region.base_ = base;
     region.size_ = size;
@@ -383,6 +387,7 @@ class SnapshotRegion {
     region.publication_ = publication;
     region.expected_generation_ = header->generation;
     region.expected_kind_ = static_cast<IpcRegionKind>(header->region_kind);
+    region.mapping_access_ = mapping_access;
     return region;
   }
 
@@ -441,12 +446,22 @@ class SnapshotRegion {
   detail::PublicationControl* publication_{};
   std::uint32_t expected_generation_{};
   IpcRegionKind expected_kind_{IpcRegionKind::command};
+  SnapshotMappingAccess mapping_access_{SnapshotMappingAccess::read_only};
 };
 
 template <class T>
 class SnapshotReader {
  public:
-  SnapshotReader() = default;
+  SnapshotReader(const SnapshotReader&) = delete;
+  SnapshotReader& operator=(const SnapshotReader&) = delete;
+  SnapshotReader(SnapshotReader&& other) noexcept
+      : region_(std::exchange(other.region_, {})) {}
+  SnapshotReader& operator=(SnapshotReader&& other) noexcept {
+    if (this != &other) {
+      region_ = std::exchange(other.region_, {});
+    }
+    return *this;
+  }
 
   Result<Snapshot<T>> read_latest() const noexcept { return region_.read_latest(); }
   SnapshotMappingAccess mapping_access() const noexcept {
@@ -464,7 +479,16 @@ class SnapshotReader {
 template <class T>
 class SnapshotWriter {
  public:
-  SnapshotWriter() = default;
+  SnapshotWriter(const SnapshotWriter&) = delete;
+  SnapshotWriter& operator=(const SnapshotWriter&) = delete;
+  SnapshotWriter(SnapshotWriter&& other) noexcept
+      : region_(std::exchange(other.region_, {})) {}
+  SnapshotWriter& operator=(SnapshotWriter&& other) noexcept {
+    if (this != &other) {
+      region_ = std::exchange(other.region_, {});
+    }
+    return *this;
+  }
 
   Result<void> publish(std::span<const T> axes, std::uint64_t sequence,
                        std::int64_t timestamp_ns) noexcept {
@@ -481,6 +505,28 @@ class SnapshotWriter {
   explicit SnapshotWriter(SnapshotRegion<T> region) noexcept : region_(region) {}
   SnapshotRegion<T> region_{};
 };
+
+template <class T>
+Result<SnapshotReader<T>> SnapshotRegion<T>::reader() const noexcept {
+  auto topology = validate_topology();
+  if (!topology.has_value()) {
+    return Result<SnapshotReader<T>>::failure(topology.error());
+  }
+  return Result<SnapshotReader<T>>::success(SnapshotReader<T>(*this));
+}
+
+template <class T>
+Result<SnapshotWriter<T>> SnapshotRegion<T>::writer() const noexcept {
+  auto topology = validate_topology();
+  if (!topology.has_value()) {
+    return Result<SnapshotWriter<T>>::failure(topology.error());
+  }
+  if (mapping_access_ != SnapshotMappingAccess::read_write) {
+    return Result<SnapshotWriter<T>>::failure(
+        {ErrorCode::invalid_argument, {}});
+  }
+  return Result<SnapshotWriter<T>>::success(SnapshotWriter<T>(*this));
+}
 
 template <class T>
 Result<void> validate_header(const IpcHeader& header, std::uint32_t expected_generation,

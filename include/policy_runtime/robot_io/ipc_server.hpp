@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 
 #include "policy_runtime/common/result.hpp"
@@ -33,12 +34,6 @@ class RobotIoIpcServer {
 
   std::uint32_t axis_count() const noexcept { return axis_count_; }
   std::uint32_t generation() const noexcept { return generation_; }
-  const SnapshotReader<AxisCommand>& command_reader() const noexcept {
-    return command_reader_;
-  }
-  const SnapshotWriter<AxisFeedback>& feedback_writer() const noexcept {
-    return feedback_writer_;
-  }
 
  private:
   RobotIoIpcServer(int socket_fd, int command_transfer_fd, int command_reader_fd,
@@ -62,8 +57,8 @@ class RobotIoIpcServer {
   std::size_t feedback_mapping_size_{};
   std::uint32_t axis_count_{};
   std::uint32_t generation_{};
-  SnapshotReader<AxisCommand> command_reader_{};
-  SnapshotWriter<AxisFeedback> feedback_writer_{};
+  std::optional<SnapshotReader<AxisCommand>> command_reader_;
+  std::optional<SnapshotWriter<AxisFeedback>> feedback_writer_;
   bool setup_sent_{false};
 };
 

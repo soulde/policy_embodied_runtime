@@ -14,6 +14,7 @@
 #include <utility>
 
 #include <sys/mman.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -105,20 +106,64 @@ Result<void> check_peer_fd(int socket_fd) {
   if (socket_fd < 0) {
     return Result<void>::failure({ErrorCode::unavailable, "IPC socket is closed"});
   }
-  std::byte byte{};
+  pollfd descriptor{socket_fd, static_cast<short>(POLLIN | POLLRDHUP), 0};
+  int polled{};
   for (;;) {
-    const auto received = recv(socket_fd, &byte, sizeof(byte), MSG_PEEK | MSG_DONTWAIT);
-    if (received > 0 || (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
-      return Result<void>::success();
-    }
-    if (received == 0 || errno == ECONNRESET || errno == ENOTCONN) {
-      return Result<void>::failure({ErrorCode::unavailable, "IPC peer disconnected"});
-    }
-    if (received < 0 && errno == EINTR) {
+    polled = poll(&descriptor, 1, 0);
+    if (polled < 0 && errno == EINTR) {
       continue;
     }
-    return Result<void>::failure(system_error(ErrorCode::io, "recv(MSG_PEEK)"));
+    break;
   }
+  if (polled < 0) {
+    return Result<void>::failure(system_error(ErrorCode::io, "poll(IPC peer)"));
+  }
+  if (polled == 0) {
+    return Result<void>::success();
+  }
+
+  bool unexpected_packet = false;
+  bool disconnected = false;
+  if ((descriptor.revents & POLLIN) != 0) {
+    std::array<std::byte, 64> discarded{};
+    for (;;) {
+      const auto received = recv(socket_fd, discarded.data(), discarded.size(),
+                                 MSG_DONTWAIT);
+      if (received > 0) {
+        unexpected_packet = true;
+        continue;
+      }
+      if (received == 0) {
+        if ((descriptor.revents & (POLLHUP | POLLRDHUP)) != 0) {
+          disconnected = true;
+        } else {
+          unexpected_packet = true;
+        }
+        break;
+      }
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        break;
+      }
+      if (errno == ECONNRESET || errno == ENOTCONN) {
+        disconnected = true;
+        break;
+      }
+      return Result<void>::failure(
+          system_error(ErrorCode::io, "recv(unexpected IPC packet)"));
+    }
+  }
+  if (unexpected_packet) {
+    return Result<void>::failure(
+        {ErrorCode::protocol, "unexpected packet after IPC setup"});
+  }
+  if (disconnected ||
+      (descriptor.revents & (POLLRDHUP | POLLHUP | POLLERR | POLLNVAL)) != 0) {
+    return Result<void>::failure({ErrorCode::unavailable, "IPC peer disconnected"});
+  }
+  return Result<void>::success();
 }
 
 Result<ScopedFd> reopen_read_only(int fd) {
@@ -192,15 +237,20 @@ struct AttachedMapping {
 };
 
 template <class T>
-Result<AttachedMapping<T>> attach_mapping(int fd, std::size_t size, int protection,
+Result<AttachedMapping<T>> attach_mapping(int fd, std::size_t size,
+                                          SnapshotMappingAccess mapping_access,
                                           std::uint32_t generation,
                                           std::uint32_t axis_count, IpcRegionKind kind) {
+  const int protection = mapping_access == SnapshotMappingAccess::read_write
+                             ? PROT_READ | PROT_WRITE
+                             : PROT_READ;
   void* address = mmap(nullptr, size, protection, MAP_SHARED, fd, 0);
   if (address == MAP_FAILED) {
     return Result<AttachedMapping<T>>::failure(system_error(ErrorCode::io, "mmap(role)"));
   }
   ScopedMapping mapping(address, size);
-  auto region = SnapshotRegion<T>::attach(address, size, generation, axis_count, kind);
+  auto region = SnapshotRegion<T>::attach(address, size, generation, axis_count, kind,
+                                           mapping_access);
   if (!region.has_value()) {
     return Result<AttachedMapping<T>>::failure(region.error());
   }
@@ -229,16 +279,26 @@ Result<RobotIoIpcServer> RobotIoIpcServer::create(int connected_socket,
     return Result<RobotIoIpcServer>::failure(feedback.error());
   }
   auto command_mapping = attach_mapping<AxisCommand>(
-      command.value().read_only_fd.get(), command.value().size, PROT_READ, generation,
-      axis_count, IpcRegionKind::command);
+      command.value().read_only_fd.get(), command.value().size,
+      SnapshotMappingAccess::read_only, generation, axis_count, IpcRegionKind::command);
   if (!command_mapping.has_value()) {
     return Result<RobotIoIpcServer>::failure(command_mapping.error());
   }
   auto feedback_mapping = attach_mapping<AxisFeedback>(
       feedback.value().read_write_fd.get(), feedback.value().size,
-      PROT_READ | PROT_WRITE, generation, axis_count, IpcRegionKind::feedback);
+      SnapshotMappingAccess::read_write, generation, axis_count,
+      IpcRegionKind::feedback);
   if (!feedback_mapping.has_value()) {
     return Result<RobotIoIpcServer>::failure(feedback_mapping.error());
+  }
+
+  auto command_reader = command_mapping.value().region.reader();
+  if (!command_reader.has_value()) {
+    return Result<RobotIoIpcServer>::failure(command_reader.error());
+  }
+  auto feedback_writer = feedback_mapping.value().region.writer();
+  if (!feedback_writer.has_value()) {
+    return Result<RobotIoIpcServer>::failure(feedback_writer.error());
   }
 
   RobotIoIpcServer server(
@@ -247,7 +307,7 @@ Result<RobotIoIpcServer> RobotIoIpcServer::create(int connected_socket,
       feedback.value().read_only_fd.release(), command_mapping.value().mapping.release(),
       command.value().size, feedback_mapping.value().mapping.release(),
       feedback.value().size, axis_count, generation,
-      command_mapping.value().region.reader(), feedback_mapping.value().region.writer());
+      std::move(command_reader.value()), std::move(feedback_writer.value()));
   return Result<RobotIoIpcServer>::success(std::move(server));
 }
 
@@ -269,8 +329,8 @@ RobotIoIpcServer::RobotIoIpcServer(
       feedback_mapping_size_(feedback_mapping_size),
       axis_count_(axis_count),
       generation_(generation),
-      command_reader_(command_reader),
-      feedback_writer_(feedback_writer) {}
+      command_reader_(std::move(command_reader)),
+      feedback_writer_(std::move(feedback_writer)) {}
 
 RobotIoIpcServer::RobotIoIpcServer(RobotIoIpcServer&& other) noexcept
     : socket_fd_(std::exchange(other.socket_fd_, -1)),
@@ -284,11 +344,11 @@ RobotIoIpcServer::RobotIoIpcServer(RobotIoIpcServer&& other) noexcept
       feedback_mapping_size_(std::exchange(other.feedback_mapping_size_, 0)),
       axis_count_(std::exchange(other.axis_count_, 0)),
       generation_(std::exchange(other.generation_, 0)),
-      command_reader_(other.command_reader_),
-      feedback_writer_(other.feedback_writer_),
+      command_reader_(std::move(other.command_reader_)),
+      feedback_writer_(std::move(other.feedback_writer_)),
       setup_sent_(std::exchange(other.setup_sent_, false)) {
-  other.command_reader_ = {};
-  other.feedback_writer_ = {};
+  other.command_reader_.reset();
+  other.feedback_writer_.reset();
 }
 
 RobotIoIpcServer& RobotIoIpcServer::operator=(RobotIoIpcServer&& other) noexcept {
@@ -305,11 +365,11 @@ RobotIoIpcServer& RobotIoIpcServer::operator=(RobotIoIpcServer&& other) noexcept
     feedback_mapping_size_ = std::exchange(other.feedback_mapping_size_, 0);
     axis_count_ = std::exchange(other.axis_count_, 0);
     generation_ = std::exchange(other.generation_, 0);
-    command_reader_ = other.command_reader_;
-    feedback_writer_ = other.feedback_writer_;
+    command_reader_ = std::move(other.command_reader_);
+    feedback_writer_ = std::move(other.feedback_writer_);
     setup_sent_ = std::exchange(other.setup_sent_, false);
-    other.command_reader_ = {};
-    other.feedback_writer_ = {};
+    other.command_reader_.reset();
+    other.feedback_writer_.reset();
   }
   return *this;
 }
@@ -357,6 +417,20 @@ Result<void> RobotIoIpcServer::send_setup() {
     return Result<void>::failure({ErrorCode::io, "short IPC setup packet"});
   }
   setup_sent_ = true;
+  Error close_error{};
+  bool close_failed = false;
+  for (auto* descriptor : {&command_transfer_fd_, &feedback_transfer_fd_}) {
+    if (*descriptor >= 0) {
+      if (::close(*descriptor) != 0 && !close_failed) {
+        close_error = system_error(ErrorCode::io, "close(setup transfer descriptor)");
+        close_failed = true;
+      }
+      *descriptor = -1;
+    }
+  }
+  if (close_failed) {
+    return Result<void>::failure(std::move(close_error));
+  }
   return Result<void>::success();
 }
 
@@ -365,7 +439,11 @@ Result<Snapshot<AxisCommand>> RobotIoIpcServer::read_commands() const {
   if (!peer.has_value()) {
     return Result<Snapshot<AxisCommand>>::failure(peer.error());
   }
-  return command_reader_.read_latest();
+  if (!command_reader_.has_value()) {
+    return Result<Snapshot<AxisCommand>>::failure(
+        {ErrorCode::unavailable, "IPC command reader is closed"});
+  }
+  return command_reader_->read_latest();
 }
 
 Result<void> RobotIoIpcServer::publish_feedback(std::span<const AxisFeedback> axes,
@@ -375,7 +453,11 @@ Result<void> RobotIoIpcServer::publish_feedback(std::span<const AxisFeedback> ax
   if (!peer.has_value()) {
     return peer;
   }
-  return feedback_writer_.publish(axes, sequence, timestamp_ns);
+  if (!feedback_writer_.has_value()) {
+    return Result<void>::failure(
+        {ErrorCode::unavailable, "IPC feedback writer is closed"});
+  }
+  return feedback_writer_->publish(axes, sequence, timestamp_ns);
 }
 
 Result<void> RobotIoIpcServer::check_peer() const { return check_peer_fd(socket_fd_); }
@@ -389,6 +471,8 @@ Result<void> RobotIoIpcServer::close() {
       failed = true;
     }
   };
+  command_reader_.reset();
+  feedback_writer_.reset();
   if (command_mapping_ != nullptr) {
     if (munmap(command_mapping_, command_mapping_size_) != 0) {
       remember("munmap(command)");
@@ -410,8 +494,6 @@ Result<void> RobotIoIpcServer::close() {
       *descriptor = -1;
     }
   }
-  command_reader_ = {};
-  feedback_writer_ = {};
   command_mapping_size_ = 0;
   feedback_mapping_size_ = 0;
   axis_count_ = 0;
@@ -422,6 +504,8 @@ Result<void> RobotIoIpcServer::close() {
 }
 
 void RobotIoIpcServer::release_noexcept() noexcept {
+  command_reader_.reset();
+  feedback_writer_.reset();
   if (command_mapping_ != nullptr) {
     (void)munmap(command_mapping_, command_mapping_size_);
     command_mapping_ = nullptr;
@@ -437,8 +521,6 @@ void RobotIoIpcServer::release_noexcept() noexcept {
       *descriptor = -1;
     }
   }
-  command_reader_ = {};
-  feedback_writer_ = {};
   command_mapping_size_ = 0;
   feedback_mapping_size_ = 0;
   axis_count_ = 0;

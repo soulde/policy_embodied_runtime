@@ -7,7 +7,9 @@
 #include <fcntl.h>
 #include <limits>
 #include <span>
+#include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -33,9 +35,36 @@ using policy_runtime::IpcRegionKind;
 using policy_runtime::RobotIoClient;
 using policy_runtime::RobotIoIpcServer;
 using policy_runtime::SnapshotMappingAccess;
+using policy_runtime::SnapshotReader;
 using policy_runtime::SnapshotRegion;
+using policy_runtime::SnapshotWriter;
 
 constexpr std::uint32_t kGeneration = 73;
+
+template <class T>
+concept HasCommandWriterAccessor = requires(T& endpoint) { endpoint.command_writer(); };
+
+template <class T>
+concept HasFeedbackReaderAccessor = requires(T& endpoint) { endpoint.feedback_reader(); };
+
+template <class T>
+concept HasCommandReaderAccessor = requires(T& endpoint) { endpoint.command_reader(); };
+
+template <class T>
+concept HasFeedbackWriterAccessor = requires(T& endpoint) { endpoint.feedback_writer(); };
+
+static_assert(!HasCommandWriterAccessor<RobotIoClient>);
+static_assert(!HasFeedbackReaderAccessor<RobotIoClient>);
+static_assert(!HasCommandReaderAccessor<RobotIoIpcServer>);
+static_assert(!HasFeedbackWriterAccessor<RobotIoIpcServer>);
+static_assert(!std::is_default_constructible_v<SnapshotReader<AxisCommand>>);
+static_assert(!std::is_copy_constructible_v<SnapshotReader<AxisCommand>>);
+static_assert(!std::is_copy_assignable_v<SnapshotReader<AxisCommand>>);
+static_assert(std::is_move_constructible_v<SnapshotReader<AxisCommand>>);
+static_assert(!std::is_default_constructible_v<SnapshotWriter<AxisCommand>>);
+static_assert(!std::is_copy_constructible_v<SnapshotWriter<AxisCommand>>);
+static_assert(!std::is_copy_assignable_v<SnapshotWriter<AxisCommand>>);
+static_assert(std::is_move_constructible_v<SnapshotWriter<AxisCommand>>);
 
 AxisCommand command(double target, std::uint64_t sequence = 0) {
   AxisCommand value{};
@@ -109,6 +138,33 @@ std::size_t open_descriptor_count() {
                     std::filesystem::directory_iterator{}));
 }
 
+struct DescriptorModes {
+  std::size_t read_only{};
+  std::size_t read_write{};
+};
+
+DescriptorModes memfd_modes(const std::string& name) {
+  DescriptorModes modes{};
+  for (const auto& entry : std::filesystem::directory_iterator("/proc/self/fd")) {
+    std::error_code error;
+    const auto target = std::filesystem::read_symlink(entry.path(), error).string();
+    if (error || target.find("memfd:" + name) == std::string::npos) {
+      continue;
+    }
+    const int fd = std::stoi(entry.path().filename().string());
+    const int flags = fcntl(fd, F_GETFL);
+    if (flags < 0) {
+      continue;
+    }
+    if ((flags & O_ACCMODE) == O_RDONLY) {
+      ++modes.read_only;
+    } else if ((flags & O_ACCMODE) == O_RDWR) {
+      ++modes.read_write;
+    }
+  }
+  return modes;
+}
+
 void send_raw_setup(int socket_fd, std::size_t payload_size,
                     std::span<const int> descriptors) {
   policy_runtime::IpcSetupMessage setup{};
@@ -132,8 +188,12 @@ void send_raw_setup(int socket_fd, std::size_t payload_size,
 
 TEST(IpcTest, PublishesOnlyCompleteSnapshots) {
   auto [mapping, region] = make_test_region<AxisCommand>(2, IpcRegionKind::command);
-  auto writer = region.writer();
-  auto reader = region.reader();
+  auto writer_result = region.writer();
+  auto reader_result = region.reader();
+  ASSERT_TRUE(writer_result.has_value());
+  ASSERT_TRUE(reader_result.has_value());
+  auto writer = std::move(writer_result.value());
+  auto reader = std::move(reader_result.value());
   std::array commands{command(1.0, 7), command(2.0, 7)};
   for (auto& value : commands) {
     value.timestamp_ns = 1000;
@@ -151,8 +211,12 @@ TEST(IpcTest, PublishesOnlyCompleteSnapshots) {
 
 TEST(IpcTest, SnapshotStressNeverReturnsMixedAxes) {
   auto [mapping, region] = make_test_region<AxisCommand>(12, IpcRegionKind::command);
-  auto writer_view = region.writer();
-  auto reader_view = region.reader();
+  auto writer_result = region.writer();
+  auto reader_result = region.reader();
+  ASSERT_TRUE(writer_result.has_value());
+  ASSERT_TRUE(reader_result.has_value());
+  auto writer_view = std::move(writer_result.value());
+  auto reader_view = std::move(reader_result.value());
   std::array<AxisCommand, 12> initial{};
   for (std::size_t axis = 0; axis < initial.size(); ++axis) {
     initial[axis] = command(static_cast<double>(axis), 0);
@@ -211,8 +275,12 @@ TEST(IpcTest, SnapshotStressNeverReturnsMixedAxes) {
 
 TEST(IpcTest, RejectsDecreasingPublicationMetadataAndInconsistentControlMetadata) {
   auto [mapping, region] = make_test_region<AxisCommand>(1, IpcRegionKind::command);
-  auto writer = region.writer();
-  auto reader = region.reader();
+  auto writer_result = region.writer();
+  auto reader_result = region.reader();
+  ASSERT_TRUE(writer_result.has_value());
+  ASSERT_TRUE(reader_result.has_value());
+  auto writer = std::move(writer_result.value());
+  auto reader = std::move(reader_result.value());
   std::array values{command(1.0, 0)};
   ASSERT_TRUE(writer.publish(values, 0, 0).has_value());
   values[0] = command(2.0, 7);
@@ -235,10 +303,48 @@ TEST(IpcTest, RejectsDecreasingPublicationMetadataAndInconsistentControlMetadata
   EXPECT_EQ(inconsistent.error().code, ErrorCode::unavailable);
 }
 
+TEST(IpcTest, AllowsFirstSequenceZeroWithRealMonotonicTimestamp) {
+  auto [mapping, region] = make_test_region<AxisCommand>(1, IpcRegionKind::command);
+  auto writer_result = region.writer();
+  auto reader_result = region.reader();
+  ASSERT_TRUE(writer_result.has_value());
+  ASSERT_TRUE(reader_result.has_value());
+  auto writer = std::move(writer_result.value());
+  auto reader = std::move(reader_result.value());
+  std::array values{command(4.0, 0)};
+  values[0].timestamp_ns = 987654321;
+
+  ASSERT_TRUE(writer.publish(values, 0, 987654321).has_value());
+  auto snapshot = reader.read_latest();
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot.value().sequence, 0U);
+  EXPECT_EQ(snapshot.value().timestamp_ns, 987654321);
+}
+
+TEST(IpcTest, MappingAccessPreventsReadOnlyRegionFromMintingWriter) {
+  auto [mapping, initialized] =
+      make_test_region<AxisCommand>(1, IpcRegionKind::command);
+  ASSERT_EQ(mprotect(mapping.address, mapping.size, PROT_READ), 0);
+  auto read_only = SnapshotRegion<AxisCommand>::attach(
+      mapping.address, mapping.size, kGeneration, 1, IpcRegionKind::command,
+      SnapshotMappingAccess::read_only);
+  ASSERT_TRUE(read_only.has_value());
+
+  auto reader = read_only.value().reader();
+  EXPECT_TRUE(reader.has_value());
+  auto writer = read_only.value().writer();
+  ASSERT_FALSE(writer.has_value());
+  EXPECT_EQ(writer.error().code, ErrorCode::invalid_argument);
+}
+
 TEST(IpcTest, PublicViewsRejectMutatedTopologyBeforeAccessingSlots) {
   auto [mapping, region] = make_test_region<AxisCommand>(1, IpcRegionKind::command);
-  auto writer = region.writer();
-  auto reader = region.reader();
+  auto writer_result = region.writer();
+  auto reader_result = region.reader();
+  ASSERT_TRUE(writer_result.has_value());
+  ASSERT_TRUE(reader_result.has_value());
+  auto writer = std::move(writer_result.value());
+  auto reader = std::move(reader_result.value());
   std::array values{command(1.0, 1)};
   auto* header = static_cast<policy_runtime::IpcHeader*>(mapping.address);
   header->axis_stride += 8;
@@ -313,27 +419,44 @@ TEST(IpcTest, MappingSizeAcceptsFrozenAxisRangeOnly) {
 }
 
 TEST(IpcTest, TransfersSealedCloexecMemfdsAndSnapshotsBothDirections) {
+  const auto initial_descriptor_count = open_descriptor_count();
   auto sockets = make_socket_pair();
+  EXPECT_EQ(open_descriptor_count(), initial_descriptor_count + 2);
   auto server_result = RobotIoIpcServer::create(sockets[0], 2, kGeneration);
   ASSERT_TRUE(server_result.has_value()) << server_result.error().message;
   auto server = std::move(server_result.value());
+  EXPECT_EQ(open_descriptor_count(), initial_descriptor_count + 6);
+  EXPECT_EQ(memfd_modes("robot-io-command").read_only, 1U);
+  EXPECT_EQ(memfd_modes("robot-io-command").read_write, 1U);
+  EXPECT_EQ(memfd_modes("robot-io-feedback").read_only, 1U);
+  EXPECT_EQ(memfd_modes("robot-io-feedback").read_write, 1U);
   ASSERT_TRUE(server.send_setup().has_value());
+  EXPECT_EQ(open_descriptor_count(), initial_descriptor_count + 4);
+  EXPECT_EQ(memfd_modes("robot-io-command").read_only, 1U);
+  EXPECT_EQ(memfd_modes("robot-io-command").read_write, 0U);
+  EXPECT_EQ(memfd_modes("robot-io-feedback").read_only, 0U);
+  EXPECT_EQ(memfd_modes("robot-io-feedback").read_write, 1U);
 
   auto client_result = RobotIoClient::connect(sockets[1], kGeneration);
   ASSERT_TRUE(client_result.has_value()) << client_result.error().message;
   auto client = std::move(client_result.value());
+  EXPECT_EQ(open_descriptor_count(), initial_descriptor_count + 6);
 
   EXPECT_EQ(client.axis_count(), 2U);
-  EXPECT_EQ(client.command_writer().mapping_access(), SnapshotMappingAccess::read_write);
-  EXPECT_EQ(client.feedback_reader().mapping_access(), SnapshotMappingAccess::read_only);
-  EXPECT_EQ(server.command_reader().mapping_access(), SnapshotMappingAccess::read_only);
-  EXPECT_EQ(server.feedback_writer().mapping_access(), SnapshotMappingAccess::read_write);
+  EXPECT_EQ(memfd_modes("robot-io-command").read_only, 1U);
+  EXPECT_EQ(memfd_modes("robot-io-command").read_write, 1U);
+  EXPECT_EQ(memfd_modes("robot-io-feedback").read_only, 1U);
+  EXPECT_EQ(memfd_modes("robot-io-feedback").read_write, 1U);
 
-  const std::array commands{command(3.5, 11), command(-4.5, 11)};
-  ASSERT_TRUE(client.publish_commands(commands, 11, 110).has_value());
+  std::array commands{command(3.5, 0), command(-4.5, 0)};
+  for (auto& value : commands) {
+    value.timestamp_ns = 110;
+  }
+  ASSERT_TRUE(client.publish_commands(commands, 0, 110).has_value());
   auto daemon_commands = server.read_commands();
   ASSERT_TRUE(daemon_commands.has_value());
-  EXPECT_EQ(daemon_commands.value().sequence, 11U);
+  EXPECT_EQ(daemon_commands.value().sequence, 0U);
+  EXPECT_EQ(daemon_commands.value().timestamp_ns, 110);
   EXPECT_DOUBLE_EQ(daemon_commands.value().axes[0].target, 3.5);
   EXPECT_DOUBLE_EQ(daemon_commands.value().axes[1].target, -4.5);
 
@@ -343,6 +466,11 @@ TEST(IpcTest, TransfersSealedCloexecMemfdsAndSnapshotsBothDirections) {
   ASSERT_TRUE(host_feedback.has_value());
   EXPECT_EQ(host_feedback.value().sequence, 12U);
   EXPECT_DOUBLE_EQ(host_feedback.value().axes[1].position, 2.5);
+
+  ASSERT_TRUE(client.close().has_value());
+  EXPECT_EQ(open_descriptor_count(), initial_descriptor_count + 3);
+  ASSERT_TRUE(server.close().has_value());
+  EXPECT_EQ(open_descriptor_count(), initial_descriptor_count);
 }
 
 TEST(IpcTest, RejectsUnixStreamSockets) {
@@ -474,13 +602,19 @@ TEST(IpcTest, MovedFromAndDisconnectedServerOperationsAreUnavailable) {
   auto client = std::move(client_result.value());
 
   auto moved_server = std::move(server);
+  auto moved_client = std::move(client);
   EXPECT_FALSE(server.read_commands().has_value());
   const std::array feedback_values{feedback(1.0, 1)};
   EXPECT_FALSE(server.publish_feedback(feedback_values, 1, 10).has_value());
   EXPECT_EQ(server.axis_count(), 0U);
   EXPECT_EQ(server.generation(), 0U);
+  const std::array commands{command(2.0, 0)};
+  EXPECT_FALSE(client.publish_commands(commands, 0, 123).has_value());
+  EXPECT_FALSE(client.read_feedback().has_value());
+  EXPECT_EQ(client.axis_count(), 0U);
+  EXPECT_EQ(client.generation(), 0U);
 
-  ASSERT_TRUE(client.close().has_value());
+  ASSERT_TRUE(moved_client.close().has_value());
   auto disconnected_read = moved_server.read_commands();
   ASSERT_FALSE(disconnected_read.has_value());
   EXPECT_EQ(disconnected_read.error().code, ErrorCode::unavailable);
@@ -492,6 +626,73 @@ TEST(IpcTest, MovedFromAndDisconnectedServerOperationsAreUnavailable) {
   auto closed_server = std::move(moved_server);
   EXPECT_FALSE(moved_server.read_commands().has_value());
   EXPECT_FALSE(closed_server.read_commands().has_value());
+  auto closed_client = std::move(moved_client);
+  EXPECT_FALSE(moved_client.publish_commands(commands, 0, 123).has_value());
+  EXPECT_FALSE(closed_client.publish_commands(commands, 0, 123).has_value());
+}
+
+TEST(IpcTest, UnexpectedPacketThenDisconnectCannotMaskEndpointFailure) {
+  {
+    auto sockets = make_socket_pair();
+    const int peer = dup(sockets[1]);
+    ASSERT_GE(peer, 0);
+    auto server_result = RobotIoIpcServer::create(sockets[0], 1, kGeneration);
+    ASSERT_TRUE(server_result.has_value());
+    auto server = std::move(server_result.value());
+    ASSERT_TRUE(server.send_setup().has_value());
+    auto client_result = RobotIoClient::connect(sockets[1], kGeneration);
+    ASSERT_TRUE(client_result.has_value());
+    auto client = std::move(client_result.value());
+    const std::byte unexpected{0x5a};
+    ASSERT_EQ(send(peer, &unexpected, sizeof(unexpected), MSG_NOSIGNAL), 1);
+    ASSERT_TRUE(client.close().has_value());
+    ASSERT_EQ(close(peer), 0);
+
+    auto health = server.check_peer();
+    ASSERT_FALSE(health.has_value());
+    EXPECT_TRUE(health.error().code == ErrorCode::protocol ||
+                health.error().code == ErrorCode::unavailable);
+    auto read = server.read_commands();
+    ASSERT_FALSE(read.has_value());
+    EXPECT_TRUE(read.error().code == ErrorCode::protocol ||
+                read.error().code == ErrorCode::unavailable);
+    const std::array values{feedback(1.0, 0)};
+    auto publish = server.publish_feedback(values, 0, 123);
+    ASSERT_FALSE(publish.has_value());
+    EXPECT_TRUE(publish.error().code == ErrorCode::protocol ||
+                publish.error().code == ErrorCode::unavailable);
+  }
+
+  {
+    auto sockets = make_socket_pair();
+    const int peer = dup(sockets[0]);
+    ASSERT_GE(peer, 0);
+    auto server_result = RobotIoIpcServer::create(sockets[0], 1, kGeneration);
+    ASSERT_TRUE(server_result.has_value());
+    auto server = std::move(server_result.value());
+    ASSERT_TRUE(server.send_setup().has_value());
+    auto client_result = RobotIoClient::connect(sockets[1], kGeneration);
+    ASSERT_TRUE(client_result.has_value());
+    auto client = std::move(client_result.value());
+    const std::byte unexpected{0x2a};
+    ASSERT_EQ(send(peer, &unexpected, sizeof(unexpected), MSG_NOSIGNAL), 1);
+    ASSERT_TRUE(server.close().has_value());
+    ASSERT_EQ(close(peer), 0);
+
+    auto health = client.check_peer();
+    ASSERT_FALSE(health.has_value());
+    EXPECT_TRUE(health.error().code == ErrorCode::protocol ||
+                health.error().code == ErrorCode::unavailable);
+    auto read = client.read_feedback();
+    ASSERT_FALSE(read.has_value());
+    EXPECT_TRUE(read.error().code == ErrorCode::protocol ||
+                read.error().code == ErrorCode::unavailable);
+    const std::array values{command(1.0, 0)};
+    auto publish = client.publish_commands(values, 0, 123);
+    ASSERT_FALSE(publish.has_value());
+    EXPECT_TRUE(publish.error().code == ErrorCode::protocol ||
+                publish.error().code == ErrorCode::unavailable);
+  }
 }
 
 TEST(IpcTest, ReportsPeerDisconnectWithoutBlocking) {
