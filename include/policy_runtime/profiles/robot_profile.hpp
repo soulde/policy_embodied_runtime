@@ -29,11 +29,16 @@ struct AxisConfig {
   std::uint32_t product_code{};
   std::uint32_t revision{};
   Cia402Mode mode{};
+  // Device counts per engineering unit for the configured cyclic mode.
   double scale{};
   double minimum{};
   double maximum{};
   std::chrono::milliseconds command_timeout{};
   std::string safety_group;
+  // Maximum engineering-unit target change per daemon cycle.
+  double slew_limit{};
+  // Maximum target-to-actual error in engineering units.
+  double following_error_limit{};
 };
 
 struct RobotProfile {

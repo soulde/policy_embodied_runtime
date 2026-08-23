@@ -13,6 +13,8 @@
         "scale": "1000000",
         "minimum": "-3.14159",
         "maximum": "3.14159",
+        "slew_limit": "0.05",
+        "following_error_limit": "0.2",
         "command_timeout_ms": "100",
         "safety_group": "arm"
       }
@@ -30,6 +32,8 @@
         "scale": 1000,
         "minimum": -2.5,
         "maximum": 2.5,
+        "slew_limit": 0.1,
+        "following_error_limit": 0.3,
         "command_timeout_ms": 80,
         "safety_group": "arm"
       }
@@ -49,6 +53,8 @@
         "scale": "1000000",
         "minimum": "-3.14159",
         "maximum": "3.14159",
+        "slew_limit": "0.05",
+        "following_error_limit": "0.2",
         "command_timeout_ms": "100",
         "safety_group": "arm"
       }
@@ -66,6 +72,8 @@
         "scale": "1000",
         "minimum": "-2.5",
         "maximum": "2.5",
+        "slew_limit": "0.1",
+        "following_error_limit": "0.3",
         "command_timeout_ms": "80",
         "safety_group": "arm"
       }

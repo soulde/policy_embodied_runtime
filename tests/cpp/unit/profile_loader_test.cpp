@@ -161,6 +161,20 @@ TEST(ProfileLoaderTest, ParsesStaticCia402ModesAndHexadecimalIdentity) {
   EXPECT_EQ(profile.value().axes.at(0).revision, 0x00010420U);
   EXPECT_EQ(profile.value().axes.at(0).command_timeout.count(), 100);
   EXPECT_EQ(profile.value().axes.at(1).mode, Cia402Mode::csv);
+  EXPECT_DOUBLE_EQ(profile.value().axes.at(0).slew_limit, 0.05);
+  EXPECT_DOUBLE_EQ(profile.value().axes.at(0).following_error_limit, 0.2);
+}
+
+TEST(ProfileLoaderTest, RequiresPositiveCia402SlewAndFollowingErrorLimits) {
+  auto value = elmo_profile();
+  value["sensors"][0]["args"]["slew_limit"] = "0";
+  expect_robot_rejected(value);
+
+  value = elmo_profile();
+  for (auto* side : {"sensors", "actuators"}) {
+    value[side][0]["args"].erase("following_error_limit");
+  }
+  expect_robot_rejected(value);
 }
 
 TEST(ProfileLoaderTest, MapsCstToTheStaticCia402ModeValue) {
@@ -210,7 +224,7 @@ TEST(ProfileLoaderTest, RejectsMoreThanTwelveDerivedAxes) {
 TEST(ProfileLoaderTest, RequiresConsistentStaticAxisConfiguration) {
   for (const std::string key : {"vendor_id", "product_code", "revision", "mode",
                                 "scale", "minimum", "maximum", "command_timeout_ms",
-                                "safety_group"}) {
+                                "safety_group", "slew_limit", "following_error_limit"}) {
     auto profile = elmo_profile();
     profile["actuators"][0]["args"][key] = key == "mode" ? Json("cst") : Json("17");
     expect_robot_rejected(profile);

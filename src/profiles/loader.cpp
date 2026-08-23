@@ -486,11 +486,13 @@ std::optional<AxisConfig> parse_axis(const DeviceConfig& config, std::string& er
   const auto* scale_text = arg(config, "scale", error);
   const auto* minimum_text = arg(config, "minimum", error);
   const auto* maximum_text = arg(config, "maximum", error);
+  const auto* slew_text = arg(config, "slew_limit", error);
+  const auto* following_error_text = arg(config, "following_error_limit", error);
   const auto* timeout_text = arg(config, "command_timeout_ms", error);
   const auto* safety_group = arg(config, "safety_group", error);
   if (!alias_text || !position_text || !vendor_text || !product_text || !revision_text ||
-      !mode_text || !scale_text || !minimum_text || !maximum_text || !timeout_text ||
-      !safety_group) {
+      !mode_text || !scale_text || !minimum_text || !maximum_text || !slew_text ||
+      !following_error_text || !timeout_text || !safety_group) {
     return std::nullopt;
   }
 
@@ -503,9 +505,11 @@ std::optional<AxisConfig> parse_axis(const DeviceConfig& config, std::string& er
   const auto scale = parse_double(*scale_text);
   const auto minimum = parse_double(*minimum_text);
   const auto maximum = parse_double(*maximum_text);
+  const auto slew_limit = parse_double(*slew_text);
+  const auto following_error_limit = parse_double(*following_error_text);
   if (!alias || !position || !vendor || !product || !revision || !timeout || !scale ||
-      !minimum || !maximum || *timeout > static_cast<std::uint64_t>(
-                                     std::numeric_limits<std::int64_t>::max())) {
+      !minimum || !maximum || !slew_limit || !following_error_limit ||
+      *timeout > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
     error = config.name + ".args contains an invalid numeric value";
     return std::nullopt;
   }
@@ -520,8 +524,10 @@ std::optional<AxisConfig> parse_axis(const DeviceConfig& config, std::string& er
     error = config.name + ".args.mode must be csp, csv, or cst";
     return std::nullopt;
   }
-  if (*scale <= 0.0 || *minimum > *maximum) {
-    error = config.name + ".args requires positive scale and minimum <= maximum";
+  if (*scale <= 0.0 || *minimum > *maximum || *slew_limit <= 0.0 ||
+      *following_error_limit <= 0.0) {
+    error = config.name +
+            ".args requires positive scale/safety limits and minimum <= maximum";
     return std::nullopt;
   }
   if (*timeout == 0 || is_blank(*safety_group)) {
@@ -539,7 +545,9 @@ std::optional<AxisConfig> parse_axis(const DeviceConfig& config, std::string& er
                     *minimum,
                     *maximum,
                     std::chrono::milliseconds(static_cast<std::int64_t>(*timeout)),
-                    *safety_group};
+                    *safety_group,
+                    *slew_limit,
+                    *following_error_limit};
 }
 
 bool same_static_config(const AxisConfig& left, const AxisConfig& right) {
@@ -547,7 +555,9 @@ bool same_static_config(const AxisConfig& left, const AxisConfig& right) {
          left.vendor_id == right.vendor_id && left.product_code == right.product_code &&
          left.revision == right.revision && left.mode == right.mode && left.scale == right.scale &&
          left.minimum == right.minimum && left.maximum == right.maximum &&
-         left.command_timeout == right.command_timeout && left.safety_group == right.safety_group;
+         left.command_timeout == right.command_timeout && left.safety_group == right.safety_group &&
+         left.slew_limit == right.slew_limit &&
+         left.following_error_limit == right.following_error_limit;
 }
 
 struct DerivedAxis {
