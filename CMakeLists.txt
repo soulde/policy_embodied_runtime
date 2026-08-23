@@ -114,6 +114,20 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         PRIVATE policy_runtime_core GTest::gtest_main)
     policy_runtime_configure_target(ethercat_fake_backend_test)
 
+    add_executable(igh_sdo_semantics_test
+        tests/cpp/integration/igh_sdo_semantics_test.cpp
+        tests/cpp/support/igh_shim.cpp
+        src/transport/ethercat/elmo_gold.cpp
+        src/transport/ethercat/igh_backend.cpp
+        src/transport/ethercat/master.cpp)
+    target_include_directories(igh_sdo_semantics_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp/support
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(igh_sdo_semantics_test PRIVATE
+        POLICY_RUNTIME_WITH_IGH=1)
+    target_link_libraries(igh_sdo_semantics_test PRIVATE GTest::gtest_main)
+    policy_runtime_configure_target(igh_sdo_semantics_test)
+
     include(GoogleTest)
     gtest_discover_tests(policy_runtime_unit_tests TEST_PREFIX result_test.
         DISCOVERY_MODE PRE_TEST)
@@ -133,4 +147,6 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(ethercat_fake_backend_test
         TEST_PREFIX ethercat_fake_backend_test. DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(igh_sdo_semantics_test
+        TEST_PREFIX igh_sdo_semantics_test. DISCOVERY_MODE PRE_TEST)
 endif()

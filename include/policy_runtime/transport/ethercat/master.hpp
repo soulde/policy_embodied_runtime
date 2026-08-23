@@ -63,13 +63,18 @@ class EthercatMailbox final : public ObjectDictionaryTransport {
 
   Result<MailboxRequestId> enqueue(bool upload, ObjectAddress address,
                                     std::span<const std::byte> data);
+  bool try_enter_cycle() noexcept;
+  void leave_cycle() noexcept;
+  void service_one();
 
   std::shared_ptr<EthercatBackend> backend_;
   EthercatSlaveAddress slave_{};
+  std::mutex lifecycle_mutex_;
   mutable std::mutex requests_mutex_;
   std::map<MailboxRequestId, Request> requests_;
   MailboxRequestId next_request_id_{1U};
   std::atomic<bool> open_{false};
+  std::atomic<unsigned int> cycles_in_flight_{};
   std::atomic<TransportHealth> health_{TransportHealth::failed};
 };
 
@@ -101,6 +106,8 @@ class EthercatMaster final : public CyclicTransport {
  private:
   Result<void> register_field(CyclicField field, bool input);
   Result<void> validate_configuration() const;
+  bool try_enter_cycle() noexcept;
+  void leave_cycle() noexcept;
 
   std::shared_ptr<EthercatBackend> backend_;
   std::vector<EthercatAxisConfiguration> axes_;
@@ -111,7 +118,9 @@ class EthercatMaster final : public CyclicTransport {
   std::vector<CyclicField> registered_outputs_;
   CycleHandler cycle_handler_{};
   void* cycle_handler_context_{};
-  bool open_{};
+  std::mutex lifecycle_mutex_;
+  std::atomic<bool> open_{false};
+  std::atomic<unsigned int> cycles_in_flight_{};
   std::atomic<TransportHealth> health_{TransportHealth::failed};
 };
 

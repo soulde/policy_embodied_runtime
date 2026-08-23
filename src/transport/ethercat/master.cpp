@@ -14,14 +14,15 @@ namespace {
 constexpr std::size_t kMaximumAxes = 12U;
 constexpr std::size_t kMaximumSdoUploadBytes = 4096U;
 
-bool same_address(ObjectAddress left, ObjectAddress right) noexcept {
-  return left.index == right.index && left.subindex == right.subindex;
+bool static_mode_object(ObjectAddress address) noexcept {
+  return address.index == 0x6060U || address.index == 0x60C2U;
 }
 
 bool healthy_domain(const DomainHealth& health) noexcept {
+  const bool expected_matches = !health.expected_working_counter.has_value() ||
+                                health.working_counter == *health.expected_working_counter;
   return health.link_up && health.working_counter_complete &&
-         health.all_slaves_operational &&
-         health.working_counter == health.expected_working_counter;
+         health.all_slaves_operational && expected_matches;
 }
 
 bool valid_static_mode(profiles::Cia402Mode mode) noexcept {
@@ -41,6 +42,7 @@ EthercatMailbox::EthercatMailbox(std::shared_ptr<EthercatBackend> backend,
     : backend_(std::move(backend)), slave_(slave) {}
 
 Result<void> EthercatMailbox::open() {
+  std::scoped_lock lifecycle_lock(lifecycle_mutex_);
   if (backend_ == nullptr) {
     return Result<void>::failure(
         {ErrorCode::unavailable, "EtherCAT mailbox has no backend"});
@@ -55,7 +57,28 @@ Result<void> EthercatMailbox::open() {
 }
 
 void EthercatMailbox::close() noexcept {
+  std::scoped_lock lifecycle_lock(lifecycle_mutex_);
   open_.store(false, std::memory_order_release);
+  try {
+    std::scoped_lock lock(requests_mutex_);
+    for (auto& [request_id, request] : requests_) {
+      static_cast<void>(request_id);
+      if (request.status.state == MailboxRequestState::queued) {
+        request.status = MailboxRequestStatus{
+            MailboxRequestState::failed,
+            Error{ErrorCode::unavailable, "EtherCAT mailbox closed before completion"},
+            {}};
+      }
+    }
+  } catch (...) {
+    std::scoped_lock lock(requests_mutex_);
+    requests_.clear();
+  }
+  auto active = cycles_in_flight_.load(std::memory_order_acquire);
+  while (active != 0U) {
+    cycles_in_flight_.wait(active, std::memory_order_acquire);
+    active = cycles_in_flight_.load(std::memory_order_acquire);
+  }
   health_.store(TransportHealth::failed, std::memory_order_release);
 }
 
@@ -77,7 +100,16 @@ Result<MailboxRequestId> EthercatMailbox::enqueue(
     return Result<MailboxRequestId>::failure(
         {ErrorCode::invalid_argument, "invalid EtherCAT mailbox request"});
   }
+  if (!upload && static_mode_object(address)) {
+    return Result<MailboxRequestId>::failure(
+        {ErrorCode::invalid_argument,
+         "runtime writes to static CiA 402 mode objects are forbidden"});
+  }
   std::scoped_lock lock(requests_mutex_);
+  if (!open_.load(std::memory_order_acquire)) {
+    return Result<MailboxRequestId>::failure(
+        {ErrorCode::unavailable, "EtherCAT mailbox is closed"});
+  }
   const auto request_id = next_request_id_++;
   Request request{};
   request.upload = upload;
@@ -106,12 +138,40 @@ std::optional<MailboxRequestStatus> EthercatMailbox::mailbox_status(
   return request->second.status;
 }
 
+bool EthercatMailbox::try_enter_cycle() noexcept {
+  cycles_in_flight_.fetch_add(1U, std::memory_order_acq_rel);
+  if (open_.load(std::memory_order_acquire)) {
+    return true;
+  }
+  leave_cycle();
+  return false;
+}
+
+void EthercatMailbox::leave_cycle() noexcept {
+  if (cycles_in_flight_.fetch_sub(1U, std::memory_order_acq_rel) == 1U) {
+    cycles_in_flight_.notify_all();
+  }
+}
+
 void EthercatMailbox::cycle(const CycleContext&) noexcept {
-  if (!open_.load(std::memory_order_acquire) || backend_ == nullptr) {
+  if (!try_enter_cycle()) {
     health_.store(TransportHealth::failed, std::memory_order_release);
     return;
   }
+  if (backend_ == nullptr) {
+    health_.store(TransportHealth::failed, std::memory_order_release);
+    leave_cycle();
+    return;
+  }
+  try {
+    service_one();
+  } catch (...) {
+    health_.store(TransportHealth::degraded, std::memory_order_release);
+  }
+  leave_cycle();
+}
 
+void EthercatMailbox::service_one() {
   MailboxRequestId request_id{};
   Request execution;
   {
@@ -129,7 +189,7 @@ void EthercatMailbox::cycle(const CycleContext&) noexcept {
     execution = request->second;
   }
 
-  if (!backend_->try_acquire()) {
+  if (!backend_->try_acquire_mailbox()) {
     std::scoped_lock lock(requests_mutex_);
     requests_.at(request_id).executing = false;
     health_.store(TransportHealth::degraded, std::memory_order_release);
@@ -154,12 +214,16 @@ void EthercatMailbox::cycle(const CycleContext&) noexcept {
         SdoTransferState::failed,
         Error{ErrorCode::internal, "unknown EtherCAT mailbox failure"}, {}};
   }
-  backend_->release();
+  backend_->release_access();
 
   {
     std::scoped_lock lock(requests_mutex_);
     auto& request = requests_.at(request_id);
     request.executing = false;
+    if (!open_.load(std::memory_order_acquire) ||
+        request.status.state != MailboxRequestState::queued) {
+      return;
+    }
     switch (progress.state) {
       case SdoTransferState::pending:
         health_.store(TransportHealth::healthy, std::memory_order_release);
@@ -224,8 +288,7 @@ Result<void> EthercatMaster::validate_configuration() const {
           {ErrorCode::invalid_argument, "duplicate EtherCAT slave address"});
     }
     for (const auto& parameter : configuration.startup_parameters) {
-      if (parameter.data.empty() || same_address(parameter.address, {0x6060U, 0U}) ||
-          same_address(parameter.address, {0x60C2U, 1U})) {
+      if (parameter.data.empty() || static_mode_object(parameter.address)) {
         return Result<void>::failure(
             {ErrorCode::invalid_argument,
              "startup parameter is empty or overrides the static mode/cycle time"});
@@ -236,7 +299,8 @@ Result<void> EthercatMaster::validate_configuration() const {
 }
 
 Result<void> EthercatMaster::open() {
-  if (open_) {
+  std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+  if (open_.load(std::memory_order_acquire)) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument, "EtherCAT master is already open"});
   }
@@ -350,20 +414,25 @@ Result<void> EthercatMaster::open() {
 
   pdo_handles_ = std::move(handles);
   std::fill(pdo_views_.begin(), pdo_views_.end(), Cia402PdoView{});
-  open_ = true;
+  open_.store(true, std::memory_order_release);
   health_.store(TransportHealth::healthy, std::memory_order_release);
   return Result<void>::success();
 }
 
 void EthercatMaster::close() noexcept {
-  if (!open_) {
+  std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+  if (!open_.exchange(false, std::memory_order_acq_rel)) {
     return;
   }
   for (auto& mailbox : mailboxes_) {
     mailbox->close();
   }
+  auto active = cycles_in_flight_.load(std::memory_order_acquire);
+  while (active != 0U) {
+    cycles_in_flight_.wait(active, std::memory_order_acquire);
+    active = cycles_in_flight_.load(std::memory_order_acquire);
+  }
   backend_->deactivate();
-  open_ = false;
   health_.store(TransportHealth::failed, std::memory_order_release);
 }
 
@@ -375,37 +444,58 @@ SchedulingClass EthercatMaster::scheduling_class() const noexcept {
   return SchedulingClass::hard_realtime_periodic;
 }
 
+bool EthercatMaster::try_enter_cycle() noexcept {
+  cycles_in_flight_.fetch_add(1U, std::memory_order_acq_rel);
+  if (open_.load(std::memory_order_acquire)) {
+    return true;
+  }
+  leave_cycle();
+  return false;
+}
+
+void EthercatMaster::leave_cycle() noexcept {
+  if (cycles_in_flight_.fetch_sub(1U, std::memory_order_acq_rel) == 1U) {
+    cycles_in_flight_.notify_all();
+  }
+}
+
 void EthercatMaster::cycle(const CycleContext&) noexcept {
-  if (!open_ || backend_ == nullptr) {
+  if (!try_enter_cycle()) {
     health_.store(TransportHealth::failed, std::memory_order_release);
     return;
   }
-  if (!backend_->try_acquire()) {
-    health_.store(TransportHealth::degraded, std::memory_order_release);
+  if (backend_ == nullptr) {
+    health_.store(TransportHealth::failed, std::memory_order_release);
+    leave_cycle();
     return;
   }
+  backend_->acquire_pdo();
 
   backend_->receive();
   backend_->process_domain();
+  const auto domain = backend_->domain_health();
+  const bool domain_is_healthy = healthy_domain(domain);
   auto image = backend_->process_image();
-  bool valid_image = true;
-  for (std::size_t axis_index = 0; axis_index < pdo_handles_.size(); ++axis_index) {
-    const auto& handles = pdo_handles_[axis_index];
-    auto& pdo = pdo_views_[axis_index];
-    const auto status_word = handles.status_word.read(image);
-    const auto mode_display = handles.mode_display.read(image);
-    const auto actual_position = handles.actual_position.read(image);
-    const auto actual_velocity = handles.actual_velocity.read(image);
-    const auto actual_torque = handles.actual_torque.read(image);
-    valid_image = valid_image && status_word.has_value() && mode_display.has_value() &&
-                  actual_position.has_value() && actual_velocity.has_value() &&
-                  actual_torque.has_value();
-    if (status_word && mode_display && actual_position && actual_velocity && actual_torque) {
-      pdo.status_word = *status_word;
-      pdo.mode_display = *mode_display;
-      pdo.actual_position = *actual_position;
-      pdo.actual_velocity = *actual_velocity;
-      pdo.actual_torque = *actual_torque;
+  bool valid_image = domain_is_healthy;
+  if (domain_is_healthy) {
+    for (std::size_t axis_index = 0; axis_index < pdo_handles_.size(); ++axis_index) {
+      const auto& handles = pdo_handles_[axis_index];
+      auto& pdo = pdo_views_[axis_index];
+      const auto status_word = handles.status_word.read(image);
+      const auto mode_display = handles.mode_display.read(image);
+      const auto actual_position = handles.actual_position.read(image);
+      const auto actual_velocity = handles.actual_velocity.read(image);
+      const auto actual_torque = handles.actual_torque.read(image);
+      valid_image = valid_image && status_word.has_value() && mode_display.has_value() &&
+                    actual_position.has_value() && actual_velocity.has_value() &&
+                    actual_torque.has_value();
+      if (status_word && mode_display && actual_position && actual_velocity && actual_torque) {
+        pdo.status_word = *status_word;
+        pdo.mode_display = *mode_display;
+        pdo.actual_position = *actual_position;
+        pdo.actual_velocity = *actual_velocity;
+        pdo.actual_torque = *actual_torque;
+      }
     }
   }
 
@@ -413,40 +503,50 @@ void EthercatMaster::cycle(const CycleContext&) noexcept {
     cycle_handler_(cycle_handler_context_, pdo_views_);
   }
 
-  bool outputs_written = valid_image;
+  bool outputs_written = true;
   for (std::size_t axis_index = 0; axis_index < pdo_handles_.size(); ++axis_index) {
     const auto& handles = pdo_handles_[axis_index];
     const auto& pdo = pdo_views_[axis_index];
-    outputs_written = handles.control_word.write(image, pdo.control_word) && outputs_written;
+    const auto control_word = domain_is_healthy && valid_image ? pdo.control_word : 0U;
+    outputs_written = handles.control_word.write(image, control_word) && outputs_written;
     switch (axes_[axis_index].axis.mode) {
       case profiles::Cia402Mode::csp:
-        outputs_written =
-            handles.target_position.write(image, pdo.target_position) && outputs_written;
+        outputs_written = handles.target_position.write(
+                              image, domain_is_healthy && valid_image
+                                         ? pdo.target_position
+                                         : std::int32_t{0}) &&
+                          outputs_written;
         break;
       case profiles::Cia402Mode::csv:
-        outputs_written =
-            handles.target_velocity.write(image, pdo.target_velocity) && outputs_written;
+        outputs_written = handles.target_velocity.write(
+                              image, domain_is_healthy && valid_image
+                                         ? pdo.target_velocity
+                                         : std::int32_t{0}) &&
+                          outputs_written;
         break;
       case profiles::Cia402Mode::cst:
-        outputs_written =
-            handles.target_torque.write(image, pdo.target_torque) && outputs_written;
+        outputs_written = handles.target_torque.write(
+                              image, domain_is_healthy && valid_image
+                                         ? pdo.target_torque
+                                         : std::int16_t{0}) &&
+                          outputs_written;
         break;
     }
   }
 
-  const auto domain = backend_->domain_health();
   backend_->queue_domain();
   backend_->send();
-  backend_->release();
+  backend_->release_access();
 
-  health_.store(valid_image && outputs_written && healthy_domain(domain)
+  health_.store(domain_is_healthy && valid_image && outputs_written
                     ? TransportHealth::healthy
                     : TransportHealth::degraded,
                 std::memory_order_release);
+  leave_cycle();
 }
 
 Result<void> EthercatMaster::register_field(CyclicField field, bool input) {
-  if (open_ || field.size_bytes == 0U) {
+  if (open_.load(std::memory_order_acquire) || field.size_bytes == 0U) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument, "cyclic fields must be registered before open"});
   }
@@ -471,7 +571,7 @@ Result<void> EthercatMaster::register_cyclic_output(CyclicField field) {
 }
 
 Result<void> EthercatMaster::set_cycle_handler(CycleHandler handler, void* context) {
-  if (open_ || handler == nullptr) {
+  if (open_.load(std::memory_order_acquire) || handler == nullptr) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument, "cycle handler must be bound before open"});
   }

@@ -1,4 +1,5 @@
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -54,6 +55,7 @@ struct ConfigSnapshot {
 };
 
 struct EntryKey {
+  std::uint16_t alias{};
   std::uint16_t position{};
   std::uint16_t index{};
   std::uint8_t subindex{};
@@ -63,7 +65,8 @@ struct EntryKey {
 
 struct EntryKeyHash {
   std::size_t operator()(const EntryKey& key) const noexcept {
-    return (static_cast<std::size_t>(key.position) << 24U) |
+    return (static_cast<std::size_t>(key.alias) << 40U) |
+           (static_cast<std::size_t>(key.position) << 24U) |
            (static_cast<std::size_t>(key.index) << 8U) | key.subindex;
   }
 };
@@ -73,6 +76,11 @@ class FakeEthercatBackend final : public EthercatBackend {
   void clear_cycle_events() {
     std::scoped_lock lock(mutex_);
     events_.clear();
+  }
+
+  void set_domain_health(DomainHealth health) {
+    std::scoped_lock lock(mutex_);
+    domain_health_ = health;
   }
 
   void record(std::string event) {
@@ -87,7 +95,8 @@ class FakeEthercatBackend final : public EthercatBackend {
 
   std::span<std::byte> image() { return image_; }
   const std::vector<ConfigSnapshot>& configurations() const { return configurations_; }
-  bool activated() const noexcept { return activated_; }
+  bool activated() const noexcept { return activated_.load(); }
+  unsigned deactivate_count() const noexcept { return deactivate_count_.load(); }
   unsigned receive_count() const noexcept { return receive_count_.load(); }
   unsigned download_count() const noexcept { return download_count_.load(); }
   unsigned bind_count() const noexcept { return bind_count_.load(); }
@@ -117,6 +126,8 @@ class FakeEthercatBackend final : public EthercatBackend {
 
  protected:
   Result<void> initialize() override {
+    locations_.clear();
+    next_offset_ = 0U;
     record("initialize");
     return Result<void>::success();
   }
@@ -146,7 +157,7 @@ class FakeEthercatBackend final : public EthercatBackend {
       return Result<PdoFieldLocation>::failure(
           {ErrorCode::protocol, "requested fake PDO bind failure"});
     }
-    const EntryKey key{slave.position, address.index, address.subindex};
+    const EntryKey key{slave.alias, slave.position, address.index, address.subindex};
     if (locations_.contains(key)) {
       return Result<PdoFieldLocation>::failure(
           {ErrorCode::invalid_argument, "duplicate fake PDO registration"});
@@ -158,13 +169,14 @@ class FakeEthercatBackend final : public EthercatBackend {
   }
 
   Result<void> activate() override {
-    activated_ = true;
+    activated_.store(true);
     record("activate");
     return Result<void>::success();
   }
 
   void deactivate() noexcept override {
-    activated_ = false;
+    activated_.store(false);
+    deactivate_count_.fetch_add(1U);
     record("deactivate");
   }
 
@@ -184,7 +196,9 @@ class FakeEthercatBackend final : public EthercatBackend {
   void send() noexcept override { record("send"); }
 
   DomainHealth domain_health() const noexcept override {
-    return DomainHealth{1U, 1U, true, true, true, 0};
+    std::scoped_lock lock(mutex_);
+    events_.push_back("health");
+    return domain_health_;
   }
 
   SdoTransferProgress progress_download_sdo(
@@ -214,17 +228,19 @@ class FakeEthercatBackend final : public EthercatBackend {
 
  private:
   mutable std::mutex mutex_;
-  std::vector<std::string> events_;
+  mutable std::vector<std::string> events_;
   std::vector<std::byte> image_{256U};
   std::vector<ConfigSnapshot> configurations_;
   std::unordered_map<EntryKey, PdoFieldLocation, EntryKeyHash> locations_;
   std::size_t next_offset_{};
-  bool activated_{};
+  std::atomic<bool> activated_{};
+  std::atomic<unsigned> deactivate_count_{};
   std::atomic<unsigned> receive_count_{};
   std::atomic<unsigned> download_count_{};
   std::atomic<unsigned> pending_downloads_{};
   std::atomic<unsigned> bind_count_{};
   std::atomic<unsigned> fail_bind_at_{};
+  DomainHealth domain_health_{1U, 1U, true, true, true, 0};
 
   std::mutex block_mutex_;
   std::condition_variable block_cv_;
@@ -243,16 +259,30 @@ AxisConfig axis_config(Cia402Mode mode = Cia402Mode::csp) {
 struct StageContext {
   FakeEthercatBackend* backend{};
   bool saw_feedback{};
+  unsigned calls{};
 };
 
 void stage_axis(void* opaque, std::span<Cia402PdoView> axes) noexcept {
   auto& context = *static_cast<StageContext*>(opaque);
   context.backend->record("handler");
+  ++context.calls;
   context.saw_feedback = axes.size() == 1U && axes[0].status_word == 0x0027U &&
                          axes[0].mode_display == 8 && axes[0].actual_position == 12345 &&
                          axes[0].actual_velocity == -77 && axes[0].actual_torque == 22;
   axes[0].control_word = 0x000FU;
   axes[0].target_position = -654321;
+}
+
+void stage_two_axes(void* opaque, std::span<Cia402PdoView> axes) noexcept {
+  auto& calls = *static_cast<unsigned*>(opaque);
+  ++calls;
+  if (axes.size() != 2U) {
+    return;
+  }
+  axes[0].control_word = 0x0006U;
+  axes[0].target_position = axes[0].actual_position + 100;
+  axes[1].control_word = 0x000FU;
+  axes[1].target_position = axes[1].actual_position - 200;
 }
 
 TEST(EthercatFakeBackendTest, ConfiguresAndBindsBeforeActivation) {
@@ -286,10 +316,42 @@ TEST(EthercatFakeBackendTest, ConfiguresAndBindsBeforeActivation) {
   EXPECT_FALSE(master.pdo_handles()[0].target_torque.is_bound());
 }
 
+TEST(EthercatFakeBackendTest, StagesTwoAliasesWithTheSameRelativePositionIndependently) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  auto first = axis_config();
+  first.name = "axis_1";
+  first.alias = 1U;
+  auto second = axis_config();
+  second.name = "axis_2";
+  second.alias = 2U;
+  unsigned handler_calls{};
+  EthercatMaster master{backend,
+                        {EthercatAxisConfiguration{first, {}},
+                         EthercatAxisConfiguration{second, {}}}};
+  ASSERT_TRUE(master.set_cycle_handler(&stage_two_axes, &handler_calls).has_value());
+
+  ASSERT_TRUE(master.open().has_value());
+  ASSERT_EQ(backend->configurations().size(), 2U);
+  EXPECT_EQ(backend->configurations()[0].address.alias, 1U);
+  EXPECT_EQ(backend->configurations()[1].address.alias, 2U);
+  EXPECT_EQ(backend->bind_count(), 14U);
+  ASSERT_EQ(master.pdo_handles().size(), 2U);
+  ASSERT_TRUE(master.pdo_handles()[0].actual_position.write(backend->image(), 1000));
+  ASSERT_TRUE(master.pdo_handles()[1].actual_position.write(backend->image(), 5000));
+
+  master.cycle({});
+
+  EXPECT_EQ(handler_calls, 1U);
+  EXPECT_EQ(master.pdo_handles()[0].control_word.read(backend->image()), 0x0006U);
+  EXPECT_EQ(master.pdo_handles()[0].target_position.read(backend->image()), 1100);
+  EXPECT_EQ(master.pdo_handles()[1].control_word.read(backend->image()), 0x000FU);
+  EXPECT_EQ(master.pdo_handles()[1].target_position.read(backend->image()), 4800);
+}
+
 TEST(EthercatFakeBackendTest, RunsExactCycleAroundTypedStaging) {
   auto backend = std::make_shared<FakeEthercatBackend>();
   EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
-  StageContext context{backend.get(), false};
+  StageContext context{backend.get(), false, 0U};
   ASSERT_TRUE(master.set_cycle_handler(&stage_axis, &context).has_value());
   ASSERT_TRUE(master.open().has_value());
 
@@ -305,11 +367,36 @@ TEST(EthercatFakeBackendTest, RunsExactCycleAroundTypedStaging) {
 
   EXPECT_TRUE(context.saw_feedback);
   EXPECT_EQ(backend->events(),
-            (std::vector<std::string>{"receive", "process", "image", "handler",
+            (std::vector<std::string>{"receive", "process", "health", "image", "handler",
                                       "queue", "send"}));
   EXPECT_EQ(handles.control_word.read(backend->image()), 0x000FU);
   EXPECT_EQ(handles.target_position.read(backend->image()), -654321);
   EXPECT_EQ(master.health(), TransportHealth::healthy);
+}
+
+TEST(EthercatFakeBackendTest, RejectsUnhealthyInputBeforeHandlerAndSendsSafeOutputs) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
+  StageContext context{backend.get(), false, 0U};
+  ASSERT_TRUE(master.set_cycle_handler(&stage_axis, &context).has_value());
+  ASSERT_TRUE(master.open().has_value());
+  auto& pdo = master.pdo_views()[0];
+  pdo.control_word = 0x000FU;
+  pdo.target_position = 123456;
+  backend->set_domain_health(DomainHealth{0U, 1U, false, true, false, 0});
+  backend->clear_cycle_events();
+
+  master.cycle({});
+
+  EXPECT_EQ(context.calls, 0U);
+  const auto events = backend->events();
+  EXPECT_EQ(events,
+            (std::vector<std::string>{"receive", "process", "health", "image", "queue",
+                                      "send"}));
+  const auto& handles = master.pdo_handles()[0];
+  EXPECT_EQ(handles.control_word.read(backend->image()), 0U);
+  EXPECT_EQ(handles.target_position.read(backend->image()), 0);
+  EXPECT_EQ(master.health(), TransportHealth::degraded);
 }
 
 TEST(EthercatFakeBackendTest, StopsAtFirstPdoBindingFailureBeforeActivation) {
@@ -364,7 +451,7 @@ TEST(EthercatFakeBackendTest, KeepsMailboxOutsidePdoCriticalWindow) {
   ASSERT_TRUE(master.open().has_value());
   auto& mailbox = master.mailbox(0U);
   const std::vector<std::byte> value{std::byte{8U}};
-  auto request = mailbox.queue_download({0x6060U, 0U}, value);
+  auto request = mailbox.queue_download({0x2000U, 0U}, value);
   ASSERT_TRUE(request.has_value());
 
   std::thread pdo_thread([&] { master.cycle({}); });
@@ -396,7 +483,7 @@ TEST(EthercatFakeBackendTest, AdvancesAsynchronousSdoAcrossUnifiedMasterCycles) 
   ASSERT_TRUE(master.open().has_value());
   auto& mailbox = master.mailbox(0U);
   const std::vector<std::byte> value{std::byte{8U}};
-  auto request = mailbox.queue_download({0x6060U, 0U}, value);
+  auto request = mailbox.queue_download({0x2000U, 0U}, value);
   ASSERT_TRUE(request.has_value());
   backend->make_download_pending_once();
 
@@ -411,30 +498,181 @@ TEST(EthercatFakeBackendTest, AdvancesAsynchronousSdoAcrossUnifiedMasterCycles) 
   EXPECT_EQ(backend->download_count(), 2U);
 }
 
-TEST(EthercatFakeBackendTest, PdoCycleNeverBlocksBehindMailboxTransfer) {
+TEST(EthercatFakeBackendTest, PdoCycleIsNotDiscardedByAnInFlightMailboxTransfer) {
   auto backend = std::make_shared<FakeEthercatBackend>();
   EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
   ASSERT_TRUE(master.open().has_value());
   auto& mailbox = master.mailbox(0U);
   const std::vector<std::byte> value{std::byte{8U}};
-  auto request = mailbox.queue_download({0x6060U, 0U}, value);
+  auto request = mailbox.queue_download({0x2000U, 0U}, value);
   ASSERT_TRUE(request.has_value());
   backend->block_download();
   std::thread mailbox_thread([&] { mailbox.cycle({}); });
   ASSERT_TRUE(backend->wait_for_download(1s));
 
   const auto receives_before = backend->receive_count();
-  const auto started = std::chrono::steady_clock::now();
-  master.cycle({});
-  const auto elapsed = std::chrono::steady_clock::now() - started;
-  EXPECT_LT(elapsed, 100ms);
+  std::thread pdo_thread([&] { master.cycle({}); });
+  std::this_thread::sleep_for(10ms);
   EXPECT_EQ(backend->receive_count(), receives_before);
-  EXPECT_EQ(master.health(), TransportHealth::degraded);
 
   backend->release_download();
   mailbox_thread.join();
+  pdo_thread.join();
+  EXPECT_EQ(backend->receive_count(), receives_before + 1U);
+  EXPECT_EQ(master.health(), TransportHealth::healthy);
   EXPECT_EQ(mailbox.mailbox_status(request.value())->state,
             MailboxRequestState::completed);
+}
+
+TEST(EthercatFakeBackendTest, PdoWaiterRunsBeforeAnotherMailboxRequest) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
+  ASSERT_TRUE(master.open().has_value());
+  auto& mailbox = master.mailbox(0U);
+  const std::vector<std::byte> first_value{std::byte{1U}};
+  const std::vector<std::byte> second_value{std::byte{2U}};
+  auto first = mailbox.queue_download({0x2000U, 0U}, first_value);
+  auto second = mailbox.queue_download({0x2001U, 0U}, second_value);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  backend->block_download();
+  std::thread first_mailbox([&] { mailbox.cycle({}); });
+  ASSERT_TRUE(backend->wait_for_download(1s));
+
+  backend->clear_cycle_events();
+  std::thread pdo_thread([&] { master.cycle({}); });
+  std::this_thread::sleep_for(10ms);
+  std::thread competing_mailbox([&] { mailbox.cycle({}); });
+  competing_mailbox.join();
+  backend->release_download();
+  first_mailbox.join();
+  pdo_thread.join();
+
+  mailbox.cycle({});
+  const auto events = backend->events();
+  const auto receive = std::find(events.begin(), events.end(), "receive");
+  const auto second_download = std::find(events.begin(), events.end(), "download");
+  ASSERT_NE(receive, events.end());
+  ASSERT_NE(second_download, events.end());
+  EXPECT_LT(receive, second_download);
+  EXPECT_EQ(mailbox.mailbox_status(second.value())->state,
+            MailboxRequestState::completed);
+}
+
+TEST(EthercatFakeBackendTest, RejectsRuntimeWritesToEveryStaticModeSubindex) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
+  ASSERT_TRUE(master.open().has_value());
+  auto& mailbox = master.mailbox(0U);
+  const std::vector<std::byte> value{std::byte{8U}};
+  constexpr std::array<ObjectAddress, 4U> protected_objects{
+      ObjectAddress{0x6060U, 0U}, ObjectAddress{0x6060U, 3U},
+      ObjectAddress{0x60C2U, 1U}, ObjectAddress{0x60C2U, 2U}};
+
+  for (const auto address : protected_objects) {
+    auto queued = mailbox.queue_download(address, value);
+    ASSERT_FALSE(queued.has_value());
+    EXPECT_EQ(queued.error().code, ErrorCode::invalid_argument);
+  }
+  EXPECT_EQ(backend->download_count(), 0U);
+}
+
+TEST(EthercatFakeBackendTest, RejectsUserStartupOverridesForStaticObjectFamilies) {
+  const std::vector<std::byte> value{std::byte{8U}};
+  constexpr std::array<ObjectAddress, 4U> protected_objects{
+      ObjectAddress{0x6060U, 0U}, ObjectAddress{0x6060U, 3U},
+      ObjectAddress{0x60C2U, 1U}, ObjectAddress{0x60C2U, 2U}};
+
+  for (const auto address : protected_objects) {
+    auto backend = std::make_shared<FakeEthercatBackend>();
+    EthercatMaster master{
+        backend,
+        {EthercatAxisConfiguration{axis_config(), {SdoDownloadRequest{address, value}}}}};
+    auto opened = master.open();
+    ASSERT_FALSE(opened.has_value());
+    EXPECT_EQ(opened.error().code, ErrorCode::invalid_argument);
+    EXPECT_TRUE(backend->events().empty());
+  }
+}
+
+TEST(EthercatFakeBackendTest, CloseWaitsForInFlightPdoBeforeDeactivation) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
+  BlockingStageContext stage;
+  ASSERT_TRUE(master.set_cycle_handler(&block_in_pdo_window, &stage).has_value());
+  ASSERT_TRUE(master.open().has_value());
+
+  std::thread pdo_thread([&] { master.cycle({}); });
+  {
+    std::unique_lock lock(stage.mutex);
+    ASSERT_TRUE(stage.cv.wait_for(lock, 1s, [&stage] { return stage.entered; }));
+  }
+  std::atomic<bool> close_completed{};
+  std::thread close_thread([&] {
+    master.close();
+    close_completed.store(true);
+  });
+  std::this_thread::sleep_for(10ms);
+  EXPECT_FALSE(close_completed.load());
+  EXPECT_TRUE(backend->activated());
+  EXPECT_EQ(backend->deactivate_count(), 0U);
+
+  {
+    std::scoped_lock lock(stage.mutex);
+    stage.release = true;
+  }
+  stage.cv.notify_all();
+  pdo_thread.join();
+  close_thread.join();
+  EXPECT_TRUE(close_completed.load());
+  EXPECT_FALSE(backend->activated());
+  EXPECT_EQ(backend->deactivate_count(), 1U);
+}
+
+TEST(EthercatFakeBackendTest, CloseFailsMailboxWorkAndReopenHasNoStaleRequest) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
+  ASSERT_TRUE(master.open().has_value());
+  auto& mailbox = master.mailbox(0U);
+  const std::vector<std::byte> value{std::byte{1U}};
+  auto active = mailbox.queue_download({0x2000U, 0U}, value);
+  auto queued = mailbox.queue_download({0x2001U, 0U}, value);
+  ASSERT_TRUE(active.has_value());
+  ASSERT_TRUE(queued.has_value());
+  backend->block_download();
+  std::thread mailbox_thread([&] { mailbox.cycle({}); });
+  ASSERT_TRUE(backend->wait_for_download(1s));
+
+  std::atomic<bool> close_completed{};
+  std::thread close_thread([&] {
+    master.close();
+    close_completed.store(true);
+  });
+  std::this_thread::sleep_for(10ms);
+  EXPECT_FALSE(close_completed.load());
+  EXPECT_TRUE(backend->activated());
+
+  backend->release_download();
+  mailbox_thread.join();
+  close_thread.join();
+  ASSERT_TRUE(mailbox.mailbox_status(active.value()).has_value());
+  ASSERT_TRUE(mailbox.mailbox_status(queued.value()).has_value());
+  EXPECT_EQ(mailbox.mailbox_status(active.value())->state, MailboxRequestState::failed);
+  EXPECT_EQ(mailbox.mailbox_status(queued.value())->state, MailboxRequestState::failed);
+
+  const auto downloads_before_reopen = backend->download_count();
+  ASSERT_TRUE(master.open().has_value());
+  master.mailbox(0U).cycle({});
+  EXPECT_EQ(backend->download_count(), downloads_before_reopen);
+  EXPECT_EQ(mailbox.mailbox_status(active.value())->state, MailboxRequestState::failed);
+  EXPECT_EQ(mailbox.mailbox_status(queued.value())->state, MailboxRequestState::failed);
+
+  auto fresh = mailbox.queue_download({0x2002U, 0U}, value);
+  ASSERT_TRUE(fresh.has_value());
+  mailbox.cycle({});
+  EXPECT_EQ(mailbox.mailbox_status(fresh.value())->state,
+            MailboxRequestState::completed);
+  EXPECT_EQ(backend->download_count(), downloads_before_reopen + 1U);
 }
 
 }  // namespace
