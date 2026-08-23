@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -32,8 +33,8 @@ enum class TemporalMode { single_step, chunked };
 
 struct TemporalSpec {
   TemporalMode mode = TemporalMode::single_step;
-  int action_horizon = 1;
-  int observation_history = 1;
+  std::uint64_t action_horizon = 1;
+  std::uint64_t observation_history = 1;
 };
 
 struct ProcessorSpec {

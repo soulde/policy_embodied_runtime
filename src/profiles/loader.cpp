@@ -98,6 +98,43 @@ std::optional<std::string> required_string(const Json& object, std::string_view 
   return result;
 }
 
+std::optional<std::string> python_scalar_string(const Json& value) {
+  if (value.is_string()) {
+    return value.get<std::string>();
+  }
+  if (value.is_boolean()) {
+    return value.get<bool>() ? "True" : "False";
+  }
+  if (value.is_null()) {
+    return "None";
+  }
+  if (value.is_number()) {
+    return value.dump();
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> required_robot_string(const Json& object, std::string_view key,
+                                                 std::string_view section,
+                                                 std::string& error) {
+  const auto* value = member(object, key);
+  if (value == nullptr) {
+    error = std::string(section) + " is missing " + std::string(key);
+    return std::nullopt;
+  }
+  const auto converted = python_scalar_string(*value);
+  if (!converted) {
+    error = std::string(section) + "." + std::string(key) + " must be a scalar";
+    return std::nullopt;
+  }
+  auto normalized = trim(*converted);
+  if (normalized.empty()) {
+    error = std::string(section) + " is missing " + std::string(key);
+    return std::nullopt;
+  }
+  return normalized;
+}
+
 bool optional_string(const Json& object, std::string_view key, std::optional<std::string>& out,
                      std::string_view section, std::string& error) {
   const auto* value = member(object, key);
@@ -160,6 +197,146 @@ std::optional<double> parse_double(std::string_view input) {
   return result;
 }
 
+std::optional<double> coerce_pydantic_double(const Json& value) {
+  if (value.is_boolean()) {
+    return value.get<bool>() ? 1.0 : 0.0;
+  }
+  if (value.is_number()) {
+    const auto result = value.get<double>();
+    return std::isfinite(result) ? std::optional<double>(result) : std::nullopt;
+  }
+  if (value.is_string()) {
+    return parse_double(value.get_ref<const std::string&>());
+  }
+  return std::nullopt;
+}
+
+std::optional<bool> coerce_pydantic_bool(const Json& value) {
+  if (value.is_boolean()) {
+    return value.get<bool>();
+  }
+  if (value.type() == Json::value_t::number_integer) {
+    const auto integer = value.get<std::int64_t>();
+    if (integer == 0 || integer == 1) {
+      return integer == 1;
+    }
+    return std::nullopt;
+  }
+  if (value.type() == Json::value_t::number_unsigned) {
+    const auto integer = value.get<std::uint64_t>();
+    if (integer == 0 || integer == 1) {
+      return integer == 1;
+    }
+    return std::nullopt;
+  }
+  if (value.is_number_float()) {
+    const auto number = value.get<double>();
+    if (number == 0.0 || number == 1.0) {
+      return number == 1.0;
+    }
+    return std::nullopt;
+  }
+  if (!value.is_string()) {
+    return std::nullopt;
+  }
+  auto text = value.get<std::string>();
+  std::transform(text.begin(), text.end(), text.begin(), [](char character) {
+    return static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+  });
+  if (text == "1" || text == "true" || text == "t" || text == "yes" || text == "y" ||
+      text == "on") {
+    return true;
+  }
+  if (text == "0" || text == "false" || text == "f" || text == "no" || text == "n" ||
+      text == "off") {
+    return false;
+  }
+  return std::nullopt;
+}
+
+std::optional<std::uint64_t> parse_pydantic_unsigned_integer_string(
+    std::string_view input) {
+  const auto text = trim(input);
+  if (text.empty()) {
+    return std::nullopt;
+  }
+  std::size_t offset = 0;
+  bool negative = false;
+  if (text[offset] == '+' || text[offset] == '-') {
+    negative = text[offset] == '-';
+    ++offset;
+  }
+  if (offset == text.size()) {
+    return std::nullopt;
+  }
+
+  std::uint64_t result = 0;
+  bool saw_digit = false;
+  bool decimal = false;
+  for (; offset < text.size(); ++offset) {
+    const char character = text[offset];
+    if (character == '_') {
+      continue;
+    }
+    if (character == '.') {
+      if (decimal || !saw_digit) {
+        return std::nullopt;
+      }
+      decimal = true;
+      continue;
+    }
+    if (character < '0' || character > '9') {
+      return std::nullopt;
+    }
+    saw_digit = true;
+    const auto digit = static_cast<std::uint64_t>(character - '0');
+    if (decimal) {
+      if (digit != 0) {
+        return std::nullopt;
+      }
+      continue;
+    }
+    if (result > (std::numeric_limits<std::uint64_t>::max() - digit) / 10U) {
+      return std::nullopt;
+    }
+    result = result * 10U + digit;
+  }
+  if (!saw_digit || (negative && result != 0)) {
+    return std::nullopt;
+  }
+  return result;
+}
+
+std::optional<std::uint64_t> coerce_pydantic_positive_integer(const Json& value) {
+  if (value.is_boolean()) {
+    return value.get<bool>() ? 1U : 0U;
+  }
+  if (value.type() == Json::value_t::number_unsigned) {
+    return value.get<std::uint64_t>();
+  }
+  if (value.type() == Json::value_t::number_integer) {
+    const auto integer = value.get<std::int64_t>();
+    return integer >= 0 ? std::optional<std::uint64_t>(static_cast<std::uint64_t>(integer))
+                        : std::nullopt;
+  }
+
+  long double number{};
+  if (value.is_number_float()) {
+    number = static_cast<long double>(value.get<double>());
+  } else if (value.is_string()) {
+    return parse_pydantic_unsigned_integer_string(value.get_ref<const std::string&>());
+  } else {
+    return std::nullopt;
+  }
+
+  const auto upper_bound = std::ldexp(1.0L, 64);
+  if (!std::isfinite(number) || number < 0.0L || number >= upper_bound ||
+      std::trunc(number) != number) {
+    return std::nullopt;
+  }
+  return static_cast<std::uint64_t>(number);
+}
+
 bool parse_device_list(const Json& root, std::string_view plural, std::string_view singular,
                        std::vector<DeviceConfig>& output, std::string& error) {
   const auto* values = member(root, plural);
@@ -175,7 +352,7 @@ bool parse_device_list(const Json& root, std::string_view plural, std::string_vi
       error = std::string(singular) + " entry must be an object";
       return false;
     }
-    const auto name = required_string(value, "name", singular, error, true);
+    const auto name = required_robot_string(value, "name", singular, error);
     if (!name) {
       return false;
     }
@@ -184,8 +361,8 @@ bool parse_device_list(const Json& root, std::string_view plural, std::string_vi
       error = std::string(singular) + "." + *name + ".device must be an object";
       return false;
     }
-    const auto type = required_string(*device, "type", "device", error, true);
-    const auto path = required_string(*device, "path", "device", error, true);
+    const auto type = required_robot_string(*device, "type", "device", error);
+    const auto path = required_robot_string(*device, "path", "device", error);
     if (!type || !path) {
       return false;
     }
@@ -375,11 +552,12 @@ bool parse_bounds(const Json& value, SemanticBounds& bounds, std::string& error)
     if (item == nullptr || item->is_null()) {
       continue;
     }
-    if (!item->is_number()) {
+    const auto converted = coerce_pydantic_double(*item);
+    if (!converted) {
       error = std::string("semantic field bounds.") + key + " must be numeric";
       return false;
     }
-    *destination = item->get<double>();
+    *destination = *converted;
   }
   if (bounds.lower && bounds.upper && *bounds.lower > *bounds.upper) {
     error = "semantic field bounds lower must be <= upper";
@@ -467,11 +645,12 @@ bool parse_semantic_fields(const Json& root, std::string_view key,
          {std::pair{"normalized", &field.normalized}, std::pair{"optional", &field.optional}}) {
       const auto* item = member(value, boolean_key);
       if (item != nullptr) {
-        if (!item->is_boolean()) {
+        const auto converted = coerce_pydantic_bool(*item);
+        if (!converted) {
           error = std::string("semantic field ") + boolean_key + " must be a boolean";
           return false;
         }
-        *destination = item->get<bool>();
+        *destination = *converted;
       }
     }
     fields.push_back(std::move(field));
@@ -507,12 +686,12 @@ bool parse_temporal(const Json& root, TemporalSpec& temporal, std::string& error
         std::pair{"observation_history", &temporal.observation_history}}) {
     const auto* item = member(*value, key);
     if (item != nullptr) {
-      if (!item->is_number_integer() || item->get<std::int64_t>() < 1 ||
-          item->get<std::int64_t>() > std::numeric_limits<int>::max()) {
+      const auto converted = coerce_pydantic_positive_integer(*item);
+      if (!converted || *converted < 1) {
         error = std::string("temporal.") + key + " must be >= 1";
         return false;
       }
-      *destination = item->get<int>();
+      *destination = *converted;
     }
   }
   return true;
@@ -576,11 +755,12 @@ bool parse_bindings(const Json& root, std::string_view key,
     }
     const auto* optional = member(value, "optional");
     if (optional != nullptr) {
-      if (!optional->is_boolean()) {
+      const auto converted = coerce_pydantic_bool(*optional);
+      if (!converted) {
         error = "binding.optional must be a boolean";
         return false;
       }
-      binding.optional = optional->get<bool>();
+      binding.optional = *converted;
     }
     const auto* metadata = member(value, "metadata");
     if (metadata != nullptr) {

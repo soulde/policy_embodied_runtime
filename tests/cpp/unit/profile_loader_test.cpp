@@ -93,6 +93,42 @@ TEST(ProfileLoaderTest, LoadsExistingRobotProfileAndStringifiesArgs) {
   EXPECT_TRUE(profile.value().axes.empty());
 }
 
+TEST(ProfileLoaderTest, NormalizesScalarRobotIdentityValuesLikePython) {
+  const Json value = {
+      {"sensors",
+       Json::array({{{"name", 42},
+                     {"device", {{"type", " rpc \t"}, {"path", true}}},
+                     {"args", Json::object()}}})},
+      {"actuators", Json::array()}};
+  const TemporaryJsonFile file(value);
+
+  auto profile = load_robot_profile(file.path());
+
+  ASSERT_TRUE(profile.has_value()) << profile.error().message;
+  ASSERT_EQ(profile.value().sensors.size(), 1U);
+  EXPECT_EQ(profile.value().sensors.at(0).name, "42");
+  EXPECT_EQ(profile.value().sensors.at(0).device.type, "rpc");
+  EXPECT_EQ(profile.value().sensors.at(0).device.path, "True");
+}
+
+TEST(ProfileLoaderTest, DerivesCia402AxisFromTrimmedDeviceIdentity) {
+  auto value = elmo_profile();
+  value["sensors"][0]["name"] = " shoulder_position ";
+  value["sensors"][0]["device"]["type"] = " cia402 ";
+  value["sensors"][0]["device"]["path"] = " /dev/EtherCAT0 ";
+  value["actuators"][0]["device"]["type"] = "\tcia402";
+  value["actuators"][0]["device"]["path"] = "/dev/EtherCAT0\n";
+  const TemporaryJsonFile file(value);
+
+  auto profile = load_robot_profile(file.path());
+
+  ASSERT_TRUE(profile.has_value()) << profile.error().message;
+  ASSERT_EQ(profile.value().axes.size(), 2U);
+  EXPECT_EQ(profile.value().axes.at(0).name, "shoulder_position");
+  EXPECT_EQ(profile.value().sensors.at(0).device.type, "cia402");
+  EXPECT_EQ(profile.value().sensors.at(0).device.path, "/dev/EtherCAT0");
+}
+
 TEST(ProfileLoaderTest, ParsesStaticCia402ModesAndHexadecimalIdentity) {
   auto profile = load_robot_profile(source_path("tests/golden/elmo_robot_profile.json"));
   ASSERT_TRUE(profile.has_value()) << profile.error().message;
@@ -127,6 +163,10 @@ TEST(ProfileLoaderTest, RejectsDuplicateDeviceNamesAndAxisLinks) {
   auto duplicate_sensor_link = elmo_profile();
   duplicate_sensor_link["sensors"][1]["args"]["position"] = "0";
   expect_robot_rejected(duplicate_sensor_link);
+
+  auto normalized_cross_side_name = elmo_profile();
+  normalized_cross_side_name["actuators"][0]["name"] = " shoulder_position\t";
+  expect_robot_rejected(normalized_cross_side_name);
 }
 
 TEST(ProfileLoaderTest, RejectsMoreThanTwelveDerivedAxes) {
@@ -193,6 +233,63 @@ TEST(ProfileLoaderTest, LoadsExistingPolicyProfiles) {
   ASSERT_TRUE(paired.has_value()) << paired.error().message;
   EXPECT_EQ(paired.value().inputs.size(), 6U);
   EXPECT_EQ(paired.value().outputs.size(), 6U);
+}
+
+TEST(ProfileLoaderTest, CoercesPolicyBoundsAndBooleanFieldsLikePydantic) {
+  auto value = dummy_policy();
+  value["canonical_observation_schema"][0]["bounds"] =
+      {{"lower", "0.25"}, {"upper", true}};
+  value["canonical_observation_schema"][0]["normalized"] = "true";
+  value["canonical_observation_schema"][1]["normalized"] = "false";
+  value["canonical_observation_schema"][2]["normalized"] = 1;
+  value["canonical_action_schema"][0]["normalized"] = 0;
+  const TemporaryJsonFile file(value);
+
+  auto profile = load_policy_profile(file.path());
+
+  ASSERT_TRUE(profile.has_value()) << profile.error().message;
+  const auto& observations = profile.value().canonical_observation_schema;
+  ASSERT_TRUE(observations.at(0).bounds.has_value());
+  EXPECT_DOUBLE_EQ(observations.at(0).bounds->lower.value(), 0.25);
+  EXPECT_DOUBLE_EQ(observations.at(0).bounds->upper.value(), 1.0);
+  EXPECT_TRUE(observations.at(0).normalized);
+  EXPECT_FALSE(observations.at(1).normalized);
+  EXPECT_TRUE(observations.at(2).normalized);
+  EXPECT_FALSE(profile.value().canonical_action_schema.at(0).normalized);
+}
+
+TEST(ProfileLoaderTest, CoercesTemporalIntegersAndBindingBooleansLikePydantic) {
+  auto value = read_json(
+      "policy_embodied_runtime/examples/policy_profiles/soarm101_sim_policy_profile.json");
+  value["temporal"]["action_horizon"] = "4";
+  value["temporal"]["observation_history"] = 1.0;
+  value["inputs"][0]["optional"] = "false";
+  value["inputs"][1]["optional"] = "true";
+  value["outputs"][0]["optional"] = 0;
+  value["outputs"][1]["optional"] = 1;
+  const TemporaryJsonFile file(value);
+
+  auto profile = load_policy_profile(file.path());
+
+  ASSERT_TRUE(profile.has_value()) << profile.error().message;
+  EXPECT_EQ(profile.value().temporal.action_horizon, 4U);
+  EXPECT_EQ(profile.value().temporal.observation_history, 1U);
+  EXPECT_FALSE(profile.value().inputs.at(0).optional);
+  EXPECT_TRUE(profile.value().inputs.at(1).optional);
+  EXPECT_FALSE(profile.value().outputs.at(0).optional);
+  EXPECT_TRUE(profile.value().outputs.at(1).optional);
+
+  value["temporal"]["action_horizon"] = true;
+  const TemporaryJsonFile bool_file(value);
+  auto bool_profile = load_policy_profile(bool_file.path());
+  ASSERT_TRUE(bool_profile.has_value()) << bool_profile.error().message;
+  EXPECT_EQ(bool_profile.value().temporal.action_horizon, 1U);
+
+  value["temporal"]["action_horizon"] = "2147483648";
+  const TemporaryJsonFile wide_file(value);
+  auto wide_profile = load_policy_profile(wide_file.path());
+  ASSERT_TRUE(wide_profile.has_value()) << wide_profile.error().message;
+  EXPECT_EQ(wide_profile.value().temporal.action_horizon, 2147483648ULL);
 }
 
 TEST(ProfileLoaderTest, RejectsPolicyTopLevelAndSchemaViolations) {
