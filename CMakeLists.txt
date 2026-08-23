@@ -21,6 +21,8 @@ add_library(policy_runtime_core
     src/common/result.cpp
     src/profiles/loader.cpp
     src/protocol/rpc/codec.cpp
+    src/robot_io/ipc_server.cpp
+    src/runtime/robot_io_client.cpp
     src/robot_io/transport_scheduler.cpp)
 target_include_directories(policy_runtime_core
     PUBLIC
@@ -69,6 +71,11 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         PRIVATE policy_runtime_core GTest::gtest_main)
     policy_runtime_configure_target(transport_scheduler_test)
 
+    add_executable(ipc_test tests/cpp/integration/ipc_test.cpp)
+    target_link_libraries(ipc_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(ipc_test)
+
     include(GoogleTest)
     gtest_discover_tests(policy_runtime_unit_tests TEST_PREFIX result_test.
         DISCOVERY_MODE PRE_TEST)
@@ -77,5 +84,7 @@ if(POLICY_RUNTIME_BUILD_TESTS)
     gtest_discover_tests(profile_loader_test TEST_PREFIX profile_loader_test.
         DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(transport_scheduler_test TEST_PREFIX transport_scheduler_test.
+        DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(ipc_test TEST_PREFIX ipc_test.
         DISCOVERY_MODE PRE_TEST)
 endif()
