@@ -18,9 +18,13 @@ enum class ExecutorId : std::uint8_t {
 
 class TransportScheduler {
  public:
-  // Registers a non-owning transport assignment. This models executor isolation only;
-  // it does not create or run threads.
+  // Registers a non-owning transport assignment. A transport must outlive its
+  // registration and be removed before destruction; this models executor isolation
+  // only and does not create or run threads.
   Result<void> add(Transport& transport);
+
+  // Removes a non-owning assignment so the address can safely be reused.
+  Result<void> remove(Transport& transport);
 
   std::optional<ExecutorId> executor_id(const Transport& transport) const noexcept;
 

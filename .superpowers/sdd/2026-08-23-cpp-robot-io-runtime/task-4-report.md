@@ -96,3 +96,61 @@ GoogleTest discovery to CTest preserves that distinction.
   untouched and is not staged. No Python or simulator files were changed.
 - TSan execution should be re-run on a host whose address-space layout supports
   the GNU ThreadSanitizer runtime.
+
+## Review Fix Round 1
+
+### Root cause and RED
+
+`TransportScheduler` stored non-owning raw addresses but used
+`insert_or_assign`, so a duplicate `add()` could silently replace its executor
+assignment and no API removed stale addresses before placement-address reuse.
+The OD capability also described its work as cycle-driven, which cannot express
+potentially blocking EtherCAT mailbox operations independently of a hard
+real-time PDO cycle.
+
+Focused tests were added first for exact executor assignments, duplicate
+rejection, removal-before-address-reuse, and queued mailbox completion/error
+states. The scheduler/transport test target then failed because the required
+API did not yet exist, including:
+
+```text
+error: 'MailboxSchedulingClass' in namespace 'policy_runtime' does not name a type
+error: 'class policy_runtime::TransportScheduler' has no member named 'remove'
+```
+
+### Green implementation
+
+- `add()` now rejects every duplicate registration with
+  `ErrorCode::invalid_argument`, preserving the original executor identity.
+- `remove()` erases the non-owning assignment and rejects an unregistered
+  transport. The public contract requires a transport to outlive its
+  registration and be removed before destruction, making clean address reuse
+  explicit without transferring ownership to the scheduler.
+- `ObjectDictionaryTransport` now has a non-real-time
+  `MailboxSchedulingClass` restricted to blocking-event-driven or asynchronous
+  execution, queued upload/download request IDs, queryable snapshot states for
+  queued/completed/failed requests, and a distinct `service_mailbox()` method. PDO I/O
+  remains in `cycle()`; only the separately scheduled mailbox service may do
+  mailbox physical I/O.
+
+### Verification
+
+```bash
+uv run --with cmake cmake --build --preset default --target transport_scheduler_test
+uv run --with cmake ctest --preset default -R 'transport_scheduler_test|ObjectDictionaryTransportTest' --output-on-failure
+uv run --with cmake cmake --build --preset default --target policy_runtime_unit_tests
+uv run --with cmake ctest --preset default -R 'result_test\\.' --output-on-failure
+uv run --with cmake cmake --build --preset default
+uv run --with cmake ctest --preset default --output-on-failure
+uv run pytest
+git diff --check
+```
+
+Results: focused scheduler/transport CTest passed 4/4; focused result CTest
+passed 3/3; full CTest passed 45/45; Python pytest passed 28/28; `git diff
+--check` produced no output.
+
+TSan configure and build passed with the updated sources. Its CTest invocation
+again stopped during GoogleTest discovery with `FATAL: ThreadSanitizer:
+unexpected memory mapping`, which is the known container runtime limitation,
+not a compile or link failure.

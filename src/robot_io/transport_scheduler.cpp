@@ -21,7 +21,19 @@ ExecutorId executor_for(SchedulingClass scheduling_class) {
 }  // namespace
 
 Result<void> TransportScheduler::add(Transport& transport) {
-  assignments_.insert_or_assign(&transport, executor_for(transport.scheduling_class()));
+  if (assignments_.contains(&transport)) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument, "transport is already registered"});
+  }
+  assignments_.emplace(&transport, executor_for(transport.scheduling_class()));
+  return Result<void>::success();
+}
+
+Result<void> TransportScheduler::remove(Transport& transport) {
+  if (assignments_.erase(&transport) == 0U) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument, "transport is not registered"});
+  }
   return Result<void>::success();
 }
 
