@@ -98,9 +98,29 @@ std::optional<std::string> required_string(const Json& object, std::string_view 
   return result;
 }
 
-std::optional<std::string> python_scalar_string(const Json& value) {
+std::string python_string_repr(std::string_view value) {
+  std::string result{"'"};
+  for (const char character : value) {
+    if (character == '\\' || character == '\'') {
+      result.push_back('\\');
+      result.push_back(character);
+    } else if (character == '\n') {
+      result += "\\n";
+    } else if (character == '\r') {
+      result += "\\r";
+    } else if (character == '\t') {
+      result += "\\t";
+    } else {
+      result.push_back(character);
+    }
+  }
+  result.push_back('\'');
+  return result;
+}
+
+std::string python_repr(const Json& value) {
   if (value.is_string()) {
-    return value.get<std::string>();
+    return python_string_repr(value.get_ref<const std::string&>());
   }
   if (value.is_boolean()) {
     return value.get<bool>() ? "True" : "False";
@@ -111,7 +131,35 @@ std::optional<std::string> python_scalar_string(const Json& value) {
   if (value.is_number()) {
     return value.dump();
   }
-  return std::nullopt;
+  if (value.is_array()) {
+    std::string result{"["};
+    for (std::size_t index = 0; index < value.size(); ++index) {
+      if (index != 0) {
+        result += ", ";
+      }
+      result += python_repr(value.at(index));
+    }
+    result.push_back(']');
+    return result;
+  }
+  if (value.is_object()) {
+    std::string result{"{"};
+    bool first = true;
+    for (auto it = value.begin(); it != value.end(); ++it) {
+      if (!first) {
+        result += ", ";
+      }
+      first = false;
+      result += python_string_repr(it.key()) + ": " + python_repr(*it);
+    }
+    result.push_back('}');
+    return result;
+  }
+  return value.dump();
+}
+
+std::string python_value_string(const Json& value) {
+  return value.is_string() ? value.get<std::string>() : python_repr(value);
 }
 
 std::optional<std::string> required_robot_string(const Json& object, std::string_view key,
@@ -122,12 +170,7 @@ std::optional<std::string> required_robot_string(const Json& object, std::string
     error = std::string(section) + " is missing " + std::string(key);
     return std::nullopt;
   }
-  const auto converted = python_scalar_string(*value);
-  if (!converted) {
-    error = std::string(section) + "." + std::string(key) + " must be a scalar";
-    return std::nullopt;
-  }
-  auto normalized = trim(*converted);
+  auto normalized = trim(python_value_string(*value));
   if (normalized.empty()) {
     error = std::string(section) + " is missing " + std::string(key);
     return std::nullopt;
@@ -197,16 +240,42 @@ std::optional<double> parse_double(std::string_view input) {
   return result;
 }
 
+std::optional<double> parse_pydantic_double_string(std::string_view input) {
+  const auto value = trim(input);
+  if (value.empty()) {
+    return std::nullopt;
+  }
+  std::string normalized;
+  normalized.reserve(value.size());
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    const char character = value[index];
+    if (character != '_') {
+      normalized.push_back(character);
+      continue;
+    }
+    if (index == 0 || index + 1 == value.size() ||
+        !std::isdigit(static_cast<unsigned char>(value[index - 1])) ||
+        !std::isdigit(static_cast<unsigned char>(value[index + 1]))) {
+      return std::nullopt;
+    }
+  }
+  char* end = nullptr;
+  const double result = std::strtod(normalized.c_str(), &end);
+  if (end != normalized.c_str() + normalized.size()) {
+    return std::nullopt;
+  }
+  return result;
+}
+
 std::optional<double> coerce_pydantic_double(const Json& value) {
   if (value.is_boolean()) {
     return value.get<bool>() ? 1.0 : 0.0;
   }
   if (value.is_number()) {
-    const auto result = value.get<double>();
-    return std::isfinite(result) ? std::optional<double>(result) : std::nullopt;
+    return value.get<double>();
   }
   if (value.is_string()) {
-    return parse_double(value.get_ref<const std::string&>());
+    return parse_pydantic_double_string(value.get_ref<const std::string&>());
   }
   return std::nullopt;
 }
@@ -273,9 +342,15 @@ std::optional<std::uint64_t> parse_pydantic_unsigned_integer_string(
   std::uint64_t result = 0;
   bool saw_digit = false;
   bool decimal = false;
+  bool saw_fractional_digit = false;
   for (; offset < text.size(); ++offset) {
     const char character = text[offset];
     if (character == '_') {
+      if (offset == 0 || offset + 1 == text.size() ||
+          !std::isdigit(static_cast<unsigned char>(text[offset - 1])) ||
+          !std::isdigit(static_cast<unsigned char>(text[offset + 1]))) {
+        return std::nullopt;
+      }
       continue;
     }
     if (character == '.') {
@@ -291,6 +366,7 @@ std::optional<std::uint64_t> parse_pydantic_unsigned_integer_string(
     saw_digit = true;
     const auto digit = static_cast<std::uint64_t>(character - '0');
     if (decimal) {
+      saw_fractional_digit = true;
       if (digit != 0) {
         return std::nullopt;
       }
@@ -301,7 +377,7 @@ std::optional<std::uint64_t> parse_pydantic_unsigned_integer_string(
     }
     result = result * 10U + digit;
   }
-  if (!saw_digit || (negative && result != 0)) {
+  if (!saw_digit || (decimal && !saw_fractional_digit) || (negative && result != 0)) {
     return std::nullopt;
   }
   return result;

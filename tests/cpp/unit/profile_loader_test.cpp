@@ -1,4 +1,5 @@
 #include <atomic>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -109,6 +110,26 @@ TEST(ProfileLoaderTest, NormalizesScalarRobotIdentityValuesLikePython) {
   EXPECT_EQ(profile.value().sensors.at(0).name, "42");
   EXPECT_EQ(profile.value().sensors.at(0).device.type, "rpc");
   EXPECT_EQ(profile.value().sensors.at(0).device.path, "True");
+}
+
+TEST(ProfileLoaderTest, NormalizesStructuredRobotIdentityValuesLikePython) {
+  const Json value = {
+      {"sensors",
+       Json::array({{{"name", Json::array({"joint", 1})},
+                     {"device",
+                      {{"type", Json{{"kind", "rpc"}}},
+                       {"path", Json::array({true, nullptr, 2.5})}}},
+                     {"args", Json::object()}}})},
+      {"actuators", Json::array()}};
+  const TemporaryJsonFile file(value);
+
+  auto profile = load_robot_profile(file.path());
+
+  ASSERT_TRUE(profile.has_value()) << profile.error().message;
+  ASSERT_EQ(profile.value().sensors.size(), 1U);
+  EXPECT_EQ(profile.value().sensors.at(0).name, "['joint', 1]");
+  EXPECT_EQ(profile.value().sensors.at(0).device.type, "{'kind': 'rpc'}");
+  EXPECT_EQ(profile.value().sensors.at(0).device.path, "[True, None, 2.5]");
 }
 
 TEST(ProfileLoaderTest, DerivesCia402AxisFromTrimmedDeviceIdentity) {
@@ -258,6 +279,44 @@ TEST(ProfileLoaderTest, CoercesPolicyBoundsAndBooleanFieldsLikePydantic) {
   EXPECT_FALSE(profile.value().canonical_action_schema.at(0).normalized);
 }
 
+TEST(ProfileLoaderTest, MatchesPydanticBoundsNumericStringGrammar) {
+  struct AcceptedCase {
+    const char* input;
+    double expected;
+  };
+  for (const auto& test_case :
+       {AcceptedCase{"1_0", 10.0}, AcceptedCase{"1.", 1.0}, AcceptedCase{"2.0", 2.0}}) {
+    auto value = dummy_policy();
+    value["canonical_observation_schema"][0]["bounds"] = {{"lower", test_case.input}};
+    const TemporaryJsonFile file(value);
+    auto profile = load_policy_profile(file.path());
+    ASSERT_TRUE(profile.has_value()) << test_case.input << ": " << profile.error().message;
+    EXPECT_DOUBLE_EQ(profile.value().canonical_observation_schema.at(0).bounds->lower.value(),
+                     test_case.expected);
+  }
+
+  for (const char* input : {"nan", "inf"}) {
+    auto value = dummy_policy();
+    value["canonical_observation_schema"][0]["bounds"] = {{"lower", input}};
+    const TemporaryJsonFile file(value);
+    auto profile = load_policy_profile(file.path());
+    ASSERT_TRUE(profile.has_value()) << input << ": " << profile.error().message;
+    const auto parsed =
+        profile.value().canonical_observation_schema.at(0).bounds->lower.value();
+    if (std::string_view(input) == "nan") {
+      EXPECT_TRUE(std::isnan(parsed));
+    } else {
+      EXPECT_TRUE(std::isinf(parsed));
+    }
+  }
+
+  for (const char* input : {"1_", "_1"}) {
+    auto value = dummy_policy();
+    value["canonical_observation_schema"][0]["bounds"] = {{"lower", input}};
+    expect_policy_rejected(value);
+  }
+}
+
 TEST(ProfileLoaderTest, CoercesTemporalIntegersAndBindingBooleansLikePydantic) {
   auto value = read_json(
       "policy_embodied_runtime/examples/policy_profiles/soarm101_sim_policy_profile.json");
@@ -290,6 +349,24 @@ TEST(ProfileLoaderTest, CoercesTemporalIntegersAndBindingBooleansLikePydantic) {
   auto wide_profile = load_policy_profile(wide_file.path());
   ASSERT_TRUE(wide_profile.has_value()) << wide_profile.error().message;
   EXPECT_EQ(wide_profile.value().temporal.action_horizon, 2147483648ULL);
+}
+
+TEST(ProfileLoaderTest, MatchesPydanticTemporalIntegerStringGrammar) {
+  for (const auto& [input, expected] :
+       {std::pair{"1_0", 10ULL}, std::pair{"2.0", 2ULL}}) {
+    auto value = dummy_policy();
+    value["temporal"]["action_horizon"] = input;
+    const TemporaryJsonFile file(value);
+    auto profile = load_policy_profile(file.path());
+    ASSERT_TRUE(profile.has_value()) << input << ": " << profile.error().message;
+    EXPECT_EQ(profile.value().temporal.action_horizon, expected);
+  }
+
+  for (const char* input : {"nan", "inf", "1_", "_1", "1."}) {
+    auto value = dummy_policy();
+    value["temporal"]["action_horizon"] = input;
+    expect_policy_rejected(value);
+  }
 }
 
 TEST(ProfileLoaderTest, RejectsPolicyTopLevelAndSchemaViolations) {
