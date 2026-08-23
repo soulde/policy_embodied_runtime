@@ -3,9 +3,15 @@ cmake_minimum_required(VERSION 3.24)
 project(policy_runtime LANGUAGES CXX)
 
 option(POLICY_RUNTIME_BUILD_TESTS "Build policy runtime unit tests" ON)
+option(POLICY_RUNTIME_WITH_IGH "Build the IgH EtherCAT backend" OFF)
 
 include(cmake/ProjectOptions.cmake)
 include(FetchContent)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+if(POLICY_RUNTIME_WITH_IGH)
+    find_package(EtherCAT REQUIRED)
+endif()
 
 find_package(nlohmann_json 3.11.3 CONFIG QUIET)
 if(NOT TARGET nlohmann_json::nlohmann_json)
@@ -25,11 +31,19 @@ add_library(policy_runtime_core
     src/robot/devices/cia402/axis.cpp
     src/robot_io/ipc_server.cpp
     src/runtime/robot_io_client.cpp
-    src/robot_io/transport_scheduler.cpp)
+    src/robot_io/transport_scheduler.cpp
+    src/transport/ethercat/elmo_gold.cpp
+    src/transport/ethercat/master.cpp)
 target_include_directories(policy_runtime_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_link_libraries(policy_runtime_core PUBLIC nlohmann_json::nlohmann_json)
+target_compile_definitions(policy_runtime_core
+    PUBLIC POLICY_RUNTIME_WITH_IGH=$<BOOL:${POLICY_RUNTIME_WITH_IGH}>)
+if(POLICY_RUNTIME_WITH_IGH)
+    target_sources(policy_runtime_core PRIVATE src/transport/ethercat/igh_backend.cpp)
+    target_link_libraries(policy_runtime_core PRIVATE EtherCAT::EtherCAT)
+endif()
 policy_runtime_configure_target(policy_runtime_core)
 
 if(POLICY_RUNTIME_BUILD_TESTS)
@@ -89,6 +103,17 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         PRIVATE policy_runtime_core GTest::gtest_main)
     policy_runtime_configure_target(cia402_axis_test)
 
+    add_executable(elmo_pdo_test tests/cpp/unit/elmo_pdo_test.cpp)
+    target_link_libraries(elmo_pdo_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(elmo_pdo_test)
+
+    add_executable(ethercat_fake_backend_test
+        tests/cpp/integration/ethercat_fake_backend_test.cpp)
+    target_link_libraries(ethercat_fake_backend_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(ethercat_fake_backend_test)
+
     include(GoogleTest)
     gtest_discover_tests(policy_runtime_unit_tests TEST_PREFIX result_test.
         DISCOVERY_MODE PRE_TEST)
@@ -104,4 +129,8 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(cia402_axis_test TEST_PREFIX cia402_axis_test.
         DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(elmo_pdo_test TEST_PREFIX elmo_pdo_test.
+        DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(ethercat_fake_backend_test
+        TEST_PREFIX ethercat_fake_backend_test. DISCOVERY_MODE PRE_TEST)
 endif()
