@@ -19,6 +19,7 @@ endif()
 
 add_library(policy_runtime_core
     src/common/result.cpp
+    src/profiles/loader.cpp
     src/protocol/rpc/codec.cpp)
 target_include_directories(policy_runtime_core
     PUBLIC
@@ -55,7 +56,15 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         PRIVATE POLICY_RUNTIME_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     policy_runtime_configure_target(rpc_codec_test)
 
+    add_executable(profile_loader_test tests/cpp/unit/profile_loader_test.cpp)
+    target_link_libraries(profile_loader_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    target_compile_definitions(profile_loader_test
+        PRIVATE POLICY_RUNTIME_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    policy_runtime_configure_target(profile_loader_test)
+
     include(GoogleTest)
     gtest_discover_tests(policy_runtime_unit_tests TEST_PREFIX result_test.)
     gtest_discover_tests(rpc_codec_test TEST_PREFIX rpc_codec_test.)
+    gtest_discover_tests(profile_loader_test TEST_PREFIX profile_loader_test.)
 endif()
