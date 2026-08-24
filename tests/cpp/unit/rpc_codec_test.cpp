@@ -132,6 +132,26 @@ TEST(RpcCodecTest, RequiresObservationRequestAndForbidsWrapperExtras) {
   expect_rejected(unexpected_wrapper_key);
 }
 
+TEST(RpcCodecTest, DispatchDecodePreservesEnvelopeBeforePayloadValidation) {
+  auto invalid_health = observation_request();
+  invalid_health["type"] = "health_request";
+  invalid_health["request_id"] = "correlated-request";
+  invalid_health["session_id"] = "correlated-session";
+  invalid_health["step_id"] = 17;
+  invalid_health["payload"] = {{"unexpected", true}};
+
+  EXPECT_FALSE(
+      policy_runtime::rpc::decode_envelope(invalid_health.dump()).has_value());
+  auto dispatch = policy_runtime::rpc::decode_envelope_for_dispatch(
+      invalid_health.dump());
+  ASSERT_TRUE(dispatch.has_value()) << dispatch.error().message;
+  EXPECT_EQ(dispatch.value().type, "health_request");
+  EXPECT_EQ(dispatch.value().request_id, "correlated-request");
+  EXPECT_EQ(dispatch.value().session_id, "correlated-session");
+  EXPECT_EQ(dispatch.value().step_id, 17U);
+  EXPECT_EQ(dispatch.value().payload, (nlohmann::json{{"unexpected", true}}));
+}
+
 TEST(RpcCodecTest, AllowsObservationExtensionsButForbidsNestedValueExtras) {
   auto extension = observation_request();
   extension["payload"]["observation"]["policy_camera"] =

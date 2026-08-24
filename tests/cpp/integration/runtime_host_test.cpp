@@ -118,6 +118,30 @@ TEST(RuntimeHostTest, MatchesDummyPolicyResponseContract) {
   EXPECT_EQ(action.at("meta"), nlohmann::json::object());
 }
 
+TEST(RuntimeHostTest, NormalizesKnownNumericFieldsToFloatWireTypes) {
+  auto host = open_host(
+      "policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json");
+  auto response = host.handle(request(
+      "observation_request",
+      {{"observation",
+        {{"joint_position",
+          {{"values", {1, 2}},
+           {"joint_names", {"joint_a", "joint_b"}},
+           {"unit", "rad"}}},
+         {"gripper_width", {{"value", 1}, {"unit", "m"}}},
+         {"task_text", {{"text", "move"}}}}}}));
+
+  ASSERT_TRUE(response.has_value()) << response.error().message;
+  ASSERT_EQ(response.value().type, "action_response");
+  const auto& action = response.value().payload.at("action");
+  EXPECT_TRUE(action["joint_position_delta"]["values"][0].is_number_float());
+  EXPECT_TRUE(action["joint_position_delta"]["values"][1].is_number_float());
+  EXPECT_TRUE(action["gripper_command"]["value"].is_number_float());
+  EXPECT_EQ(action["joint_position_delta"]["values"],
+            nlohmann::json::array({1.0, 2.0}));
+  EXPECT_EQ(action["gripper_command"]["value"], 1.0);
+}
+
 TEST(RuntimeHostTest, MatchesHealthServerInfoResetAndRuntimeErrorEnvelopes) {
   auto host = open_host(
       "policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json");
@@ -184,6 +208,33 @@ TEST(RuntimeHostTest, MalformedRawMessageDoesNotPoisonTheNextRequest) {
   EXPECT_TRUE(encoded.at("error").is_null());
 }
 
+TEST(RuntimeHostTest, InvalidKnownPayloadReturnsCorrelatedRuntimeError) {
+  auto host = open_host(
+      "policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json");
+  for (const auto& [type, payload] :
+       std::vector<std::pair<std::string, nlohmann::json>>{
+           {"health_request", {{"unexpected", true}}},
+           {"reset_request", {{"hard", nlohmann::json::array()}}},
+           {"observation_request", nlohmann::json::object()},
+       }) {
+    SCOPED_TRACE(type);
+    const auto raw_request =
+        request(type, payload, "correlated-session", 17);
+    auto response = policy_runtime::rpc::decode_envelope(host.handle_text(
+        policy_runtime::rpc::encode_envelope(raw_request)));
+
+    ASSERT_TRUE(response.has_value()) << response.error().message;
+    EXPECT_EQ(response.value().type, type + "_error");
+    EXPECT_EQ(response.value().request_id, "request-1");
+    EXPECT_EQ(response.value().session_id, "correlated-session");
+    EXPECT_EQ(response.value().step_id, 17U);
+    EXPECT_EQ(response.value().payload, nlohmann::json::object());
+    ASSERT_TRUE(response.value().error.has_value());
+    EXPECT_EQ(response.value().error->code, "runtime_error");
+    EXPECT_FALSE(response.value().error->message.empty());
+  }
+}
+
 TEST(RuntimeHostTest, Pi0LikeSessionStepAdvancesPerSessionAndResetRestartsIt) {
   auto host = open_host(
       "policy_embodied_runtime/examples/policy_profiles/pi0_like_policy_profile.json");
@@ -224,12 +275,33 @@ TEST(RuntimeHostTest, Pi0LikeSessionStepAdvancesPerSessionAndResetRestartsIt) {
             0);
 }
 
+TEST(RuntimeHostTest, Pi0MetadataUsesPythonStringRepresentations) {
+  auto host = open_host("tests/golden/pi0_metadata_policy_profile.json");
+  auto response = host.handle(request(
+      "observation_request",
+      {{"observation",
+        {{"joint_position",
+          {{"values", {0.0}},
+           {"joint_names", {"joint_a"}},
+           {"unit", "rad"}}},
+         {"task_text", {{"text", "move"}}},
+         {"image", {{"encoding", "uri"},
+                     {"data", "memory://front"},
+                     {"mime_type", "image/jpeg"}}}}}}));
+
+  ASSERT_TRUE(response.has_value()) << response.error().message;
+  ASSERT_EQ(response.value().type, "action_response");
+  const auto& metadata = response.value().payload["action"]["meta"];
+  EXPECT_EQ(metadata["checkpoint"], "True");
+  EXPECT_EQ(metadata["device"], "None");
+  EXPECT_EQ(metadata["precision"], "['fp16', {'z': 1, 'a': 2}]");
+}
+
 TEST(RuntimeHostTest, MissingCanonicalInputReturnsRuntimeErrorEnvelope) {
   auto host = open_host(
       "policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json");
   auto response = host.handle(request(
-      "observation_request",
-      {{"observation", {{"joint_position", nlohmann::json::object()}}}}));
+      "observation_request", {{"observation", nlohmann::json::object()}}));
 
   ASSERT_TRUE(response.has_value()) << response.error().message;
   EXPECT_EQ(response.value().type, "observation_request_error");
@@ -237,6 +309,54 @@ TEST(RuntimeHostTest, MissingCanonicalInputReturnsRuntimeErrorEnvelope) {
   EXPECT_EQ(response.value().error->code, "runtime_error");
   EXPECT_NE(response.value().error->message.find(
                 "missing required canonical observation fields"),
+            std::string::npos);
+}
+
+TEST(RuntimeHostTest, TreatsExplicitNullKnownObservationsAsMissing) {
+  const auto joint = nlohmann::json{
+      {"values", {0.0}}, {"joint_names", {"joint_a"}}, {"unit", "rad"}};
+  const auto gripper = nlohmann::json{{"value", 0.04}, {"unit", "m"}};
+  const auto task = nlohmann::json{{"text", "move"}};
+  auto dummy = open_host(
+      "policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json");
+
+  for (const auto& [field, observation] :
+       std::vector<std::pair<std::string, nlohmann::json>>{
+           {"joint_position",
+            {{"joint_position", nullptr},
+             {"gripper_width", gripper},
+             {"task_text", task}}},
+           {"gripper_width",
+            {{"joint_position", joint},
+             {"gripper_width", nullptr},
+             {"task_text", task}}},
+           {"task_text",
+            {{"joint_position", joint},
+             {"gripper_width", gripper},
+             {"task_text", nullptr}}},
+       }) {
+    SCOPED_TRACE(field);
+    auto response = dummy.handle(
+        request("observation_request", {{"observation", observation}}));
+    ASSERT_TRUE(response.has_value()) << response.error().message;
+    EXPECT_EQ(response.value().type, "observation_request_error");
+    ASSERT_TRUE(response.value().error.has_value());
+    EXPECT_EQ(response.value().error->code, "runtime_error");
+    EXPECT_NE(response.value().error->message.find("'" + field + "'"),
+              std::string::npos);
+  }
+
+  auto pi0 = open_host(
+      "policy_embodied_runtime/examples/policy_profiles/pi0_like_policy_profile.json");
+  auto image_response = pi0.handle(request(
+      "observation_request",
+      {{"observation", {{"image", nullptr},
+                         {"joint_position", joint},
+                         {"task_text", task}}}}));
+  ASSERT_TRUE(image_response.has_value()) << image_response.error().message;
+  EXPECT_EQ(image_response.value().type, "observation_request_error");
+  ASSERT_TRUE(image_response.value().error.has_value());
+  EXPECT_NE(image_response.value().error->message.find("'image'"),
             std::string::npos);
 }
 
@@ -333,6 +453,28 @@ TEST(RuntimeHostCliTest, PreservesCurrentFlagsDefaultsAndEndpointResolution) {
   EXPECT_EQ(parsed.value().endpoint, "embodied-policy-runtime");
   EXPECT_EQ(parsed.value().timeout_ms, 100);
   EXPECT_FALSE(parsed.value().robot_profile.has_value());
+}
+
+TEST(RuntimeHostCliTest, AcceptsArgparseEqualsSyntaxForValueFlags) {
+  const std::vector<std::string_view> arguments{
+      "policy-runtime-host",
+      "--policy-profile=policy.json",
+      "--robot-profile=robot.json",
+      "--endpoint=tcp://127.0.0.1:6000",
+      "--timeout-ms=250",
+      "--robot-io-fd=7",
+      "--robot-io-generation=9",
+  };
+  auto parsed = policy_runtime::parse_runtime_host_cli(arguments);
+
+  ASSERT_TRUE(parsed.has_value()) << parsed.error().message;
+  EXPECT_EQ(parsed.value().policy_profile, "policy.json");
+  ASSERT_TRUE(parsed.value().robot_profile.has_value());
+  EXPECT_EQ(*parsed.value().robot_profile, "robot.json");
+  EXPECT_EQ(parsed.value().endpoint, "tcp://127.0.0.1:6000");
+  EXPECT_EQ(parsed.value().timeout_ms, 250);
+  EXPECT_EQ(parsed.value().robot_io_fd, 7);
+  EXPECT_EQ(parsed.value().robot_io_generation, 9U);
 }
 
 TEST(RuntimeHostCliTest, RejectsMissingValuesUnknownFlagsAndIncompleteRobotIo) {

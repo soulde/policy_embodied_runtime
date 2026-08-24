@@ -20,17 +20,24 @@ Result<RuntimeHostCliOptions> parse_runtime_host_cli(
     std::span<const std::string_view> arguments) {
   RuntimeHostCliOptions options;
   for (std::size_t index = 1; index < arguments.size(); ++index) {
-    const auto flag = arguments[index];
+    auto flag = arguments[index];
     if (flag == "--help" || flag == "-h") {
       options.show_help = true;
       return Result<RuntimeHostCliOptions>::success(std::move(options));
     }
-    if (index + 1 >= arguments.size()) {
-      return Result<RuntimeHostCliOptions>::failure(
-          {ErrorCode::invalid_argument,
-           "argument requires a value: " + std::string(flag)});
+    std::string_view value;
+    if (const auto equals = flag.find('=');
+        equals != std::string_view::npos) {
+      value = flag.substr(equals + 1);
+      flag = flag.substr(0, equals);
+    } else {
+      if (index + 1 >= arguments.size()) {
+        return Result<RuntimeHostCliOptions>::failure(
+            {ErrorCode::invalid_argument,
+             "argument requires a value: " + std::string(flag)});
+      }
+      value = arguments[++index];
     }
-    const auto value = arguments[++index];
     if (flag == "--endpoint") {
       options.endpoint = value;
     } else if (flag == "--timeout-ms") {

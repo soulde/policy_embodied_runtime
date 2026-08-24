@@ -9,6 +9,7 @@ option(POLICY_RUNTIME_WITH_ZMQ "Build the ZeroMQ policy RPC server when availabl
 include(cmake/ProjectOptions.cmake)
 include(FetchContent)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(PolicyRuntimeZmq)
 
 if(POLICY_RUNTIME_WITH_IGH)
     find_package(EtherCAT REQUIRED)
@@ -18,29 +19,43 @@ set(POLICY_RUNTIME_HAS_ZMQ OFF)
 if(POLICY_RUNTIME_WITH_ZMQ)
     find_package(cppzmq CONFIG QUIET)
     if(TARGET cppzmq)
-        set(POLICY_RUNTIME_ZMQ_TARGET cppzmq)
-        set(POLICY_RUNTIME_HAS_ZMQ ON)
+        set(POLICY_RUNTIME_CPPZMQ_PACKAGE_TARGET cppzmq)
     elseif(TARGET cppzmq-static)
-        set(POLICY_RUNTIME_ZMQ_TARGET cppzmq-static)
-        set(POLICY_RUNTIME_HAS_ZMQ ON)
-    else()
+        set(POLICY_RUNTIME_CPPZMQ_PACKAGE_TARGET cppzmq-static)
+    endif()
+    if(POLICY_RUNTIME_CPPZMQ_PACKAGE_TARGET)
+        policy_runtime_check_cppzmq_api(
+            POLICY_RUNTIME_CPPZMQ_PACKAGE_API_SUPPORTED
+            TARGET "${POLICY_RUNTIME_CPPZMQ_PACKAGE_TARGET}")
+        if(POLICY_RUNTIME_CPPZMQ_PACKAGE_API_SUPPORTED)
+            set(POLICY_RUNTIME_ZMQ_TARGET
+                "${POLICY_RUNTIME_CPPZMQ_PACKAGE_TARGET}")
+            set(POLICY_RUNTIME_HAS_ZMQ ON)
+        endif()
+    endif()
+    if(NOT POLICY_RUNTIME_HAS_ZMQ)
         find_path(POLICY_RUNTIME_CPPZMQ_INCLUDE_DIR zmq.hpp)
         find_library(POLICY_RUNTIME_ZMQ_LIBRARY NAMES zmq)
         if(POLICY_RUNTIME_CPPZMQ_INCLUDE_DIR AND POLICY_RUNTIME_ZMQ_LIBRARY)
-            add_library(policy_runtime_zmq INTERFACE)
-            target_include_directories(policy_runtime_zmq INTERFACE
-                "${POLICY_RUNTIME_CPPZMQ_INCLUDE_DIR}")
-            target_link_libraries(policy_runtime_zmq INTERFACE
-                "${POLICY_RUNTIME_ZMQ_LIBRARY}")
-            set(POLICY_RUNTIME_ZMQ_TARGET policy_runtime_zmq)
-            set(POLICY_RUNTIME_HAS_ZMQ ON)
+            policy_runtime_check_cppzmq_api(
+                POLICY_RUNTIME_CPPZMQ_FALLBACK_API_SUPPORTED
+                INCLUDE_DIR "${POLICY_RUNTIME_CPPZMQ_INCLUDE_DIR}")
+            if(POLICY_RUNTIME_CPPZMQ_FALLBACK_API_SUPPORTED)
+                add_library(policy_runtime_zmq INTERFACE)
+                target_include_directories(policy_runtime_zmq INTERFACE
+                    "${POLICY_RUNTIME_CPPZMQ_INCLUDE_DIR}")
+                target_link_libraries(policy_runtime_zmq INTERFACE
+                    "${POLICY_RUNTIME_ZMQ_LIBRARY}")
+                set(POLICY_RUNTIME_ZMQ_TARGET policy_runtime_zmq)
+                set(POLICY_RUNTIME_HAS_ZMQ ON)
+            endif()
         endif()
     endif()
 endif()
 if(POLICY_RUNTIME_HAS_ZMQ)
     message(STATUS "Building policy-runtime-host with ZeroMQ/cppzmq support")
 else()
-    message(STATUS "ZeroMQ/cppzmq development files not found; building direct runtime host only")
+    message(STATUS "Compatible ZeroMQ/cppzmq development files not found; building direct runtime host only")
 endif()
 
 find_package(nlohmann_json 3.11.3 CONFIG QUIET)
@@ -199,6 +214,16 @@ if(POLICY_RUNTIME_BUILD_TESTS)
     target_link_libraries(runtime_contract_driver PRIVATE policy_runtime_core)
     policy_runtime_configure_target(runtime_contract_driver)
 
+    add_library(cppzmq_host_api_compile_probe OBJECT
+        apps/policy_runtime_host_main.cpp)
+    target_include_directories(cppzmq_host_api_compile_probe BEFORE PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/cppzmq_probe/fake-4.7")
+    target_link_libraries(cppzmq_host_api_compile_probe
+        PRIVATE policy_runtime_core)
+    target_compile_definitions(cppzmq_host_api_compile_probe PRIVATE
+        POLICY_RUNTIME_HAS_ZMQ=1)
+    policy_runtime_configure_target(cppzmq_host_api_compile_probe)
+
     include(GoogleTest)
     gtest_discover_tests(policy_runtime_unit_tests TEST_PREFIX result_test.
         DISCOVERY_MODE PRE_TEST)
@@ -259,4 +284,23 @@ if(POLICY_RUNTIME_BUILD_TESTS)
                 TIMEOUT 15 LABELS tcp_smoke)
         endif()
     endif()
+
+    set(CPPZMQ_FIXTURE_VERSIONS 4.6 4.7)
+    set(CPPZMQ_FIXTURE_EXPECTATIONS OFF ON)
+    foreach(CPPZMQ_FIXTURE_MODE INCLUDE TARGET)
+        foreach(CPPZMQ_FIXTURE_VERSION EXPECT_SUPPORTED IN ZIP_LISTS
+                CPPZMQ_FIXTURE_VERSIONS CPPZMQ_FIXTURE_EXPECTATIONS)
+            add_test(NAME cppzmq_${CPPZMQ_FIXTURE_MODE}_${CPPZMQ_FIXTURE_VERSION}_api_probe
+                COMMAND "${CMAKE_COMMAND}"
+                    -S "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/cppzmq_probe"
+                    -B "${CMAKE_CURRENT_BINARY_DIR}/cppzmq-probe-${CPPZMQ_FIXTURE_MODE}-${CPPZMQ_FIXTURE_VERSION}"
+                    -DPOLICY_RUNTIME_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                    -DCPPZMQ_INCLUDE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/cppzmq_probe/fake-${CPPZMQ_FIXTURE_VERSION}
+                    -DPROBE_MODE=${CPPZMQ_FIXTURE_MODE}
+                    -DEXPECT_SUPPORTED=${EXPECT_SUPPORTED})
+            set_tests_properties(
+                cppzmq_${CPPZMQ_FIXTURE_MODE}_${CPPZMQ_FIXTURE_VERSION}_api_probe
+                PROPERTIES LABELS build)
+        endforeach()
+    endforeach()
 endif()

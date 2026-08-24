@@ -113,10 +113,50 @@ Result<std::vector<std::string>> axis_actuator_names(
   return Result<std::vector<std::string>>::success(std::move(names));
 }
 
+void normalize_joint_state_numbers(nlohmann::json& value) {
+  if (!value.is_object()) {
+    return;
+  }
+  const auto values = value.find("values");
+  if (values == value.end() || !values->is_array()) {
+    return;
+  }
+  for (auto& item : *values) {
+    if (item.is_number()) {
+      item = item.get<double>();
+    }
+  }
+}
+
+void normalize_gripper_number(nlohmann::json& value) {
+  if (!value.is_object()) {
+    return;
+  }
+  const auto scalar = value.find("value");
+  if (scalar != value.end() && scalar->is_number()) {
+    *scalar = scalar->get<double>();
+  }
+}
+
 nlohmann::json normalized_observation(const nlohmann::json& input) {
   auto observation = input;
+  for (const auto field : {"joint_position", "gripper_width", "task_text",
+                           "image"}) {
+    if (const auto value = observation.find(field);
+        value != observation.end() && value->is_null()) {
+      observation.erase(value);
+    }
+  }
   if (!observation.contains("meta")) {
     observation["meta"] = nlohmann::json::object();
+  }
+  if (auto joint = observation.find("joint_position");
+      joint != observation.end()) {
+    normalize_joint_state_numbers(*joint);
+  }
+  if (auto gripper = observation.find("gripper_width");
+      gripper != observation.end()) {
+    normalize_gripper_number(*gripper);
   }
   if (auto image = observation.find("image");
       image != observation.end() && image->is_object()) {
@@ -138,6 +178,8 @@ nlohmann::json normalized_action(const nlohmann::json& input) {
   for (auto item = input.begin(); item != input.end(); ++item) {
     action[item.key()] = item.value();
   }
+  normalize_joint_state_numbers(action["joint_position_delta"]);
+  normalize_gripper_number(action["gripper_command"]);
   return action;
 }
 
@@ -292,6 +334,15 @@ Result<rpc::MessageEnvelope> RuntimeHost::handle(
     response.session_id = request.session_id;
     response.step_id = request.step_id;
     response.timestamp_ns = realtime_now_ns();
+
+    if (request.type == "health_request" || request.type == "reset_request" ||
+        request.type == "observation_request") {
+      auto valid_payload = rpc::validate_payload(request.type, request.payload);
+      if (!valid_payload.has_value()) {
+        return Result<rpc::MessageEnvelope>::success(error_envelope(
+            request, "runtime_error", valid_payload.error().message));
+      }
+    }
 
     if (request.type == "health_request") {
       response.type = "health_response";
@@ -463,7 +514,7 @@ rpc::MessageEnvelope RuntimeHost::error_envelope(
 }
 
 std::string RuntimeHost::handle_text(std::string_view request_text) {
-  auto decoded = rpc::decode_envelope(request_text);
+  auto decoded = rpc::decode_envelope_for_dispatch(request_text);
   if (!decoded.has_value()) {
     rpc::MessageEnvelope request;
     request.type = "protocol";

@@ -24,7 +24,7 @@
 namespace policy_runtime::profiles {
 namespace {
 
-using Json = nlohmann::json;
+using Json = nlohmann::ordered_json;
 
 template <class T>
 Result<T> invalid(std::string message) {
@@ -956,16 +956,19 @@ Result<PolicyProfile> load_policy_profile(const std::filesystem::path& path) {
   profile.id = *id;
   profile.version = *version;
   profile.policy = *policy;
-  for (const auto& [key, destination] :
-       {std::pair{"model", &profile.model}, std::pair{"safety", &profile.safety}}) {
-    const auto* value = member(*root, key);
-    if (value != nullptr) {
-      if (!value->is_object()) {
-        return invalid<PolicyProfile>(std::string("policy profile.") + key +
-                                      " must be an object");
-      }
-      *destination = *value;
+  const auto* model = member(*root, "model");
+  if (model != nullptr) {
+    if (!model->is_object()) {
+      return invalid<PolicyProfile>("policy profile.model must be an object");
     }
+    profile.model = *model;
+  }
+  const auto* safety = member(*root, "safety");
+  if (safety != nullptr) {
+    if (!safety->is_object()) {
+      return invalid<PolicyProfile>("policy profile.safety must be an object");
+    }
+    profile.safety = *safety;
   }
   if (!parse_bindings(*root, "inputs", profile.inputs, error) ||
       !parse_bindings(*root, "outputs", profile.outputs, error) ||

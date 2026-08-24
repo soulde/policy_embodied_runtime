@@ -56,7 +56,7 @@ struct PolicyProfile {
   std::string id;
   std::string version;
   std::string policy;
-  nlohmann::json model = nlohmann::json::object();
+  nlohmann::ordered_json model = nlohmann::ordered_json::object();
   std::vector<RobotPolicyBinding> inputs;
   std::vector<RobotPolicyBinding> outputs;
   std::vector<SemanticField> canonical_observation_schema;

@@ -6,6 +6,71 @@
 namespace policy_runtime {
 namespace {
 
+std::string python_string_repr(std::string_view value) {
+  const bool has_single_quote = value.find('\'') != std::string_view::npos;
+  const bool has_double_quote = value.find('"') != std::string_view::npos;
+  const char quote = has_single_quote && !has_double_quote ? '"' : '\'';
+  std::string result(1, quote);
+  constexpr char hex_digits[] = "0123456789abcdef";
+  for (const auto character : value) {
+    const auto byte = static_cast<unsigned char>(character);
+    if (character == quote || character == '\\') {
+      result.push_back('\\');
+      result.push_back(character);
+    } else if (character == '\n') {
+      result += "\\n";
+    } else if (character == '\r') {
+      result += "\\r";
+    } else if (character == '\t') {
+      result += "\\t";
+    } else if (byte < 0x20 || byte == 0x7f) {
+      result += "\\x";
+      result.push_back(hex_digits[(byte >> 4U) & 0x0fU]);
+      result.push_back(hex_digits[byte & 0x0fU]);
+    } else {
+      result.push_back(character);
+    }
+  }
+  result.push_back(quote);
+  return result;
+}
+
+std::string python_repr(const nlohmann::ordered_json& value) {
+  if (value.is_null()) {
+    return "None";
+  }
+  if (value.is_boolean()) {
+    return value.get<bool>() ? "True" : "False";
+  }
+  if (value.is_string()) {
+    return python_string_repr(value.get_ref<const std::string&>());
+  }
+  if (value.is_array()) {
+    std::string result = "[";
+    for (std::size_t index = 0; index < value.size(); ++index) {
+      if (index != 0) {
+        result += ", ";
+      }
+      result += python_repr(value[index]);
+    }
+    return result + "]";
+  }
+  if (value.is_object()) {
+    std::string result = "{";
+    bool first = true;
+    for (auto item = value.begin(); item != value.end(); ++item) {
+      if (!first) {
+        result += ", ";
+      }
+      first = false;
+      result += python_string_repr(item.key()) + ": " +
+                python_repr(item.value());
+    }
+    return result + "}";
+  }
+  return value.dump();
+}
+
 class DummyPolicy final : public Policy {
  public:
   explicit DummyPolicy(profiles::PolicyProfile profile)
@@ -103,14 +168,15 @@ class Pi0LikePolicy final : public Policy {
   }
 
  private:
-  static std::string string_config(const nlohmann::json& config,
+  static std::string string_config(const nlohmann::ordered_json& config,
                                    std::string_view key,
                                    std::string fallback) {
     const auto found = config.find(std::string(key));
     if (found == config.end()) {
       return fallback;
     }
-    return found->is_string() ? found->get<std::string>() : found->dump();
+    return found->is_string() ? found->get<std::string>()
+                              : python_repr(*found);
   }
 
   std::string checkpoint_;

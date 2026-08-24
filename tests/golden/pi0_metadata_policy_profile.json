@@ -1,0 +1,54 @@
+{
+  "id": "pi0-metadata-policy",
+  "version": "0.1.0",
+  "policy": "pi0_like",
+  "model": {
+    "checkpoint": true,
+    "device": null,
+    "precision": ["fp16", {"z": 1, "a": 2}]
+  },
+  "inputs": [],
+  "outputs": [],
+  "canonical_observation_schema": [
+    {
+      "name": "image",
+      "semantic_type": "rgb_image",
+      "kind": "image"
+    },
+    {
+      "name": "joint_position",
+      "semantic_type": "robot_joint_position",
+      "kind": "vector",
+      "unit": "rad",
+      "ordering": ["joint_a"]
+    },
+    {
+      "name": "task_text",
+      "semantic_type": "language_instruction",
+      "kind": "text"
+    }
+  ],
+  "canonical_action_schema": [
+    {
+      "name": "joint_position_delta",
+      "semantic_type": "robot_joint_position_delta",
+      "kind": "vector",
+      "unit": "rad",
+      "ordering": ["joint_a"]
+    },
+    {
+      "name": "gripper_command",
+      "semantic_type": "gripper_command",
+      "kind": "scalar",
+      "unit": "m"
+    }
+  ],
+  "temporal": {
+    "mode": "chunked",
+    "action_horizon": 4,
+    "observation_history": 1
+  },
+  "preprocess": [],
+  "postprocess": [],
+  "safety": {}
+}

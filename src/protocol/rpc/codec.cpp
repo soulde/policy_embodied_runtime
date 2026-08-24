@@ -392,7 +392,19 @@ Result<void> validate_action_payload(const nlohmann::json& action) {
   return Result<void>::success();
 }
 
-Result<MessageEnvelope> decode_envelope(std::string_view text) {
+Result<void> validate_payload(std::string_view type,
+                              const nlohmann::json& payload) {
+  std::string error;
+  if (!validate_payload_for_type(type, payload, error)) {
+    return Result<void>::failure({ErrorCode::protocol, std::move(error)});
+  }
+  return Result<void>::success();
+}
+
+namespace {
+
+Result<MessageEnvelope> decode_envelope_impl(std::string_view text,
+                                             bool validate_typed_payload) {
   Json message = Json::parse(text.begin(), text.end(), nullptr, false);
   if (message.is_discarded()) {
     return failure("invalid JSON message");
@@ -480,7 +492,12 @@ Result<MessageEnvelope> decode_envelope(std::string_view text) {
   if (payload != nullptr) {
     envelope.payload = *payload;
   }
-  if (!validate_payload_for_type(envelope.type, envelope.payload, validation_error)) {
+  if (!envelope.payload.is_object()) {
+    return failure("payload must be an object");
+  }
+  if (validate_typed_payload &&
+      !validate_payload_for_type(envelope.type, envelope.payload,
+                                 validation_error)) {
     return failure(validation_error);
   }
   const auto* error = member(message, "error");
@@ -492,6 +509,16 @@ Result<MessageEnvelope> decode_envelope(std::string_view text) {
     envelope.error = std::move(error_payload);
   }
   return Result<MessageEnvelope>::success(std::move(envelope));
+}
+
+}  // namespace
+
+Result<MessageEnvelope> decode_envelope(std::string_view text) {
+  return decode_envelope_impl(text, true);
+}
+
+Result<MessageEnvelope> decode_envelope_for_dispatch(std::string_view text) {
+  return decode_envelope_impl(text, false);
 }
 
 std::string encode_envelope(const MessageEnvelope& envelope) {
