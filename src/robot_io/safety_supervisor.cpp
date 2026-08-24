@@ -152,13 +152,6 @@ CommandAcceptance SafetySupervisor::accept_commands(
 
   for (std::size_t axis = 0; axis < axis_count_; ++axis) {
     commands_[axis] = snapshot.axes[axis];
-    if ((commands_[axis].flags & kAxisCommandDisable) != 0U) {
-      states_[axis].fault_reset_count = 0U;
-    } else if ((commands_[axis].flags & kAxisCommandFaultReset) != 0U &&
-               states_[axis].fault_reset_count <
-                   std::numeric_limits<std::uint32_t>::max()) {
-      ++states_[axis].fault_reset_count;
-    }
   }
   last_command_sequence_ = snapshot.sequence;
   last_command_timestamp_ns_ = snapshot.timestamp_ns;
@@ -286,6 +279,7 @@ SafetyEvaluation SafetySupervisor::evaluate(
 
   std::array<std::uint32_t, kRobotIoMaximumAxes> reasons{};
   std::array<bool, kRobotIoMaximumAxes> triggers{};
+  std::array<bool, kRobotIoMaximumAxes> fault_reset_candidates{};
   std::array<TargetEvaluation, kRobotIoMaximumAxes> targets{};
   for (std::size_t axis = 0; axis < axis_count_; ++axis) {
     const auto& config = configs_[axis];
@@ -322,20 +316,39 @@ SafetyEvaluation SafetySupervisor::evaluate(
     const auto drive_state = Cia402StateMachine::decode(pdos[axis].status_word);
     const bool drive_fault = drive_state == DriveState::fault ||
                              drive_state == DriveState::fault_reaction_active;
-    if (!drive_fault) {
-      states_[axis].fault_reset_count = 0U;
-    } else {
-      if (request != AxisRequest::fault_reset) {
-        reasons[axis] |= kAxisFeedbackSafetyDriveFault;
-      }
+    const bool resettable_fault = drive_state == DriveState::fault;
+    const bool fault_clear_observed =
+        !drive_fault && drive_state != DriveState::unknown && bus.link_up &&
+        bus.process_data_valid && axis_operational(bus, axis);
+    if (fault_clear_observed) {
+      states_[axis].fault_episode_active = false;
+      states_[axis].fault_reset_edges = 0U;
+      states_[axis].fault_reset_output_active = false;
+    } else if (!states_[axis].fault_episode_active) {
+      states_[axis].fault_episode_active = true;
+      states_[axis].fault_reset_edges = 0U;
+      states_[axis].fault_reset_output_active = false;
     }
-    if (request == AxisRequest::fault_reset &&
-        states_[axis].fault_reset_count > options_.maximum_fault_resets) {
-      reasons[axis] |= kAxisFeedbackSafetyFaultResetLimit;
+    const bool new_reset_edge =
+        resettable_fault && request == AxisRequest::fault_reset &&
+        !states_[axis].fault_reset_output_active;
+    const bool reset_budget_available =
+        !new_reset_edge ||
+        states_[axis].fault_reset_edges < options_.maximum_fault_resets;
+    if (drive_fault &&
+        (!resettable_fault || request != AxisRequest::fault_reset ||
+         !reset_budget_available)) {
+      reasons[axis] |= kAxisFeedbackSafetyDriveFault;
+      if (request == AxisRequest::fault_reset && !reset_budget_available) {
+        reasons[axis] |= kAxisFeedbackSafetyFaultResetLimit;
+      }
     }
     if (shutdown_requested_) {
       reasons[axis] |= kAxisFeedbackSafetyShutdown;
     }
+    fault_reset_candidates[axis] =
+        resettable_fault && request == AxisRequest::fault_reset &&
+        reset_budget_available && reasons[axis] == 0U;
     if (request == AxisRequest::quick_stop) {
       triggers[axis] = true;
     }
@@ -354,12 +367,39 @@ SafetyEvaluation SafetySupervisor::evaluate(
     }
   }
 
+  // A reset pulse is permitted on the faulted member itself, including from a
+  // stopped phase, but it does not release healthy peers in that safety group.
+  // Multiple faulted members may reset together when each independently has
+  // budget and no other safety reason.
+  for (std::size_t source = 0; source < axis_count_; ++source) {
+    if (!fault_reset_candidates[source]) {
+      continue;
+    }
+    for (std::size_t member = 0; member < axis_count_; ++member) {
+      if (member != source && !fault_reset_candidates[member] &&
+          configs_[member].group == configs_[source].group) {
+        triggers[member] = true;
+        reasons[member] |= kAxisFeedbackSafetyGroup;
+      }
+    }
+  }
+
   bool all_shutdown_axes_disabled = true;
   for (std::size_t axis = 0; axis < axis_count_; ++axis) {
     auto& state = states_[axis];
     const auto requested =
         has_command_ ? request_from_flags(commands_[axis].flags)
                      : AxisRequest::disable;
+    const auto drive_state = Cia402StateMachine::decode(pdos[axis].status_word);
+    const bool resettable_fault = drive_state == DriveState::fault;
+    const bool reset_edge =
+        resettable_fault && requested == AxisRequest::fault_reset &&
+        !state.fault_reset_output_active;
+    const bool fault_reset_allowed =
+        resettable_fault && requested == AxisRequest::fault_reset &&
+        reasons[axis] == 0U &&
+        (!reset_edge ||
+         state.fault_reset_edges < options_.maximum_fault_resets);
     bool entered_quick_stop = false;
     if (triggers[axis] && state.phase == StopPhase::running) {
       state.phase = StopPhase::quick_stop;
@@ -375,7 +415,15 @@ SafetyEvaluation SafetySupervisor::evaluate(
     }
 
     AxisRequest decision = requested;
-    if (state.phase == StopPhase::quick_stop) {
+    if (fault_reset_allowed) {
+      decision = AxisRequest::fault_reset;
+      if (reset_edge &&
+          state.fault_reset_edges < std::numeric_limits<std::uint32_t>::max()) {
+        ++state.fault_reset_edges;
+      }
+      state.fault_reset_output_active = true;
+    } else if (state.phase == StopPhase::quick_stop) {
+      state.fault_reset_output_active = false;
       decision = AxisRequest::quick_stop;
       if (!entered_quick_stop) {
         const auto magnitude = std::abs(static_cast<std::int64_t>(pdos[axis].actual_velocity));
@@ -395,7 +443,10 @@ SafetyEvaluation SafetySupervisor::evaluate(
         }
       }
     } else if (state.phase == StopPhase::disabled) {
+      state.fault_reset_output_active = false;
       decision = AxisRequest::disable;
+    } else {
+      state.fault_reset_output_active = false;
     }
 
     output.commands[axis] = commands_[axis];

@@ -98,10 +98,12 @@ class SafetySupervisor {
     StopPhase phase{StopPhase::running};
     std::int64_t stop_started_ns{};
     std::uint32_t zero_velocity_cycles{};
-    std::uint32_t fault_reset_count{};
+    std::uint32_t fault_reset_edges{};
     std::uint64_t stopped_command_sequence{};
     double last_target{};
     bool has_last_target{};
+    bool fault_episode_active{};
+    bool fault_reset_output_active{};
   };
 
   struct TargetEvaluation {

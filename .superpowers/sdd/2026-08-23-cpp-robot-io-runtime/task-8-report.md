@@ -30,3 +30,22 @@ Initial tests failed because the daemon interfaces did not exist. Later red test
 ## Carry-Forward
 
 Real-time guarantees still require qualification on the target ARM64/x86-64 PREEMPT_RT host with a real IgH master and Elmo drives. Separate executor threads for future blocking/event transports remain service-integration work; Task 8 assigns and owns the EtherCAT hard-real-time cycle without introducing those transports.
+
+## Review Fix Round 1
+
+- Fault-reset limits now count actual authorized `0x0080` edges for the entire persistent fault episode. Disable/unknown states do not replenish the budget, an observed valid non-fault state does, and peer axes remain stopped while a faulted group member resets.
+- Late releases resynchronize to the first future absolute deadline and record skipped releases. EINTR is retried; other sleep errors are published as a timing fault and drive the daemon through safe stop. Wake latency and cycle execution time are reported separately.
+- Real-time setup is performed by the thread that owns `run()`. Partial affinity/FIFO/mlock setup is rolled back, transport startup failures clean their scheduler/handler state, and teardown keeps cycle ownership until after master deactivation.
+- Commands cross from non-RT callers through a fixed atomic double-slot handoff. Feedback and axis requests are published as one lock-free snapshot, removing races between policy/control threads and the EtherCAT owner without adding RT locks or allocation.
+- The signal test now has `run()` consume SIGTERM and observes a final Disable PDO send before backend deactivation. Allocation interception covers regular, nothrow, array, and aligned C++ allocation; the combined IPC/EtherCAT 12-axis cycle guard exercises the complete RT data path.
+
+### Fix Verification
+
+- Fresh normal build of all targets: passed.
+- CTest without sandbox-forbidden socket cases: 112/112 passed. The restricted sandbox blocks all 18 `ipc_test` cases plus the two daemon IPC cases at socket/`SO_DOMAIN` operations; no result is claimed for those 20 cases in this run.
+- Python without its two socket-dependent ZMQ cases: 26/26 passed. Both excluded cases fail at socket creation with `EPERM` in this sandbox.
+- ASan/UBSan focused daemon suite without the two IPC cases: 25/25 passed with leak detection disabled because LeakSanitizer cannot operate under the container's ptrace policy.
+- Controller follow-up outside the socket-restricted sandbox used the pinned CTest 4.4.2 and passed both daemon IPC cases, 2/2 (`IntegratesVersionedIpcSequencesAndTimestamps` and `FullIpcEthercatCycleDoesNotAllocateAfterStart`).
+- Seven timing, fault-reset, SIGTERM, owner-thread, and concurrent-handoff regressions: 350/350 passed across 50 repetitions.
+- TSan-instrumented focused target: built. Runtime remains unavailable in this container (`ThreadSanitizer: unexpected memory mapping`), so no TSan execution result is claimed.
+- `git diff --check`: clean.
