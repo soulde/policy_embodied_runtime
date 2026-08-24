@@ -83,3 +83,33 @@ Real-time guarantees still require qualification on the target ARM64/x86-64 PREE
   container (`ThreadSanitizer: unexpected memory mapping`), so no TSan runtime
   result is claimed.
 - `git diff --check`: clean.
+
+## Review Fix Round 3
+
+- The acknowledged rejection publication is now a strict recovery barrier
+  `R`. Local valid publications at or below `R` are permanently stale and can
+  never be replayed; only a publication strictly newer than `R` may be applied
+  on a later owner cycle.
+- If the local handoff consumes a rejection, command refresh returns
+  immediately. An already-published IPC command remains pending until the next
+  cycle, guaranteeing that the rejection produces one complete Quick Stop
+  output cycle before any recovery command is considered.
+- Deterministic PDO tests cover stale `P1`, rejection `P2`, no-new-command
+  Quick Stop/Disable persistence, strictly newer local recovery, and deferred
+  IPC recovery.
+
+### Round 3 Verification
+
+- The stale-publication regression failed before the fix by accepting sequence
+  1 and returning to control word `0x000F`; it now remains disabled with the
+  invalid-command flag and sequence zero.
+- Fresh all-target build and non-socket CTest: 119/119 passed.
+- Python without the two socket-dependent ZMQ cases: 26/26 passed.
+- ASan/UBSan daemon suite without the three IPC cases: 32/32 passed with leak
+  detection disabled for the container ptrace restriction.
+- Four barrier, recovery, concurrency, and admission regressions: 200/200
+  passed across 50 repetitions.
+- The new real IPC regression is compiled but cannot start in this restricted
+  sandbox because `getsockopt(SO_DOMAIN)` returns `EPERM`; controller-side
+  execution is required before claiming its runtime result.
+- `git diff --check`: clean.

@@ -816,6 +816,44 @@ TEST(RobotIoDaemonTest, RejectsOutOfOrderAndMutatedDuplicateCommands) {
   EXPECT_EQ(harness.daemon.axis_request(0), AxisRequest::quick_stop);
 }
 
+TEST(RobotIoDaemonTest,
+     NeverReplaysAValidPublicationOlderThanTheRejectionBarrier) {
+  auto profile = profile_with_axes(1);
+  profile.axes[0].command_timeout = 10s;
+  profile.axes[0].following_error_limit = 10.0;
+  DaemonHarness harness{std::move(profile)};
+  const auto first = commands(1, 1U, 0, 0.1);
+  ASSERT_EQ(harness.daemon.stage_commands(first), CommandAcceptance::accepted);
+  auto changed_duplicate = first;
+  changed_duplicate.axes[0].target = 0.2;
+  ASSERT_EQ(harness.daemon.stage_commands(changed_duplicate),
+            CommandAcceptance::rejected);
+
+  harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
+  EXPECT_EQ(harness.daemon.axis_request(0), AxisRequest::quick_stop);
+  EXPECT_EQ(harness.pdos[0].control_word, 0x0002U);
+  EXPECT_EQ(harness.daemon.feedback(0).sequence, 0U);
+  EXPECT_NE(harness.daemon.feedback(0).flags &
+                kAxisFeedbackSafetyInvalidCommand,
+            0U);
+
+  harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
+  EXPECT_EQ(harness.daemon.axis_request(0), AxisRequest::disable);
+  EXPECT_EQ(harness.pdos[0].control_word, 0x0000U);
+  EXPECT_EQ(harness.daemon.feedback(0).sequence, 0U);
+  EXPECT_NE(harness.daemon.feedback(0).flags &
+                kAxisFeedbackSafetyInvalidCommand,
+            0U);
+
+  harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
+  EXPECT_EQ(harness.daemon.axis_request(0), AxisRequest::disable);
+  EXPECT_EQ(harness.pdos[0].control_word, 0x0000U);
+  EXPECT_EQ(harness.daemon.feedback(0).sequence, 0U);
+  EXPECT_NE(harness.daemon.feedback(0).flags &
+                kAxisFeedbackSafetyInvalidCommand,
+            0U);
+}
+
 TEST(RobotIoDaemonTest, RetainsRejectedPublicationUntilRealtimeOwnerConsumesIt) {
   DaemonHarness harness{profile_with_axes(1)};
   const auto first = commands(1, 1U, 0, 0.1);
@@ -830,6 +868,7 @@ TEST(RobotIoDaemonTest, RetainsRejectedPublicationUntilRealtimeOwnerConsumesIt) 
 
   harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
   EXPECT_EQ(harness.daemon.axis_request(0), AxisRequest::quick_stop);
+  EXPECT_EQ(harness.pdos[0].control_word, 0x0002U);
   EXPECT_NE(harness.daemon.feedback(0).flags &
                 kAxisFeedbackSafetyInvalidCommand,
             0U);
@@ -838,9 +877,15 @@ TEST(RobotIoDaemonTest, RetainsRejectedPublicationUntilRealtimeOwnerConsumesIt) 
   // Acknowledging the sticky rejection clears it. The newer valid command is
   // consumed on the next cycle and may restart only after the safe-stop phase.
   harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
-  EXPECT_NE(harness.daemon.axis_request(0), AxisRequest::enable);
+  EXPECT_EQ(harness.daemon.axis_request(0), AxisRequest::disable);
+  EXPECT_EQ(harness.pdos[0].control_word, 0x0000U);
+  EXPECT_EQ(harness.daemon.feedback(0).sequence, 2U);
+  EXPECT_EQ(harness.daemon.feedback(0).flags &
+                kAxisFeedbackSafetyInvalidCommand,
+            0U);
   harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
   EXPECT_EQ(harness.daemon.axis_request(0), AxisRequest::enable);
+  EXPECT_EQ(harness.pdos[0].control_word, 0x000FU);
   EXPECT_EQ(harness.daemon.feedback(0).flags &
                 kAxisFeedbackSafetyInvalidCommand,
             0U);
@@ -1263,6 +1308,62 @@ TEST(RobotIoDaemonTest, IntegratesVersionedIpcSequencesAndTimestamps) {
   EXPECT_EQ(feedback.value().timestamp_ns, clock.now_ns());
   EXPECT_EQ(feedback.value().axes[0].sequence, 7U);
   EXPECT_EQ(daemon.health().last_command_sequence, 7U);
+}
+
+TEST(RobotIoDaemonTest,
+     LocalRejectionDefersIpcCommandUntilTheFollowingCycle) {
+  std::array<int, 2> sockets{-1, -1};
+  ASSERT_EQ(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0,
+                       sockets.data()),
+            0);
+  auto server = RobotIoIpcServer::create(sockets[0], 1U, 45U);
+  ASSERT_TRUE(server.has_value()) << server.error().message;
+
+  FakeClock clock;
+  FakeRealtimeSystem realtime;
+  RobotIoDaemon daemon{clock, realtime};
+  auto profile = profile_with_axes(1);
+  profile.axes[0].command_timeout = 10s;
+  profile.axes[0].following_error_limit = 10.0;
+  ASSERT_TRUE(daemon.configure(profile).has_value());
+  ASSERT_TRUE(daemon.attach_ipc(std::move(server.value())).has_value());
+  auto client = RobotIoClient::connect(sockets[1], 45U);
+  ASSERT_TRUE(client.has_value()) << client.error().message;
+  ASSERT_TRUE(daemon.start().has_value());
+
+  const auto local = commands(1, 1U, 0, 0.1);
+  ASSERT_EQ(daemon.stage_commands(local), CommandAcceptance::accepted);
+  auto changed_duplicate = local;
+  changed_duplicate.axes[0].target = 0.2;
+  ASSERT_EQ(daemon.stage_commands(changed_duplicate),
+            CommandAcceptance::rejected);
+  const auto ipc_command = commands(1, 10U, 0, 0.3);
+  ASSERT_TRUE(client.value()
+                  .publish_commands(
+                      std::span<const AxisCommand>(ipc_command.axes.data(), 1U),
+                      10U, 0)
+                  .has_value());
+  auto pdos = enabled_pdos(1);
+
+  EXPECT_EQ(daemon.refresh_commands(), CommandAcceptance::rejected);
+  daemon.process_device_cycle(pdos, healthy_domain(1), true);
+  EXPECT_EQ(daemon.axis_request(0), AxisRequest::quick_stop);
+  EXPECT_EQ(pdos[0].control_word, 0x0002U);
+  EXPECT_EQ(daemon.feedback(0).sequence, 0U);
+  EXPECT_NE(daemon.feedback(0).flags & kAxisFeedbackSafetyInvalidCommand, 0U);
+
+  EXPECT_EQ(daemon.refresh_commands(), CommandAcceptance::accepted);
+  daemon.process_device_cycle(pdos, healthy_domain(1), true);
+  EXPECT_EQ(daemon.axis_request(0), AxisRequest::disable);
+  EXPECT_EQ(pdos[0].control_word, 0x0000U);
+  EXPECT_EQ(daemon.feedback(0).sequence, 10U);
+  EXPECT_EQ(daemon.feedback(0).flags & kAxisFeedbackSafetyInvalidCommand, 0U);
+
+  EXPECT_EQ(daemon.refresh_commands(), CommandAcceptance::duplicate);
+  daemon.process_device_cycle(pdos, healthy_domain(1), true);
+  EXPECT_EQ(daemon.axis_request(0), AxisRequest::enable);
+  EXPECT_EQ(pdos[0].control_word, 0x000FU);
+  EXPECT_EQ(daemon.feedback(0).sequence, 10U);
 }
 
 TEST(RobotIoDaemonTest, PublishesRaceFreeAxisSnapshotsDuringCommandHandoff) {

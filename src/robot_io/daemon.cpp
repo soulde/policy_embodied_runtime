@@ -288,16 +288,19 @@ CommandAcceptance RobotIoDaemon::consume_staged_commands() noexcept {
   auto event = command_handoff_.read();
   if (rejected_publication != acknowledged_rejection_publication_) {
     acknowledged_rejection_publication_ = rejected_publication;
-    if (event.has_value() && event->publication > rejected_publication &&
-        consumed_command_publication_ == event->publication) {
-      // The valid command raced ahead of an earlier rejection. Replay it on
-      // the cycle after the rejection is acknowledged so recovery remains
-      // possible without letting it hide the required safe-stop cycle.
+    if (consumed_command_publication_ > rejected_publication) {
+      // A strictly newer valid command raced ahead of this rejection. Replay
+      // it after the required safe-stop cycle; publications at or below the
+      // rejection barrier are permanently stale.
       consumed_command_publication_ = rejected_publication;
     }
     Snapshot<AxisCommand> invalid{};
     invalid.axis_count = kRobotIoMaximumAxes + 1U;
     return safety_.accept_commands(invalid, clock_->now_ns());
+  }
+  if (event.has_value() &&
+      event->publication <= acknowledged_rejection_publication_) {
+    return CommandAcceptance::duplicate;
   }
   if (!event.has_value() ||
       event->publication == consumed_command_publication_) {
@@ -317,6 +320,11 @@ CommandAcceptance RobotIoDaemon::refresh_commands() noexcept {
 
 CommandAcceptance RobotIoDaemon::refresh_commands_owned() noexcept {
   auto acceptance = consume_staged_commands();
+  if (acceptance == CommandAcceptance::rejected) {
+    // Preserve one complete safe-stop output cycle. IPC (or a newer local
+    // publication) remains available for the following owner cycle.
+    return acceptance;
+  }
   if (!ipc_.has_value()) {
     return acceptance;
   }
