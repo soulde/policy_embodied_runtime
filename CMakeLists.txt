@@ -4,6 +4,7 @@ project(policy_runtime LANGUAGES CXX)
 
 option(POLICY_RUNTIME_BUILD_TESTS "Build policy runtime unit tests" ON)
 option(POLICY_RUNTIME_WITH_IGH "Build the IgH EtherCAT backend" OFF)
+option(POLICY_RUNTIME_WITH_ZMQ "Build the ZeroMQ policy RPC server when available" ON)
 
 include(cmake/ProjectOptions.cmake)
 include(FetchContent)
@@ -11,6 +12,35 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 if(POLICY_RUNTIME_WITH_IGH)
     find_package(EtherCAT REQUIRED)
+endif()
+
+set(POLICY_RUNTIME_HAS_ZMQ OFF)
+if(POLICY_RUNTIME_WITH_ZMQ)
+    find_package(cppzmq CONFIG QUIET)
+    if(TARGET cppzmq)
+        set(POLICY_RUNTIME_ZMQ_TARGET cppzmq)
+        set(POLICY_RUNTIME_HAS_ZMQ ON)
+    elseif(TARGET cppzmq-static)
+        set(POLICY_RUNTIME_ZMQ_TARGET cppzmq-static)
+        set(POLICY_RUNTIME_HAS_ZMQ ON)
+    else()
+        find_path(POLICY_RUNTIME_CPPZMQ_INCLUDE_DIR zmq.hpp)
+        find_library(POLICY_RUNTIME_ZMQ_LIBRARY NAMES zmq)
+        if(POLICY_RUNTIME_CPPZMQ_INCLUDE_DIR AND POLICY_RUNTIME_ZMQ_LIBRARY)
+            add_library(policy_runtime_zmq INTERFACE)
+            target_include_directories(policy_runtime_zmq INTERFACE
+                "${POLICY_RUNTIME_CPPZMQ_INCLUDE_DIR}")
+            target_link_libraries(policy_runtime_zmq INTERFACE
+                "${POLICY_RUNTIME_ZMQ_LIBRARY}")
+            set(POLICY_RUNTIME_ZMQ_TARGET policy_runtime_zmq)
+            set(POLICY_RUNTIME_HAS_ZMQ ON)
+        endif()
+    endif()
+endif()
+if(POLICY_RUNTIME_HAS_ZMQ)
+    message(STATUS "Building policy-runtime-host with ZeroMQ/cppzmq support")
+else()
+    message(STATUS "ZeroMQ/cppzmq development files not found; building direct runtime host only")
 endif()
 
 find_package(nlohmann_json 3.11.3 CONFIG QUIET)
@@ -25,6 +55,8 @@ endif()
 
 add_library(policy_runtime_core
     src/common/result.cpp
+    src/policy/dummy_policy.cpp
+    src/policy/pipeline.cpp
     src/profiles/loader.cpp
     src/protocol/cia402/state_machine.cpp
     src/protocol/rpc/codec.cpp
@@ -33,6 +65,8 @@ add_library(policy_runtime_core
     src/robot_io/ipc_server.cpp
     src/robot_io/realtime_loop.cpp
     src/robot_io/safety_supervisor.cpp
+    src/runtime/runtime_host.cpp
+    src/runtime/runtime_host_cli.cpp
     src/runtime/robot_io_client.cpp
     src/robot_io/transport_scheduler.cpp
     src/transport/ethercat/elmo_gold.cpp
@@ -54,6 +88,15 @@ policy_runtime_configure_target(policy_runtime_core)
 add_executable(robot-io-daemon apps/robot_io_daemon_main.cpp)
 target_link_libraries(robot-io-daemon PRIVATE policy_runtime_core)
 policy_runtime_configure_target(robot-io-daemon)
+
+add_executable(policy-runtime-host apps/policy_runtime_host_main.cpp)
+target_link_libraries(policy-runtime-host PRIVATE policy_runtime_core)
+target_compile_definitions(policy-runtime-host PRIVATE
+    POLICY_RUNTIME_HAS_ZMQ=$<BOOL:${POLICY_RUNTIME_HAS_ZMQ}>)
+if(POLICY_RUNTIME_HAS_ZMQ)
+    target_link_libraries(policy-runtime-host PRIVATE ${POLICY_RUNTIME_ZMQ_TARGET})
+endif()
+policy_runtime_configure_target(policy-runtime-host)
 
 if(POLICY_RUNTIME_BUILD_TESTS)
     include(CTest)
@@ -143,6 +186,19 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         PRIVATE policy_runtime_core GTest::gtest_main)
     policy_runtime_configure_target(robot_io_daemon_test)
 
+    add_executable(runtime_host_test
+        tests/cpp/integration/runtime_host_test.cpp)
+    target_link_libraries(runtime_host_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    target_compile_definitions(runtime_host_test
+        PRIVATE POLICY_RUNTIME_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    policy_runtime_configure_target(runtime_host_test)
+
+    add_executable(runtime_contract_driver
+        tests/cpp/integration/runtime_contract_driver.cpp)
+    target_link_libraries(runtime_contract_driver PRIVATE policy_runtime_core)
+    policy_runtime_configure_target(runtime_contract_driver)
+
     include(GoogleTest)
     gtest_discover_tests(policy_runtime_unit_tests TEST_PREFIX result_test.
         DISCOVERY_MODE PRE_TEST)
@@ -166,4 +222,41 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         TEST_PREFIX igh_sdo_semantics_test. DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(robot_io_daemon_test
         TEST_PREFIX robot_io_daemon_test. DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(runtime_host_test
+        TEST_PREFIX runtime_host_test. DISCOVERY_MODE PRE_TEST)
+
+    set(POLICY_RUNTIME_CONTRACT_PYTHON "")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin/python")
+        set(POLICY_RUNTIME_CONTRACT_PYTHON
+            "${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin/python")
+    else()
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            execute_process(
+                COMMAND "${Python3_EXECUTABLE}" -c
+                    "import pydantic, serial, zmq"
+                RESULT_VARIABLE POLICY_RUNTIME_PYTHON_DEPS_RESULT
+                OUTPUT_QUIET ERROR_QUIET)
+            if(POLICY_RUNTIME_PYTHON_DEPS_RESULT EQUAL 0)
+                set(POLICY_RUNTIME_CONTRACT_PYTHON "${Python3_EXECUTABLE}")
+            endif()
+        endif()
+    endif()
+    if(POLICY_RUNTIME_CONTRACT_PYTHON)
+        add_test(NAME runtime_cross_language_test
+            COMMAND "${POLICY_RUNTIME_CONTRACT_PYTHON}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/compat/test_runtime_contract.py"
+                --driver $<TARGET_FILE:runtime_contract_driver>)
+        set_tests_properties(runtime_cross_language_test PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" TIMEOUT 15)
+        if(POLICY_RUNTIME_HAS_ZMQ)
+            add_test(NAME runtime_zmq_tcp_smoke
+                COMMAND "${POLICY_RUNTIME_CONTRACT_PYTHON}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/compat/test_runtime_zmq_smoke.py"
+                    --host $<TARGET_FILE:policy-runtime-host>)
+            set_tests_properties(runtime_zmq_tcp_smoke PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                TIMEOUT 15 LABELS tcp_smoke)
+        endif()
+    endif()
 endif()

@@ -1,0 +1,42 @@
+{
+  "id": "invalid-action-chunk-policy",
+  "version": "0.1.0",
+  "policy": "dummy",
+  "model": {},
+  "inputs": [
+    {
+      "name": "joint_input",
+      "robot_data": "joint_position",
+      "canonical_field": "joint_position"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "invalid_chunk_output",
+      "robot_data": "joint_target",
+      "canonical_field": "action_chunk"
+    }
+  ],
+  "canonical_observation_schema": [
+    {
+      "name": "joint_position",
+      "semantic_type": "joint_position",
+      "kind": "object"
+    }
+  ],
+  "canonical_action_schema": [
+    {
+      "name": "action_chunk",
+      "semantic_type": "action_chunk",
+      "kind": "object"
+    }
+  ],
+  "temporal": {
+    "mode": "single_step",
+    "action_horizon": 1,
+    "observation_history": 1
+  },
+  "preprocess": [{"name": "noop", "params": {}}],
+  "postprocess": [{"name": "noop", "params": {}}],
+  "safety": {}
+}

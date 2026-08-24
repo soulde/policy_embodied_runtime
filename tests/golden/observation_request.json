@@ -16,5 +16,6 @@
       "task_text": {"text": "move to object"},
       "meta": {"source": "transport-test"}
     }
-  }
+  },
+  "error": null
 }

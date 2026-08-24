@@ -384,6 +384,14 @@ bool validate_payload_for_type(std::string_view type, const Json& payload, std::
 
 }  // namespace
 
+Result<void> validate_action_payload(const nlohmann::json& action) {
+  std::string error;
+  if (!validate_action(action, error)) {
+    return Result<void>::failure({ErrorCode::protocol, std::move(error)});
+  }
+  return Result<void>::success();
+}
+
 Result<MessageEnvelope> decode_envelope(std::string_view text) {
   Json message = Json::parse(text.begin(), text.end(), nullptr, false);
   if (message.is_discarded()) {
@@ -502,6 +510,10 @@ std::string encode_envelope(const MessageEnvelope& envelope) {
         {"message", envelope.error->message},
         {"details", envelope.error->details},
     };
+  } else {
+    // Python's current Pydantic encoder includes the nullable error field on
+    // every successful request and response. Keep that exact wire shape.
+    message["error"] = nullptr;
   }
   return message.dump();
 }
