@@ -5,11 +5,15 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -18,6 +22,51 @@
 
 #include "policy_runtime/transport/ethercat/elmo_gold.hpp"
 #include "policy_runtime/transport/ethercat/master.hpp"
+
+namespace allocation_probe {
+
+std::atomic<bool> enabled{};
+std::atomic<std::size_t> count{};
+
+void record() noexcept {
+  if (enabled.load(std::memory_order_relaxed)) {
+    count.fetch_add(1U, std::memory_order_relaxed);
+  }
+}
+
+void begin() noexcept {
+  count.store(0U, std::memory_order_relaxed);
+  enabled.store(true, std::memory_order_release);
+}
+
+std::size_t end() noexcept {
+  enabled.store(false, std::memory_order_release);
+  return count.load(std::memory_order_relaxed);
+}
+
+}  // namespace allocation_probe
+
+void* operator new(std::size_t size) {
+  allocation_probe::record();
+  if (auto* allocation = std::malloc(size == 0U ? 1U : size)) {
+    return allocation;
+  }
+  throw std::bad_alloc{};
+}
+
+void* operator new[](std::size_t size) { return ::operator new(size); }
+
+void operator delete(void* allocation) noexcept { std::free(allocation); }
+
+void operator delete[](void* allocation) noexcept { std::free(allocation); }
+
+void operator delete(void* allocation, std::size_t) noexcept {
+  std::free(allocation);
+}
+
+void operator delete[](void* allocation, std::size_t) noexcept {
+  std::free(allocation);
+}
 
 namespace policy_runtime {
 
@@ -34,6 +83,39 @@ class EthercatMailboxTestPeer {
   }
 };
 
+class EthercatMasterTestPeer {
+ public:
+  static bool admit_cycle(EthercatMaster& master) noexcept {
+    return master.try_enter_cycle();
+  }
+
+  static void leave_cycle(EthercatMaster& master) noexcept {
+    master.leave_cycle();
+  }
+
+  static bool admission_is_open(const EthercatMaster& master) noexcept {
+    return (master.cycle_admission_.load(std::memory_order_acquire) &
+            EthercatMaster::kCycleOpenBit) != 0U;
+  }
+
+  static std::uint64_t generation(const EthercatMaster& master) noexcept {
+    return master.generation_;
+  }
+
+  static std::uint64_t open_bit() noexcept {
+    return EthercatMaster::kCycleOpenBit;
+  }
+
+  static std::uint64_t count_mask() noexcept {
+    return EthercatMaster::kCycleCountMask;
+  }
+
+  static bool admission_successor(std::uint64_t observed,
+                                  std::uint64_t& desired) noexcept {
+    return EthercatMaster::admission_successor(observed, desired);
+  }
+};
+
 }  // namespace policy_runtime
 
 namespace {
@@ -44,12 +126,12 @@ using policy_runtime::CycleContext;
 using policy_runtime::DistributedClockConfiguration;
 using policy_runtime::DomainHealth;
 using policy_runtime::ElmoGoldDeviceDescription;
-using policy_runtime::Error;
 using policy_runtime::ErrorCode;
 using policy_runtime::EthercatAxisConfiguration;
 using policy_runtime::EthercatBackend;
 using policy_runtime::EthercatDeviceIdentity;
 using policy_runtime::EthercatMaster;
+using policy_runtime::EthercatMasterTestPeer;
 using policy_runtime::EthercatMailboxTestPeer;
 using policy_runtime::EthercatSlaveAddress;
 using policy_runtime::EthercatSlaveConfiguration;
@@ -58,8 +140,12 @@ using policy_runtime::ObjectAddress;
 using policy_runtime::PdoFieldLocation;
 using policy_runtime::Result;
 using policy_runtime::SdoDownloadRequest;
+using policy_runtime::SdoFailureReason;
 using policy_runtime::SdoTransferProgress;
 using policy_runtime::SdoTransferState;
+using policy_runtime::sdo_completed;
+using policy_runtime::sdo_failed;
+using policy_runtime::sdo_pending;
 using policy_runtime::TransportHealth;
 using policy_runtime::profiles::AxisConfig;
 using policy_runtime::profiles::Cia402Mode;
@@ -102,9 +188,16 @@ class FakeEthercatBackend final : public EthercatBackend {
     domain_health_ = health;
   }
 
-  void record(std::string event) {
+  void enable_event_recording(bool enabled) noexcept {
+    record_events_.store(enabled, std::memory_order_release);
+  }
+
+  void record(std::string_view event) {
+    if (!record_events_.load(std::memory_order_acquire)) {
+      return;
+    }
     std::scoped_lock lock(mutex_);
-    events_.push_back(std::move(event));
+    events_.emplace_back(event);
   }
 
   std::vector<std::string> events() const {
@@ -123,6 +216,15 @@ class FakeEthercatBackend final : public EthercatBackend {
 
   void make_download_pending_once() { pending_downloads_.store(1U); }
   void make_cancel_pending_once() { pending_cancellations_.store(1U); }
+  void fail_next_download(ErrorCode code, SdoFailureReason reason) noexcept {
+    next_download_failure_ = sdo_failed(code, reason);
+  }
+  void fail_next_upload(ErrorCode code, SdoFailureReason reason) noexcept {
+    next_upload_failure_ = sdo_failed(code, reason);
+  }
+  void fail_next_cancel(ErrorCode code, SdoFailureReason reason) noexcept {
+    next_cancel_failure_ = sdo_failed(code, reason);
+  }
   void fail_bind_at(unsigned call) { fail_bind_at_.store(call); }
 
  protected:
@@ -197,6 +299,10 @@ class FakeEthercatBackend final : public EthercatBackend {
   void send() noexcept override { record("send"); }
 
   DomainHealth domain_health() const noexcept override {
+    if (!record_events_.load(std::memory_order_acquire)) {
+      std::scoped_lock lock(mutex_);
+      return domain_health_;
+    }
     std::scoped_lock lock(mutex_);
     events_.push_back("health");
     return domain_health_;
@@ -207,41 +313,55 @@ class FakeEthercatBackend final : public EthercatBackend {
     if (sdo_active_ &&
         (active_sdo_address_.index != request.address.index ||
          active_sdo_address_.subindex != request.address.subindex)) {
-      return SdoTransferProgress{
-          SdoTransferState::failed,
-          Error{ErrorCode::protocol, "a different fake SDO remains active"}, 0U};
+      return sdo_failed(ErrorCode::protocol,
+                        SdoFailureReason::conflicting_request);
     }
     sdo_active_ = true;
     active_sdo_address_ = request.address;
     download_count_.fetch_add(1U);
     record("download");
+    if (next_download_failure_.state == SdoTransferState::failed) {
+      const auto failure = next_download_failure_;
+      next_download_failure_ = sdo_pending();
+      sdo_active_ = false;
+      return failure;
+    }
     if (pending_downloads_.load() != 0U) {
       pending_downloads_.fetch_sub(1U);
-      return SdoTransferProgress{SdoTransferState::pending, std::nullopt, {}};
+      return sdo_pending();
     }
     sdo_active_ = false;
-    return SdoTransferProgress{SdoTransferState::completed, std::nullopt, {}};
+    return sdo_completed();
   }
 
   SdoTransferProgress progress_upload_sdo(EthercatSlaveAddress, ObjectAddress,
                                            std::span<std::byte> destination) override {
     record("upload");
+    if (next_upload_failure_.state == SdoTransferState::failed) {
+      const auto failure = next_upload_failure_;
+      next_upload_failure_ = sdo_pending();
+      return failure;
+    }
     constexpr std::array<std::byte, 2U> uploaded{std::byte{0x12U},
                                                 std::byte{0x34U}};
     std::copy(uploaded.begin(), uploaded.end(), destination.begin());
-    return SdoTransferProgress{SdoTransferState::completed, std::nullopt,
-                               uploaded.size()};
+    return sdo_completed(uploaded.size());
   }
 
   SdoTransferProgress progress_cancel_sdo(EthercatSlaveAddress) override {
     cancel_count_.fetch_add(1U);
     record("cancel");
+    if (next_cancel_failure_.state == SdoTransferState::failed) {
+      const auto failure = next_cancel_failure_;
+      next_cancel_failure_ = sdo_pending();
+      return failure;
+    }
     if (pending_cancellations_.load() != 0U) {
       pending_cancellations_.fetch_sub(1U);
-      return SdoTransferProgress{};
+      return sdo_pending();
     }
     sdo_active_ = false;
-    return SdoTransferProgress{SdoTransferState::completed, std::nullopt, 0U};
+    return sdo_completed();
   }
 
  private:
@@ -260,10 +380,17 @@ class FakeEthercatBackend final : public EthercatBackend {
   ObjectAddress active_sdo_address_{};
   std::atomic<unsigned> pending_downloads_{};
   std::atomic<unsigned> pending_cancellations_{};
+  SdoTransferProgress next_download_failure_{};
+  SdoTransferProgress next_upload_failure_{};
+  SdoTransferProgress next_cancel_failure_{};
   std::atomic<unsigned> bind_count_{};
   std::atomic<unsigned> fail_bind_at_{};
+  std::atomic<bool> record_events_{true};
   DomainHealth domain_health_{1U, 1U, true, true, true, 0};
 };
+
+static_assert(std::is_trivially_copyable_v<SdoTransferProgress>);
+static_assert(std::is_trivially_destructible_v<SdoTransferProgress>);
 
 AxisConfig axis_config(Cia402Mode mode = Cia402Mode::csp) {
   return AxisConfig{"axis", 0U, 0U, ElmoGoldDeviceDescription::vendor_id(),
@@ -700,6 +827,133 @@ TEST(EthercatFakeBackendTest, CloseWaitsForInFlightPdoBeforeDeactivation) {
   EXPECT_TRUE(close_completed.load());
   EXPECT_FALSE(backend->activated());
   EXPECT_EQ(backend->deactivate_count(), 1U);
+}
+
+TEST(EthercatFakeBackendTest, ModelsSingleWordAdmissionAndRejectsOverflow) {
+  const auto open = EthercatMasterTestPeer::open_bit();
+  const auto count_mask = EthercatMasterTestPeer::count_mask();
+  std::uint64_t desired{};
+
+  ASSERT_TRUE(EthercatMasterTestPeer::admission_successor(open, desired));
+  EXPECT_EQ(desired, open | 1U);
+
+  EXPECT_FALSE(EthercatMasterTestPeer::admission_successor(0U, desired));
+  EXPECT_FALSE(EthercatMasterTestPeer::admission_successor(open | count_mask,
+                                                           desired));
+
+  const auto admitted_before_close = open | 1U;
+  EXPECT_EQ(admitted_before_close & count_mask, 1U);
+  EXPECT_EQ((admitted_before_close & count_mask) - 1U, 0U);
+}
+
+TEST(EthercatFakeBackendTest,
+     ClosingAdmissionGateRejectsLaterCycleAndReopenUsesNewGeneration) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
+  ASSERT_TRUE(master.open().has_value());
+  const auto first_generation = EthercatMasterTestPeer::generation(master);
+  ASSERT_TRUE(EthercatMasterTestPeer::admit_cycle(master));
+
+  std::atomic<bool> close_completed{};
+  std::thread close_thread([&] {
+    master.close();
+    close_completed.store(true, std::memory_order_release);
+  });
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (EthercatMasterTestPeer::admission_is_open(master) &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  const bool closing_observed =
+      !EthercatMasterTestPeer::admission_is_open(master);
+  const auto receives_before = backend->receive_count();
+  if (closing_observed) {
+    master.cycle({});
+  }
+  const auto receives_while_closing = backend->receive_count();
+  const bool backend_still_active = backend->activated();
+  const bool close_still_waiting =
+      !close_completed.load(std::memory_order_acquire);
+
+  EthercatMasterTestPeer::leave_cycle(master);
+  close_thread.join();
+
+  ASSERT_TRUE(closing_observed);
+  EXPECT_EQ(receives_while_closing, receives_before);
+  EXPECT_TRUE(backend_still_active);
+  EXPECT_TRUE(close_still_waiting);
+  EXPECT_FALSE(backend->activated());
+  ASSERT_TRUE(master.open().has_value());
+  const auto second_generation = EthercatMasterTestPeer::generation(master);
+  EXPECT_NE(second_generation, first_generation);
+
+  master.cycle({});
+
+  EXPECT_EQ(backend->receive_count(), receives_before + 1U);
+}
+
+TEST(EthercatFakeBackendTest,
+     SdoDownloadUploadAndCancelFailureCyclesDoNotAllocate) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
+  ASSERT_TRUE(master.open().has_value());
+  auto& mailbox = master.mailbox(0U);
+  const std::vector<std::byte> value{std::byte{1U}};
+
+  auto download = mailbox.queue_download({0x2000U, 0U}, value);
+  ASSERT_TRUE(download.has_value());
+  mailbox.cycle({});
+  backend->fail_next_download(ErrorCode::io,
+                              SdoFailureReason::transfer_failed);
+  backend->enable_event_recording(false);
+  allocation_probe::begin();
+  master.cycle({});
+  const auto download_allocations = allocation_probe::end();
+  backend->enable_event_recording(true);
+  EXPECT_EQ(download_allocations, 0U);
+  auto download_status = mailbox.mailbox_status(download.value());
+  ASSERT_TRUE(download_status.has_value());
+  ASSERT_TRUE(download_status->error.has_value());
+  EXPECT_EQ(download_status->state, MailboxRequestState::failed);
+  EXPECT_EQ(download_status->error->code, ErrorCode::io);
+
+  auto upload = mailbox.queue_upload({0x2001U, 0U});
+  ASSERT_TRUE(upload.has_value());
+  mailbox.cycle({});
+  backend->fail_next_upload(ErrorCode::protocol,
+                            SdoFailureReason::transfer_failed);
+  backend->enable_event_recording(false);
+  allocation_probe::begin();
+  master.cycle({});
+  const auto upload_allocations = allocation_probe::end();
+  backend->enable_event_recording(true);
+  EXPECT_EQ(upload_allocations, 0U);
+  auto upload_status = mailbox.mailbox_status(upload.value());
+  ASSERT_TRUE(upload_status.has_value());
+  ASSERT_TRUE(upload_status->error.has_value());
+  EXPECT_EQ(upload_status->state, MailboxRequestState::failed);
+  EXPECT_EQ(upload_status->error->code, ErrorCode::protocol);
+
+  auto cancelled = mailbox.queue_download({0x2002U, 0U}, value);
+  ASSERT_TRUE(cancelled.has_value());
+  backend->make_download_pending_once();
+  mailbox.cycle({});
+  master.cycle({});
+  mailbox.close();
+  backend->fail_next_cancel(ErrorCode::internal,
+                            SdoFailureReason::transfer_failed);
+  backend->enable_event_recording(false);
+  allocation_probe::begin();
+  master.cycle({});
+  const auto cancel_allocations = allocation_probe::end();
+  backend->enable_event_recording(true);
+  EXPECT_EQ(cancel_allocations, 0U);
+  EXPECT_EQ(backend->cancel_count(), 1U);
+  EXPECT_FALSE(mailbox.open().has_value());
+
+  master.cycle({});
+  EXPECT_EQ(backend->cancel_count(), 2U);
+  EXPECT_TRUE(mailbox.open().has_value());
 }
 
 TEST(EthercatFakeBackendTest,

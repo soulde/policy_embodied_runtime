@@ -20,11 +20,6 @@ constexpr std::array<std::size_t, 4U> kDownloadRequestSizes{1U, 2U, 4U, 8U};
 
 enum class ActiveSdo { none, download, upload };
 
-SdoTransferProgress sdo_failure(ErrorCode code, std::string message) {
-  return SdoTransferProgress{SdoTransferState::failed,
-                             Error{code, std::move(message)}, {}};
-}
-
 template <class Callable>
 bool igh_call_succeeded(Callable&& callable) {
   if constexpr (std::is_void_v<std::invoke_result_t<Callable>>) {
@@ -376,14 +371,14 @@ SdoTransferProgress IghBackend::progress_download_sdo(
     EthercatSlaveAddress slave, const SdoDownloadRequest& request) {
   auto* configured_slave = impl_->find_slave(slave);
   if (!impl_->activated || configured_slave == nullptr) {
-    return sdo_failure(ErrorCode::unavailable,
-                       "IgH asynchronous SDO endpoint is unavailable");
+    return sdo_failed(ErrorCode::unavailable,
+                      SdoFailureReason::endpoint_unavailable);
   }
   const auto size = std::find(kDownloadRequestSizes.begin(), kDownloadRequestSizes.end(),
                               request.data.size());
   if (size == kDownloadRequestSizes.end()) {
-    return sdo_failure(ErrorCode::invalid_argument,
-                       "IgH SDO download requires a preconfigured 1, 2, 4, or 8 byte size");
+    return sdo_failed(ErrorCode::invalid_argument,
+                      SdoFailureReason::unsupported_download_size);
   }
 
   if (configured_slave->active_sdo == ActiveSdo::none) {
@@ -391,49 +386,52 @@ SdoTransferProgress IghBackend::progress_download_sdo(
         std::distance(kDownloadRequestSizes.begin(), size))];
     if (download_request == nullptr ||
         ecrt_sdo_request_data_size(download_request) != request.data.size()) {
-      return sdo_failure(ErrorCode::protocol,
-                         "IgH exact-size SDO download request is unavailable");
+      return sdo_failed(ErrorCode::protocol,
+                        SdoFailureReason::exact_size_request_unavailable);
     }
     if (!igh_call_succeeded([&] {
           return ecrt_sdo_request_index(download_request, request.address.index,
                                         request.address.subindex);
         })) {
-      return sdo_failure(ErrorCode::protocol, "failed to select the IgH SDO object");
+      return sdo_failed(ErrorCode::protocol,
+                        SdoFailureReason::object_selection_failed);
     }
     std::memcpy(ecrt_sdo_request_data(download_request), request.data.data(),
                 request.data.size());
     if (!igh_call_succeeded(
             [&] { return ecrt_sdo_request_write(download_request); })) {
-      return sdo_failure(ErrorCode::io, "failed to schedule the IgH SDO download");
+      return sdo_failed(ErrorCode::io,
+                        SdoFailureReason::download_schedule_failed);
     }
     configured_slave->active_sdo = ActiveSdo::download;
     configured_slave->active_request = download_request;
     configured_slave->active_address = request.address;
-    return SdoTransferProgress{};
+    return sdo_pending();
   }
   if (configured_slave->active_sdo != ActiveSdo::download ||
       configured_slave->active_address.index != request.address.index ||
       configured_slave->active_address.subindex != request.address.subindex) {
-    return sdo_failure(ErrorCode::protocol,
-                       "a different IgH SDO request is already active for this slave");
+    return sdo_failed(ErrorCode::protocol,
+                      SdoFailureReason::conflicting_request);
   }
 
   switch (ecrt_sdo_request_state(configured_slave->active_request)) {
     case EC_REQUEST_UNUSED:
     case EC_REQUEST_BUSY:
-      return SdoTransferProgress{};
+      return sdo_pending();
     case EC_REQUEST_SUCCESS:
       configured_slave->active_sdo = ActiveSdo::none;
       configured_slave->active_request = nullptr;
-      return SdoTransferProgress{SdoTransferState::completed, std::nullopt, {}};
+      return sdo_completed();
     case EC_REQUEST_ERROR:
       configured_slave->active_sdo = ActiveSdo::none;
       configured_slave->active_request = nullptr;
-      return sdo_failure(ErrorCode::io, "IgH SDO download completed with an error");
+      return sdo_failed(ErrorCode::io, SdoFailureReason::transfer_failed);
   }
   configured_slave->active_sdo = ActiveSdo::none;
   configured_slave->active_request = nullptr;
-  return sdo_failure(ErrorCode::internal, "unknown IgH SDO request state");
+  return sdo_failed(ErrorCode::internal,
+                    SdoFailureReason::unknown_request_state);
 }
 
 SdoTransferProgress IghBackend::progress_upload_sdo(
@@ -442,12 +440,12 @@ SdoTransferProgress IghBackend::progress_upload_sdo(
   auto* configured_slave = impl_->find_slave(slave);
   if (!impl_->activated || configured_slave == nullptr ||
       configured_slave->upload_request == nullptr) {
-    return sdo_failure(ErrorCode::unavailable,
-                       "IgH asynchronous SDO endpoint is unavailable");
+    return sdo_failed(ErrorCode::unavailable,
+                      SdoFailureReason::endpoint_unavailable);
   }
   if (destination.empty() || destination.size() > kMailboxCapacity) {
-    return sdo_failure(ErrorCode::invalid_argument,
-                       "IgH SDO upload size is outside the configured capacity");
+    return sdo_failed(ErrorCode::invalid_argument,
+                      SdoFailureReason::invalid_upload_capacity);
   }
 
   if (configured_slave->active_sdo == ActiveSdo::none) {
@@ -457,60 +455,62 @@ SdoTransferProgress IghBackend::progress_upload_sdo(
         }) ||
         !igh_call_succeeded(
             [&] { return ecrt_sdo_request_read(configured_slave->upload_request); })) {
-      return sdo_failure(ErrorCode::io, "failed to schedule the IgH SDO upload");
+      return sdo_failed(ErrorCode::io,
+                        SdoFailureReason::upload_schedule_failed);
     }
     configured_slave->active_sdo = ActiveSdo::upload;
     configured_slave->active_request = configured_slave->upload_request;
     configured_slave->active_address = address;
     configured_slave->active_upload_limit = destination.size();
-    return SdoTransferProgress{};
+    return sdo_pending();
   }
   if (configured_slave->active_sdo != ActiveSdo::upload ||
       configured_slave->active_address.index != address.index ||
       configured_slave->active_address.subindex != address.subindex) {
-    return sdo_failure(ErrorCode::protocol,
-                       "a different IgH SDO request is already active for this slave");
+    return sdo_failed(ErrorCode::protocol,
+                      SdoFailureReason::conflicting_request);
   }
 
   switch (ecrt_sdo_request_state(configured_slave->active_request)) {
     case EC_REQUEST_UNUSED:
     case EC_REQUEST_BUSY:
-      return SdoTransferProgress{};
+      return sdo_pending();
     case EC_REQUEST_SUCCESS: {
       const auto size = ecrt_sdo_request_data_size(configured_slave->active_request);
       if (size > configured_slave->active_upload_limit || size > kMailboxCapacity) {
         configured_slave->active_sdo = ActiveSdo::none;
         configured_slave->active_request = nullptr;
-        return sdo_failure(ErrorCode::protocol,
-                           "IgH SDO upload exceeded the requested capacity");
+        return sdo_failed(ErrorCode::protocol,
+                          SdoFailureReason::upload_capacity_exceeded);
       }
       const auto* data = reinterpret_cast<const std::byte*>(
           ecrt_sdo_request_data(configured_slave->active_request));
       std::copy_n(data, size, destination.begin());
       configured_slave->active_sdo = ActiveSdo::none;
       configured_slave->active_request = nullptr;
-      return SdoTransferProgress{SdoTransferState::completed, std::nullopt, size};
+      return sdo_completed(size);
     }
     case EC_REQUEST_ERROR:
       configured_slave->active_sdo = ActiveSdo::none;
       configured_slave->active_request = nullptr;
-      return sdo_failure(ErrorCode::io, "IgH SDO upload completed with an error");
+      return sdo_failed(ErrorCode::io, SdoFailureReason::transfer_failed);
   }
   configured_slave->active_sdo = ActiveSdo::none;
   configured_slave->active_request = nullptr;
-  return sdo_failure(ErrorCode::internal, "unknown IgH SDO request state");
+  return sdo_failed(ErrorCode::internal,
+                    SdoFailureReason::unknown_request_state);
 }
 
 SdoTransferProgress IghBackend::progress_cancel_sdo(
     EthercatSlaveAddress slave) {
   auto* configured_slave = impl_->find_slave(slave);
   if (!impl_->activated || configured_slave == nullptr) {
-    return sdo_failure(ErrorCode::unavailable,
-                       "IgH asynchronous SDO endpoint is unavailable");
+    return sdo_failed(ErrorCode::unavailable,
+                      SdoFailureReason::endpoint_unavailable);
   }
   if (configured_slave->active_sdo == ActiveSdo::none ||
       configured_slave->active_request == nullptr) {
-    return SdoTransferProgress{SdoTransferState::completed, std::nullopt, 0U};
+    return sdo_completed();
   }
 
   // IgH's public asynchronous request API has no abort operation. The sole
@@ -519,16 +519,17 @@ SdoTransferProgress IghBackend::progress_cancel_sdo(
   switch (ecrt_sdo_request_state(configured_slave->active_request)) {
     case EC_REQUEST_UNUSED:
     case EC_REQUEST_BUSY:
-      return SdoTransferProgress{};
+      return sdo_pending();
     case EC_REQUEST_SUCCESS:
     case EC_REQUEST_ERROR:
       configured_slave->active_sdo = ActiveSdo::none;
       configured_slave->active_request = nullptr;
       configured_slave->active_address = {};
       configured_slave->active_upload_limit = 0U;
-      return SdoTransferProgress{SdoTransferState::completed, std::nullopt, 0U};
+      return sdo_completed();
   }
-  return sdo_failure(ErrorCode::internal, "unknown IgH SDO request state");
+  return sdo_failed(ErrorCode::internal,
+                    SdoFailureReason::unknown_request_state);
 }
 
 }  // namespace policy_runtime

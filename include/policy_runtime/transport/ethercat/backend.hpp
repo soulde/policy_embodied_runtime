@@ -62,11 +62,45 @@ struct SdoDownloadRequest {
 
 enum class SdoTransferState { pending, completed, failed };
 
+enum class SdoFailureReason : std::uint8_t {
+  none,
+  backend_exception,
+  endpoint_unavailable,
+  unsupported_download_size,
+  exact_size_request_unavailable,
+  object_selection_failed,
+  download_schedule_failed,
+  conflicting_request,
+  invalid_upload_capacity,
+  upload_schedule_failed,
+  upload_capacity_exceeded,
+  transfer_failed,
+  unknown_request_state,
+};
+
 struct SdoTransferProgress {
   SdoTransferState state{SdoTransferState::pending};
-  std::optional<Error> error;
+  ErrorCode error_code{ErrorCode::io};
+  SdoFailureReason failure_reason{SdoFailureReason::none};
   std::size_t uploaded_size{};
 };
+
+static_assert(std::is_trivially_copyable_v<SdoTransferProgress> &&
+                  std::is_trivially_destructible_v<SdoTransferProgress>,
+              "master-cycle SDO progress must never own allocating state");
+
+constexpr SdoTransferProgress sdo_pending() noexcept { return {}; }
+
+constexpr SdoTransferProgress sdo_completed(
+    std::size_t uploaded_size = 0U) noexcept {
+  return {SdoTransferState::completed, ErrorCode::io,
+          SdoFailureReason::none, uploaded_size};
+}
+
+constexpr SdoTransferProgress sdo_failed(ErrorCode code,
+                                         SdoFailureReason reason) noexcept {
+  return {SdoTransferState::failed, code, reason, 0U};
+}
 
 struct EthercatSlaveConfiguration {
   EthercatSlaveAddress address{};

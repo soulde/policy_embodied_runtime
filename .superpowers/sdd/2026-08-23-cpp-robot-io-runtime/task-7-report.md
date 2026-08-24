@@ -73,3 +73,22 @@ Daemon integration should provide application-time/DC clock synchronization call
 ### Remaining Hardware Boundary
 
 IgH cannot forcibly abort an active asynchronous SDO through its public API. If a request never leaves `BUSY`, mailbox-only reopen intentionally remains unavailable until the parent is stopped and the backend is deactivated. Real IgH linkage and 12-axis Elmo HIL remain follow-up validation.
+
+## Review Fix Round 3
+
+- Replaced the separate master `open` flag and in-flight counter with one lock-free 64-bit admission word. Its high bit is the open gate and its lower 63 bits are the overflow-checked cycle reference count.
+- Admission CAS and close `fetch_and` now share one atomic modification order: admission before close contributes a reference that close drains, while close before admission clears the gate and forces the CAS to retry and reject. Backend deactivation therefore cannot race a later admitted cycle on ARM64 or x86-64.
+- Kept the real-time exit path bounded, `noexcept`, and allocation-free. The last reference leaving a closing state releases its writes and wakes the close waiter.
+- Replaced owning `optional<Error>` SDO progress with a trivially copyable fixed `ErrorCode`/`SdoFailureReason` value. The owner stores only those fixed fields; `mailbox_status()` renders the human-readable `std::string` on the non-real-time frontend.
+- Converted all IgH download, upload, cancellation, and unknown-state failures to fixed progress values. Backend exceptions in the owner are likewise represented without constructing a string.
+- Added a deterministic admission/close boundary test, a transition/overflow model test, reopen-generation coverage, and allocation instrumentation proving zero `operator new` calls in download, upload, and cancellation failure cycles.
+
+### Review Fix Round 3 Verification
+
+- IgH-disabled CTest: 105/105 passed.
+- Python pytest: 28/28 passed.
+- ASan/UBSan CTest: 105/105 passed with leak detection enabled.
+- Seven admission, lifecycle, bounded-work, cancellation, and allocation tests: 100 repetitions passed in both normal and ASan/UBSan builds.
+- Compile-only compatibility passed with the retained official IgH 1.5.4 and 1.6.12 headers. Placeholder/object-only compilation does not claim real linking or hardware execution.
+- Missing IgH development files still fail configuration with the explicit `ecrt.h`/`libethercat` dependency diagnostic.
+- `git diff --check` passed, and the protected Elmo XML checksum remained unchanged.

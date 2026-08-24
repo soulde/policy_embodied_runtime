@@ -71,7 +71,8 @@ class EthercatMailbox final : public ObjectDictionaryTransport {
     SdoDownloadRequest transfer;
     std::atomic<RequestPhase> phase{RequestPhase::queued};
     FailureKind failure_kind{FailureKind::none};
-    std::optional<Error> backend_error;
+    ErrorCode backend_error_code{ErrorCode::io};
+    SdoFailureReason backend_failure_reason{SdoFailureReason::none};
     std::size_t uploaded_size{};
   };
 
@@ -137,8 +138,14 @@ class EthercatMaster final : public CyclicTransport {
   ObjectDictionaryTransport& mailbox(std::size_t axis_index);
 
  private:
+  static constexpr std::uint64_t kCycleOpenBit = std::uint64_t{1U} << 63U;
+  static constexpr std::uint64_t kCycleCountMask = kCycleOpenBit - 1U;
+
   Result<void> register_field(CyclicField field, bool input);
   Result<void> validate_configuration() const;
+  static bool admission_successor(std::uint64_t observed,
+                                  std::uint64_t& desired) noexcept;
+  bool admission_is_open() const noexcept;
   bool try_enter_cycle() noexcept;
   void leave_cycle() noexcept;
 
@@ -153,12 +160,18 @@ class EthercatMaster final : public CyclicTransport {
   CycleHandler cycle_handler_{};
   void* cycle_handler_context_{};
   std::mutex lifecycle_mutex_;
-  std::atomic<bool> open_{false};
-  std::atomic<unsigned int> cycles_in_flight_{};
+  // Open/closing and in-flight count share one modification order. The high bit
+  // gates admission and the remaining bits count admitted cycles.
+  std::atomic<std::uint64_t> cycle_admission_{};
   std::atomic<TransportHealth> health_{TransportHealth::failed};
   std::uint64_t generation_{};
   std::uint64_t next_generation_{1U};
   std::size_t mailbox_cursor_{};
+
+  static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+                "EtherCAT cycle admission requires a lock-free 64-bit atomic");
+
+  friend class EthercatMasterTestPeer;
 };
 
 }  // namespace policy_runtime

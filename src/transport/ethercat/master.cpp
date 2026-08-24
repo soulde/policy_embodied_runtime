@@ -34,6 +34,38 @@ bool valid_static_mode(profiles::Cia402Mode mode) noexcept {
   return false;
 }
 
+const char* sdo_failure_message(SdoFailureReason reason) noexcept {
+  switch (reason) {
+    case SdoFailureReason::none:
+      return "EtherCAT SDO transfer failed";
+    case SdoFailureReason::backend_exception:
+      return "EtherCAT SDO backend raised an exception";
+    case SdoFailureReason::endpoint_unavailable:
+      return "EtherCAT SDO endpoint is unavailable";
+    case SdoFailureReason::unsupported_download_size:
+      return "EtherCAT SDO download size is unsupported";
+    case SdoFailureReason::exact_size_request_unavailable:
+      return "EtherCAT exact-size SDO request is unavailable";
+    case SdoFailureReason::object_selection_failed:
+      return "EtherCAT SDO object selection failed";
+    case SdoFailureReason::download_schedule_failed:
+      return "EtherCAT SDO download scheduling failed";
+    case SdoFailureReason::conflicting_request:
+      return "A different EtherCAT SDO request is active";
+    case SdoFailureReason::invalid_upload_capacity:
+      return "EtherCAT SDO upload capacity is invalid";
+    case SdoFailureReason::upload_schedule_failed:
+      return "EtherCAT SDO upload scheduling failed";
+    case SdoFailureReason::upload_capacity_exceeded:
+      return "EtherCAT SDO upload exceeded its capacity";
+    case SdoFailureReason::transfer_failed:
+      return "EtherCAT SDO transfer failed";
+    case SdoFailureReason::unknown_request_state:
+      return "EtherCAT SDO request entered an unknown state";
+  }
+  return "EtherCAT SDO transfer failed";
+}
+
 }  // namespace
 
 EthercatMailbox::EthercatMailbox(std::shared_ptr<EthercatBackend> backend,
@@ -170,14 +202,13 @@ std::optional<MailboxRequestStatus> EthercatMailbox::mailbox_status(
       (phase == RequestPhase::terminalizing &&
        open_generation_.load(std::memory_order_acquire) !=
            request->second.generation)) {
-    Error error = request->second.failure_kind == FailureKind::backend
-                      ? Error{ErrorCode::io, "EtherCAT SDO transfer failed"}
-                      : Error{ErrorCode::unavailable,
-                              "EtherCAT mailbox closed before completion"};
-    if (request->second.failure_kind == FailureKind::backend &&
-        request->second.backend_error.has_value()) {
-      error = *request->second.backend_error;
-    }
+    Error error =
+        request->second.failure_kind == FailureKind::backend
+            ? Error{request->second.backend_error_code,
+                    sdo_failure_message(
+                        request->second.backend_failure_reason)}
+            : Error{ErrorCode::unavailable,
+                    "EtherCAT mailbox closed before completion"};
     return MailboxRequestStatus{MailboxRequestState::failed, std::move(error), {}};
   }
   return MailboxRequestStatus{MailboxRequestState::queued, std::nullopt, {}};
@@ -363,9 +394,8 @@ bool EthercatMailbox::owner_step(std::uint64_t parent_generation) noexcept {
       progress = backend_->progress_download_sdo(slave_, request->transfer);
     }
   } catch (...) {
-    progress.state = SdoTransferState::failed;
-    progress.error.reset();
-    progress.uploaded_size = 0U;
+    progress = sdo_failed(ErrorCode::internal,
+                          SdoFailureReason::backend_exception);
   }
   if (progress.state == SdoTransferState::pending) {
     return true;
@@ -389,7 +419,8 @@ bool EthercatMailbox::owner_step(std::uint64_t parent_generation) noexcept {
   } else {
     request->failure_kind = still_current ? FailureKind::backend : FailureKind::closed;
     if (still_current) {
-      request->backend_error = std::move(progress.error);
+      request->backend_error_code = progress.error_code;
+      request->backend_failure_reason = progress.failure_reason;
     }
     request->phase.store(RequestPhase::failed, std::memory_order_release);
     health_.store(still_current ? TransportHealth::degraded
@@ -461,7 +492,7 @@ Result<void> EthercatMaster::validate_configuration() const {
 
 Result<void> EthercatMaster::open() {
   std::scoped_lock lifecycle_lock(lifecycle_mutex_);
-  if (open_.load(std::memory_order_acquire)) {
+  if (admission_is_open()) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument, "EtherCAT master is already open"});
   }
@@ -588,24 +619,29 @@ Result<void> EthercatMaster::open() {
   mailbox_cursor_ = 0U;
   owner_lifecycle_->active_generation.store(parent_generation,
                                              std::memory_order_release);
-  open_.store(true, std::memory_order_release);
+  cycle_admission_.store(kCycleOpenBit, std::memory_order_release);
   health_.store(TransportHealth::healthy, std::memory_order_release);
   return Result<void>::success();
 }
 
 void EthercatMaster::close() noexcept {
   std::scoped_lock lifecycle_lock(lifecycle_mutex_);
-  if (!open_.exchange(false, std::memory_order_acq_rel)) {
+  // This RMW and admission's CAS share one atomic modification order. A CAS
+  // ordered first contributes to the count below; a CAS ordered later observes
+  // the cleared gate and cannot admit a cycle.
+  const auto previous =
+      cycle_admission_.fetch_and(kCycleCountMask, std::memory_order_acq_rel);
+  if ((previous & kCycleOpenBit) == 0U) {
     return;
   }
   owner_lifecycle_->active_generation.store(0U, std::memory_order_release);
   for (auto& mailbox : mailboxes_) {
     mailbox->close_for_parent(generation_);
   }
-  auto active = cycles_in_flight_.load(std::memory_order_acquire);
-  while (active != 0U) {
-    cycles_in_flight_.wait(active, std::memory_order_acquire);
-    active = cycles_in_flight_.load(std::memory_order_acquire);
+  auto admission = cycle_admission_.load(std::memory_order_acquire);
+  while ((admission & kCycleCountMask) != 0U) {
+    cycle_admission_.wait(admission, std::memory_order_acquire);
+    admission = cycle_admission_.load(std::memory_order_acquire);
   }
   backend_->deactivate();
   for (auto& mailbox : mailboxes_) {
@@ -623,18 +659,42 @@ SchedulingClass EthercatMaster::scheduling_class() const noexcept {
   return SchedulingClass::hard_realtime_periodic;
 }
 
-bool EthercatMaster::try_enter_cycle() noexcept {
-  cycles_in_flight_.fetch_add(1U, std::memory_order_acq_rel);
-  if (open_.load(std::memory_order_acquire)) {
-    return true;
+bool EthercatMaster::admission_successor(std::uint64_t observed,
+                                         std::uint64_t& desired) noexcept {
+  const auto count = observed & kCycleCountMask;
+  if ((observed & kCycleOpenBit) == 0U || count == kCycleCountMask) {
+    return false;
   }
-  leave_cycle();
-  return false;
+  desired = observed + 1U;
+  return true;
+}
+
+bool EthercatMaster::admission_is_open() const noexcept {
+  return (cycle_admission_.load(std::memory_order_acquire) & kCycleOpenBit) !=
+         0U;
+}
+
+bool EthercatMaster::try_enter_cycle() noexcept {
+  auto observed = cycle_admission_.load(std::memory_order_acquire);
+  for (;;) {
+    std::uint64_t desired{};
+    if (!admission_successor(observed, desired)) {
+      return false;
+    }
+    if (cycle_admission_.compare_exchange_weak(
+            observed, desired, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      return true;
+    }
+  }
 }
 
 void EthercatMaster::leave_cycle() noexcept {
-  if (cycles_in_flight_.fetch_sub(1U, std::memory_order_acq_rel) == 1U) {
-    cycles_in_flight_.notify_all();
+  const auto previous =
+      cycle_admission_.fetch_sub(1U, std::memory_order_release);
+  if ((previous & kCycleOpenBit) == 0U &&
+      (previous & kCycleCountMask) == 1U) {
+    cycle_admission_.notify_all();
   }
 }
 
@@ -732,7 +792,7 @@ void EthercatMaster::cycle(const CycleContext&) noexcept {
 }
 
 Result<void> EthercatMaster::register_field(CyclicField field, bool input) {
-  if (open_.load(std::memory_order_acquire) || field.size_bytes == 0U) {
+  if (admission_is_open() || field.size_bytes == 0U) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument, "cyclic fields must be registered before open"});
   }
@@ -757,7 +817,7 @@ Result<void> EthercatMaster::register_cyclic_output(CyclicField field) {
 }
 
 Result<void> EthercatMaster::set_cycle_handler(CycleHandler handler, void* context) {
-  if (open_.load(std::memory_order_acquire) || handler == nullptr) {
+  if (admission_is_open() || handler == nullptr) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument, "cycle handler must be bound before open"});
   }
