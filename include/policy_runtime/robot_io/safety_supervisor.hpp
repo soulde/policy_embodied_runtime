@@ -27,6 +27,7 @@ inline constexpr std::uint32_t kAxisFeedbackSafetyGroup = 1U << 24U;
 inline constexpr std::uint32_t kAxisFeedbackSafetyShutdown = 1U << 25U;
 inline constexpr std::uint32_t kAxisFeedbackSafetyProcessData = 1U << 26U;
 inline constexpr std::uint32_t kAxisFeedbackSafetyDriveFault = 1U << 27U;
+inline constexpr std::uint32_t kAxisFeedbackSafetySerial = 1U << 28U;
 
 struct SafetyOptions {
   std::uint32_t consecutive_wkc_limit{3U};

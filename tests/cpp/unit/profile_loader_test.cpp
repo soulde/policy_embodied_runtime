@@ -92,6 +92,40 @@ TEST(ProfileLoaderTest, LoadsExistingRobotProfileAndStringifiesArgs) {
   ASSERT_FALSE(profile.value().sensors.empty());
   EXPECT_EQ(profile.value().sensors.at(6).args.at("baud_rate"), "1000000");
   EXPECT_TRUE(profile.value().axes.empty());
+  ASSERT_EQ(profile.value().st3215_servos.size(), 6U);
+  EXPECT_EQ(profile.value().st3215_servos.at(0).sensor_name,
+            "shoulder_pan_position");
+  EXPECT_EQ(profile.value().st3215_servos.at(0).actuator_name,
+            "shoulder_pan_target");
+  EXPECT_EQ(profile.value().st3215_servos.at(0).serial.path,
+            "/tmp/rusty_robot_soarm101");
+  EXPECT_EQ(profile.value().st3215_servos.at(0).serial.baud_rate,
+            1'000'000U);
+  EXPECT_EQ(profile.value().st3215_servos.at(0).device_id, 1U);
+  EXPECT_EQ(profile.value().st3215_servos.at(5).device_id, 6U);
+}
+
+TEST(ProfileLoaderTest, RejectsInconsistentOrUnsafeSt3215StaticConfiguration) {
+  auto profile = read_json(
+      "policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json");
+  profile["actuators"][1]["args"]["baud_rate"] = 115200;
+  expect_robot_rejected(profile);
+
+  profile = read_json(
+      "policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json");
+  profile["sensors"][7]["args"]["device_id"] = 1;
+  expect_robot_rejected(profile);
+
+  profile = read_json(
+      "policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json");
+  profile["sensors"][6]["args"].erase("device_id");
+  profile["sensors"][6]["args"].erase("servo_id");
+  expect_robot_rejected(profile);
+
+  profile = read_json(
+      "policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json");
+  profile["sensors"][6]["args"]["feedback_timeout_ms"] = 0;
+  expect_robot_rejected(profile);
 }
 
 TEST(ProfileLoaderTest, NormalizesScalarRobotIdentityValuesLikePython) {

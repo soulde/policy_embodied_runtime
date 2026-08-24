@@ -627,6 +627,260 @@ bool derive_axes(const std::vector<DeviceConfig>& sensors,
   return true;
 }
 
+const std::string* optional_arg(const DeviceConfig& config,
+                                std::string_view key) {
+  const auto found = config.args.find(std::string(key));
+  return found == config.args.end() ? nullptr : &found->second;
+}
+
+template <class T>
+std::optional<T> unsigned_arg(const DeviceConfig& config,
+                              std::string_view key, T default_value,
+                              std::string& error) {
+  const auto* text = optional_arg(config, key);
+  if (text == nullptr) {
+    return default_value;
+  }
+  const auto parsed = parse_unsigned<T>(*text);
+  if (!parsed) {
+    error = config.name + ".args." + std::string(key) +
+            " must be an unsigned integer";
+  }
+  return parsed;
+}
+
+std::optional<std::chrono::milliseconds> milliseconds_from_seconds_arg(
+    const DeviceConfig& config, std::string_view key,
+    std::chrono::milliseconds default_value, std::string& error) {
+  const auto* text = optional_arg(config, key);
+  if (text == nullptr) {
+    return default_value;
+  }
+  const auto seconds = parse_double(*text);
+  if (!seconds || *seconds <= 0.0 ||
+      *seconds > static_cast<double>(std::numeric_limits<std::int64_t>::max()) /
+                     1000.0) {
+    error = config.name + ".args." + std::string(key) +
+            " must be a positive finite duration";
+    return std::nullopt;
+  }
+  const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::duration<double>(*seconds));
+  if (milliseconds.count() <= 0) {
+    error = config.name + ".args." + std::string(key) +
+            " is below one millisecond";
+    return std::nullopt;
+  }
+  return milliseconds;
+}
+
+std::optional<std::uint16_t> st3215_identity_arg(
+    const DeviceConfig& config, std::string_view primary,
+    std::string_view fallback, std::string& error) {
+  const auto* text = optional_arg(config, primary);
+  if (text == nullptr) {
+    text = optional_arg(config, fallback);
+  }
+  if (text == nullptr) {
+    error = config.name + ".args requires " + std::string(primary);
+    return std::nullopt;
+  }
+  const auto value = parse_unsigned<std::uint16_t>(*text);
+  if (!value) {
+    error = config.name + ".args." + std::string(primary) +
+            " must be an unsigned integer";
+  }
+  return value;
+}
+
+std::optional<St3215ServoProfile> parse_st3215(
+    const DeviceConfig& config, bool sensor, std::string& error) {
+  const auto* baud_text = arg(config, "baud_rate", error);
+  const auto device_id =
+      st3215_identity_arg(config, "device_id", "servo_id", error);
+  const auto servo_id =
+      st3215_identity_arg(config, "servo_id", "device_id", error);
+  if (baud_text == nullptr || !device_id || !servo_id) {
+    return std::nullopt;
+  }
+  const auto baud_rate = parse_unsigned<std::uint32_t>(*baud_text);
+  const auto read_buffer =
+      unsigned_arg<std::size_t>(config, "read_buffer_len", 256U, error);
+  const auto maximum_frame =
+      unsigned_arg<std::size_t>(config, "maximum_frame_size", 259U, error);
+  const auto max_position = unsigned_arg<std::uint16_t>(
+      config, "max_position_units", 4095U, error);
+  const auto speed =
+      unsigned_arg<std::uint16_t>(config, "speed_units", 0U, error);
+  const auto time =
+      unsigned_arg<std::uint16_t>(config, "time_units", 0U, error);
+  const auto feedback_timeout = unsigned_arg<std::uint64_t>(
+      config, "feedback_timeout_ms", 250U, error);
+  const auto service_period = unsigned_arg<std::uint64_t>(
+      config, "service_period_us", 1000U, error);
+  const auto* timeout_key = optional_arg(config, "timeout_s") != nullptr
+                                ? "timeout_s"
+                                : (optional_arg(config, "timeout") != nullptr
+                                       ? "timeout"
+                                       : "timeout_s");
+  const auto read_timeout = milliseconds_from_seconds_arg(
+      config, timeout_key, std::chrono::milliseconds{20}, error);
+  auto write_timeout = read_timeout;
+  if (optional_arg(config, "write_timeout_s") != nullptr) {
+    write_timeout = milliseconds_from_seconds_arg(
+        config, "write_timeout_s", std::chrono::milliseconds{20}, error);
+  }
+  if (!baud_rate || !read_buffer || !maximum_frame || !max_position ||
+      !speed || !time || !feedback_timeout || !service_period ||
+      !read_timeout || !write_timeout) {
+    if (error.empty()) {
+      error = config.name + ".args contains invalid ST3215 configuration";
+    }
+    return std::nullopt;
+  }
+  if (*baud_rate == 0U || *device_id > 0xfdU || *max_position == 0U ||
+      *read_buffer == 0U || *read_buffer > 4096U || *maximum_frame < 6U ||
+      *maximum_frame > 259U || *feedback_timeout == 0U ||
+      *feedback_timeout >
+          static_cast<std::uint64_t>(
+              std::numeric_limits<std::int64_t>::max() / 1'000'000LL) ||
+      *service_period == 0U ||
+      *service_period >
+          static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    error = config.name + ".args contains unsafe ST3215 limits";
+    return std::nullopt;
+  }
+
+  St3215ServoProfile result;
+  if (sensor) {
+    result.sensor_name = config.name;
+  } else {
+    result.actuator_name = config.name;
+  }
+  result.serial = SerialPortConfig{
+      config.device.path,
+      *baud_rate,
+      *read_buffer,
+      *maximum_frame,
+      *read_timeout,
+      *write_timeout,
+      std::chrono::microseconds(static_cast<std::int64_t>(*service_period))};
+  result.device_id = static_cast<std::uint8_t>(*device_id);
+  result.servo_id = *servo_id;
+  result.max_position_units = *max_position;
+  result.speed_units = *speed;
+  result.time_units = *time;
+  result.feedback_timeout = std::chrono::milliseconds(
+      static_cast<std::int64_t>(*feedback_timeout));
+  const auto* safety_group = optional_arg(config, "safety_group");
+  result.safety_group =
+      safety_group == nullptr || is_blank(*safety_group)
+          ? config.device.path
+          : *safety_group;
+  return result;
+}
+
+bool same_serial(const SerialPortConfig& left,
+                 const SerialPortConfig& right) {
+  return left.path == right.path && left.baud_rate == right.baud_rate &&
+         left.read_buffer_size == right.read_buffer_size &&
+         left.maximum_frame_size == right.maximum_frame_size &&
+         left.read_timeout == right.read_timeout &&
+         left.write_timeout == right.write_timeout &&
+         left.service_period == right.service_period;
+}
+
+bool same_st3215_physical_config(const St3215ServoProfile& left,
+                                 const St3215ServoProfile& right) {
+  return same_serial(left.serial, right.serial) &&
+         left.device_id == right.device_id &&
+         left.servo_id == right.servo_id &&
+         left.max_position_units == right.max_position_units &&
+         left.feedback_timeout == right.feedback_timeout &&
+         left.safety_group == right.safety_group;
+}
+
+bool derive_st3215(const std::vector<DeviceConfig>& sensors,
+                   const std::vector<DeviceConfig>& actuators,
+                   std::vector<St3215ServoProfile>& servos,
+                   std::string& error) {
+  struct Derived {
+    St3215ServoProfile profile;
+    bool has_sensor{};
+    bool has_actuator{};
+  };
+  std::vector<Derived> derived;
+  std::map<std::string, std::size_t> identities;
+  std::map<std::string, SerialPortConfig> buses;
+  const auto add = [&](const DeviceConfig& device, bool sensor) -> bool {
+    if (device.device.type != "st3215") {
+      return true;
+    }
+    auto parsed = parse_st3215(device, sensor, error);
+    if (!parsed) {
+      return false;
+    }
+    const auto bus = buses.find(parsed->serial.path);
+    if (bus == buses.end()) {
+      buses.emplace(parsed->serial.path, parsed->serial);
+    } else if (!same_serial(bus->second, parsed->serial)) {
+      error = "inconsistent serial configuration for: " + parsed->serial.path;
+      return false;
+    }
+    const auto identity = parsed->serial.path + "\n" +
+                          std::to_string(parsed->device_id);
+    const auto existing = identities.find(identity);
+    if (existing == identities.end()) {
+      identities.emplace(identity, derived.size());
+      derived.push_back({std::move(*parsed), sensor, !sensor});
+      return true;
+    }
+    auto& physical = derived.at(existing->second);
+    if ((sensor && physical.has_sensor) ||
+        (!sensor && physical.has_actuator)) {
+      error = "duplicate ST3215 physical link: " + device.device.path;
+      return false;
+    }
+    if (!same_st3215_physical_config(physical.profile, *parsed)) {
+      error = "inconsistent ST3215 static configuration for: " +
+              device.device.path;
+      return false;
+    }
+    if (sensor) {
+      physical.profile.sensor_name = parsed->sensor_name;
+    } else {
+      physical.profile.actuator_name = parsed->actuator_name;
+      physical.profile.speed_units = parsed->speed_units;
+      physical.profile.time_units = parsed->time_units;
+    }
+    physical.has_sensor = physical.has_sensor || sensor;
+    physical.has_actuator = physical.has_actuator || !sensor;
+    return true;
+  };
+  for (const auto& sensor : sensors) {
+    if (!add(sensor, true)) {
+      return false;
+    }
+  }
+  for (const auto& actuator : actuators) {
+    if (!add(actuator, false)) {
+      return false;
+    }
+  }
+  if (derived.size() > 32U) {
+    error = "robot profile supports at most 32 ST3215 servos";
+    return false;
+  }
+  for (auto& physical : derived) {
+    if (!physical.has_sensor || !physical.has_actuator) {
+      error = "ST3215 physical link requires one sensor and one actuator";
+      return false;
+    }
+    servos.push_back(std::move(physical.profile));
+  }
+  return true;
+}
+
 bool parse_bounds(const Json& value, SemanticBounds& bounds, std::string& error) {
   if (!value.is_object()) {
     error = "semantic field bounds must be an object";
@@ -924,6 +1178,10 @@ Result<RobotProfile> load_robot_profile(const std::filesystem::path& path) {
     }
   }
   if (!derive_axes(profile.sensors, profile.actuators, profile.axes, error)) {
+    return invalid<RobotProfile>(std::move(error));
+  }
+  if (!derive_st3215(profile.sensors, profile.actuators,
+                     profile.st3215_servos, error)) {
     return invalid<RobotProfile>(std::move(error));
   }
   return Result<RobotProfile>::success(std::move(profile));

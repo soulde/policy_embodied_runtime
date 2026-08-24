@@ -154,6 +154,19 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
   if (!ingress_configured.has_value()) {
     return ingress_configured;
   }
+  auto serial_configured = serial_devices_.configure(profile.st3215_servos);
+  if (!serial_configured.has_value()) {
+    return serial_configured;
+  }
+  for (std::size_t servo = 0; servo < profile.st3215_servos.size(); ++servo) {
+    for (std::size_t axis = 0; axis < profile.axes.size(); ++axis) {
+      if (profile.st3215_servos[servo].safety_group ==
+          profile.axes[axis].safety_group) {
+        serial_axis_stop_masks_[servo] |=
+            static_cast<std::uint16_t>(std::uint16_t{1U} << axis);
+      }
+    }
+  }
   axes_ = std::move(configured_axes);
   axis_count_ = static_cast<std::uint32_t>(profile.axes.size());
   DaemonAxisSnapshot initial{};
@@ -200,11 +213,15 @@ bool RobotIoDaemon::health_atomics_are_lock_free() const noexcept {
          last_command_timestamp_ns_.is_lock_free() &&
          feedback_timestamp_ns_.is_lock_free() && dc_deviation_ns_.is_lock_free() &&
          timing_fault_.is_lock_free() && sleep_error_.is_lock_free() &&
+         serial_servo_count_.is_lock_free() &&
+         serial_fault_count_.is_lock_free() &&
+         serial_safety_flags_.is_lock_free() &&
          cycle_owner_token_.is_lock_free() &&
          rejected_command_publication_.is_lock_free() &&
          loop_.atomics_are_lock_free() &&
          command_handoff_.atomics_are_lock_free() &&
-         axis_publication_.atomics_are_lock_free();
+         axis_publication_.atomics_are_lock_free() &&
+         serial_devices_.atomics_are_lock_free();
 }
 
 Result<void> RobotIoDaemon::start() {
@@ -245,6 +262,21 @@ Result<void> RobotIoDaemon::start() {
       master_registered_ = false;
       return opened;
     }
+  }
+
+  auto serial_started = serial_devices_.start(scheduler_);
+  if (!serial_started.has_value()) {
+    if (ethercat_master_ != nullptr && master_handler_bound_) {
+      ethercat_master_->close();
+      static_cast<void>(
+          ethercat_master_->clear_supervised_cycle_handler(this));
+      master_handler_bound_ = false;
+    }
+    if (ethercat_master_ != nullptr && master_registered_) {
+      static_cast<void>(scheduler_.remove(*ethercat_master_));
+      master_registered_ = false;
+    }
+    return serial_started;
   }
 
   accepting_commands_.store(true, std::memory_order_release);
@@ -372,8 +404,30 @@ void RobotIoDaemon::process_device_cycle_owned(
     accepting_commands_.store(false, std::memory_order_release);
     safety_.request_shutdown(now);
   }
-  const auto decisions =
+  auto decisions =
       safety_.evaluate(safety_bus_state(domain, process_data_valid), pdos, now);
+
+  const auto serial_safety = serial_devices_.safety_snapshot(now);
+  serial_servo_count_.store(serial_safety.servo_count,
+                            std::memory_order_release);
+  serial_fault_count_.store(serial_safety.fault_count,
+                            std::memory_order_release);
+  serial_safety_flags_.store(serial_safety.aggregate_flags,
+                             std::memory_order_release);
+  std::uint16_t serial_stop_mask{};
+  for (std::size_t servo = 0; servo < serial_safety.servo_count; ++servo) {
+    if ((serial_safety.fault_mask & (std::uint32_t{1U} << servo)) != 0U) {
+      serial_stop_mask |= serial_axis_stop_masks_[servo];
+    }
+  }
+  for (std::size_t axis = 0; axis < axis_count_; ++axis) {
+    if ((serial_stop_mask & (std::uint16_t{1U} << axis)) != 0U) {
+      decisions.requests[axis] = AxisRequest::quick_stop;
+      decisions.commands[axis].flags = kAxisCommandQuickStop;
+      decisions.feedback_flags[axis] |=
+          kAxisFeedbackSafetySerial | kAxisFeedbackSafetyGroup;
+    }
+  }
 
   std::uint32_t safety_flags{};
   for (std::size_t axis = 0; axis < axis_count_; ++axis) {
@@ -525,6 +579,7 @@ Result<void> RobotIoDaemon::poll_control() {
 }
 
 void RobotIoDaemon::stop_transports() noexcept {
+  serial_devices_.stop(scheduler_);
   if (ethercat_master_ != nullptr && master_handler_bound_) {
     ethercat_master_->close();
     static_cast<void>(ethercat_master_->clear_supervised_cycle_handler(this));
@@ -568,7 +623,10 @@ DaemonHealth RobotIoDaemon::health() const noexcept {
       metrics.execution_time_ns,
       metrics.maximum_execution_time_ns,
       timing_fault_.load(std::memory_order_acquire),
-      sleep_error_.load(std::memory_order_acquire)};
+      sleep_error_.load(std::memory_order_acquire),
+      serial_servo_count_.load(std::memory_order_acquire),
+      serial_fault_count_.load(std::memory_order_acquire),
+      serial_safety_flags_.load(std::memory_order_acquire)};
 }
 
 DaemonAxisSnapshot RobotIoDaemon::axis_snapshot() const noexcept {
@@ -591,6 +649,25 @@ AxisFeedback RobotIoDaemon::feedback(std::size_t axis_index) const noexcept {
   const auto snapshot = axis_snapshot();
   return axis_index < snapshot.axis_count ? snapshot.feedback[axis_index]
                                           : AxisFeedback{};
+}
+
+St3215CommandAcceptance RobotIoDaemon::stage_servo_command(
+    std::size_t servo_index,
+    const St3215ServoCommand& command) noexcept {
+  if (!accepting_commands_.load(std::memory_order_acquire)) {
+    return St3215CommandAcceptance::rejected;
+  }
+  return serial_devices_.stage_command(servo_index, command);
+}
+
+St3215ServoFeedback RobotIoDaemon::servo_feedback(
+    std::size_t servo_index) const noexcept {
+  return serial_devices_.feedback(servo_index, clock_->now_ns());
+}
+
+St3215RegistrySafetySnapshot RobotIoDaemon::serial_safety_snapshot()
+    const noexcept {
+  return serial_devices_.safety_snapshot(clock_->now_ns());
 }
 
 }  // namespace policy_runtime

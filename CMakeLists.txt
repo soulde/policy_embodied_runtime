@@ -74,8 +74,10 @@ add_library(policy_runtime_core
     src/policy/pipeline.cpp
     src/profiles/loader.cpp
     src/protocol/cia402/state_machine.cpp
+    src/protocol/st3215/protocol.cpp
     src/protocol/rpc/codec.cpp
     src/robot/devices/cia402/axis.cpp
+    src/robot/devices/st3215/servo.cpp
     src/robot_io/daemon.cpp
     src/robot_io/ipc_server.cpp
     src/robot_io/realtime_loop.cpp
@@ -85,7 +87,8 @@ add_library(policy_runtime_core
     src/runtime/robot_io_client.cpp
     src/robot_io/transport_scheduler.cpp
     src/transport/ethercat/elmo_gold.cpp
-    src/transport/ethercat/master.cpp)
+    src/transport/ethercat/master.cpp
+    src/transport/serial/serial_transport.cpp)
 target_include_directories(policy_runtime_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
@@ -209,6 +212,17 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         PRIVATE POLICY_RUNTIME_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     policy_runtime_configure_target(runtime_host_test)
 
+    add_executable(st3215_test tests/cpp/unit/st3215_test.cpp)
+    target_link_libraries(st3215_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(st3215_test)
+
+    add_executable(virtual_serial_test
+        tests/cpp/integration/virtual_serial_test.cpp)
+    target_link_libraries(virtual_serial_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(virtual_serial_test)
+
     add_executable(runtime_contract_driver
         tests/cpp/integration/runtime_contract_driver.cpp)
     target_link_libraries(runtime_contract_driver PRIVATE policy_runtime_core)
@@ -249,6 +263,10 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         TEST_PREFIX robot_io_daemon_test. DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(runtime_host_test
         TEST_PREFIX runtime_host_test. DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(st3215_test
+        TEST_PREFIX st3215_test. DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(virtual_serial_test
+        TEST_PREFIX virtual_serial_test. DISCOVERY_MODE PRE_TEST)
 
     set(POLICY_RUNTIME_CONTRACT_PYTHON "")
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin/python")

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -41,10 +42,34 @@ struct AxisConfig {
   double following_error_limit{};
 };
 
+struct SerialPortConfig {
+  std::string path;
+  std::uint32_t baud_rate{};
+  std::size_t read_buffer_size{256U};
+  std::size_t maximum_frame_size{259U};
+  std::chrono::milliseconds read_timeout{20};
+  std::chrono::milliseconds write_timeout{20};
+  std::chrono::nanoseconds service_period{std::chrono::milliseconds{1}};
+};
+
+struct St3215ServoProfile {
+  std::string sensor_name;
+  std::string actuator_name;
+  SerialPortConfig serial;
+  std::uint8_t device_id{};
+  std::uint16_t servo_id{};
+  std::uint16_t max_position_units{4095U};
+  std::uint16_t speed_units{};
+  std::uint16_t time_units{};
+  std::chrono::milliseconds feedback_timeout{250};
+  std::string safety_group;
+};
+
 struct RobotProfile {
   std::vector<DeviceConfig> sensors;
   std::vector<DeviceConfig> actuators;
   std::vector<AxisConfig> axes;
+  std::vector<St3215ServoProfile> st3215_servos;
 };
 
 }  // namespace policy_runtime::profiles

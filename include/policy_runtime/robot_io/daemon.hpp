@@ -14,6 +14,7 @@
 #include "policy_runtime/protocol/cia402/pdo.hpp"
 #include "policy_runtime/protocol/cia402/state_machine.hpp"
 #include "policy_runtime/robot/devices/cia402/axis.hpp"
+#include "policy_runtime/robot/devices/st3215/servo.hpp"
 #include "policy_runtime/robot_io/ipc_server.hpp"
 #include "policy_runtime/robot_io/local_snapshot.hpp"
 #include "policy_runtime/robot_io/realtime_loop.hpp"
@@ -53,6 +54,9 @@ struct DaemonHealth {
   std::int64_t maximum_execution_time_ns{};
   bool timing_fault{};
   int sleep_error{};
+  std::uint32_t serial_servo_count{};
+  std::uint32_t serial_fault_count{};
+  std::uint32_t serial_safety_flags{};
 };
 
 struct DaemonAxisSnapshot {
@@ -110,6 +114,12 @@ class RobotIoDaemon {
   DaemonAxisSnapshot axis_snapshot() const noexcept;
   AxisRequest axis_request(std::size_t axis_index) const noexcept;
   AxisFeedback feedback(std::size_t axis_index) const noexcept;
+  St3215CommandAcceptance stage_servo_command(
+      std::size_t servo_index,
+      const St3215ServoCommand& command) noexcept;
+  St3215ServoFeedback servo_feedback(
+      std::size_t servo_index) const noexcept;
+  St3215RegistrySafetySnapshot serial_safety_snapshot() const noexcept;
 
  private:
   static void ethercat_cycle_handler(void* context,
@@ -131,6 +141,7 @@ class RobotIoDaemon {
   SafetySupervisor safety_;
   SafetySupervisor command_ingress_;
   TransportScheduler scheduler_;
+  St3215DeviceRegistry serial_devices_;
   EthercatMaster* ethercat_master_{};
   std::optional<RobotIoIpcServer> ipc_;
   std::array<std::optional<Cia402Axis>, kRobotIoMaximumAxes> axes_{};
@@ -140,6 +151,8 @@ class RobotIoDaemon {
   bool configured_{};
   bool master_registered_{};
   bool master_handler_bound_{};
+  std::array<std::uint16_t, kMaximumSt3215Servos>
+      serial_axis_stop_masks_{};
 
   struct StagedCommandEvent {
     std::uint64_t publication{};
@@ -171,6 +184,9 @@ class RobotIoDaemon {
   std::atomic<std::int64_t> dc_deviation_ns_{};
   std::atomic<bool> timing_fault_{};
   std::atomic<int> sleep_error_{};
+  std::atomic<std::uint32_t> serial_servo_count_{};
+  std::atomic<std::uint32_t> serial_fault_count_{};
+  std::atomic<std::uint32_t> serial_safety_flags_{};
   std::atomic<std::uint64_t> cycle_owner_token_{};
 };
 
