@@ -356,15 +356,21 @@ DomainHealth IghBackend::domain_health() const noexcept {
   static_cast<void>(ecrt_domain_state(impl_->domain, &domain_state));
   static_cast<void>(ecrt_master_state(impl_->master, &master_state));
   bool slaves_operational = true;
-  for (const auto& slave : impl_->slaves) {
+  std::uint16_t operational_axes_mask{};
+  for (std::size_t index = 0; index < impl_->slaves.size(); ++index) {
+    const auto& slave = impl_->slaves[index];
     ec_slave_config_state_t state{};
     static_cast<void>(ecrt_slave_config_state(slave.configuration, &state));
-    slaves_operational = slaves_operational && state.online != 0U &&
-                         state.operational != 0U;
+    const bool operational = state.online != 0U && state.operational != 0U;
+    slaves_operational = slaves_operational && operational;
+    if (operational && index < 16U) {
+      operational_axes_mask |= std::uint16_t{1U} << index;
+    }
   }
   const bool complete = domain_state.wc_state == EC_WC_COMPLETE;
   return DomainHealth{domain_state.working_counter, std::nullopt,
-                      complete, master_state.link_up != 0U, slaves_operational, 0};
+                      complete, master_state.link_up != 0U, slaves_operational, 0,
+                      operational_axes_mask};
 }
 
 SdoTransferProgress IghBackend::progress_download_sdo(

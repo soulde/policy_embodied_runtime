@@ -115,6 +115,8 @@ class EthercatMailbox final : public ObjectDictionaryTransport {
 class EthercatMaster final : public CyclicTransport {
  public:
   using CycleHandler = void (*)(void*, std::span<Cia402PdoView>) noexcept;
+  using SupervisedCycleHandler = void (*)(void*, std::span<Cia402PdoView>,
+                                          const DomainHealth&, bool) noexcept;
 
   EthercatMaster(std::shared_ptr<EthercatBackend> backend,
                  std::vector<EthercatAxisConfiguration> axes);
@@ -133,6 +135,9 @@ class EthercatMaster final : public CyclicTransport {
   Result<void> register_cyclic_output(CyclicField field) override;
 
   Result<void> set_cycle_handler(CycleHandler handler, void* context);
+  Result<void> set_supervised_cycle_handler(SupervisedCycleHandler handler,
+                                            void* context);
+  Result<void> clear_supervised_cycle_handler(void* context);
   std::span<Cia402PdoView> pdo_views() noexcept;
   std::span<const Cia402PdoHandles> pdo_handles() const noexcept;
   ObjectDictionaryTransport& mailbox(std::size_t axis_index);
@@ -158,6 +163,7 @@ class EthercatMaster final : public CyclicTransport {
   std::vector<CyclicField> registered_inputs_;
   std::vector<CyclicField> registered_outputs_;
   CycleHandler cycle_handler_{};
+  SupervisedCycleHandler supervised_cycle_handler_{};
   void* cycle_handler_context_{};
   std::mutex lifecycle_mutex_;
   // Open/closing and in-flight count share one modification order. The high bit

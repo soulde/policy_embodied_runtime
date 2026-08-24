@@ -713,8 +713,11 @@ void EthercatMaster::cycle(const CycleContext&) noexcept {
   const auto domain = backend_->domain_health();
   const bool domain_is_healthy = healthy_domain(domain);
   auto image = backend_->process_image();
-  bool valid_image = domain_is_healthy;
-  if (domain_is_healthy) {
+  const bool supervised_input_available =
+      supervised_cycle_handler_ != nullptr && domain.link_up;
+  const bool input_available = domain_is_healthy || supervised_input_available;
+  bool valid_image = input_available;
+  if (input_available) {
     for (std::size_t axis_index = 0; axis_index < pdo_handles_.size(); ++axis_index) {
       const auto& handles = pdo_handles_[axis_index];
       auto& pdo = pdo_views_[axis_index];
@@ -739,31 +742,40 @@ void EthercatMaster::cycle(const CycleContext&) noexcept {
   if (valid_image && cycle_handler_ != nullptr) {
     cycle_handler_(cycle_handler_context_, pdo_views_);
   }
+  if (supervised_cycle_handler_ != nullptr) {
+    supervised_cycle_handler_(cycle_handler_context_, pdo_views_, domain,
+                              valid_image);
+  }
+
+  const bool supervised_outputs =
+      supervised_cycle_handler_ != nullptr && valid_image;
+  const bool outputs_enabled =
+      (domain_is_healthy && valid_image) || supervised_outputs;
 
   bool outputs_written = true;
   for (std::size_t axis_index = 0; axis_index < pdo_handles_.size(); ++axis_index) {
     const auto& handles = pdo_handles_[axis_index];
     const auto& pdo = pdo_views_[axis_index];
-    const auto control_word = domain_is_healthy && valid_image ? pdo.control_word : 0U;
+    const auto control_word = outputs_enabled ? pdo.control_word : 0U;
     outputs_written = handles.control_word.write(image, control_word) && outputs_written;
     switch (axes_[axis_index].axis.mode) {
       case profiles::Cia402Mode::csp:
         outputs_written = handles.target_position.write(
-                              image, domain_is_healthy && valid_image
+                              image, outputs_enabled
                                          ? pdo.target_position
                                          : std::int32_t{0}) &&
                           outputs_written;
         break;
       case profiles::Cia402Mode::csv:
         outputs_written = handles.target_velocity.write(
-                              image, domain_is_healthy && valid_image
+                              image, outputs_enabled
                                          ? pdo.target_velocity
                                          : std::int32_t{0}) &&
                           outputs_written;
         break;
       case profiles::Cia402Mode::cst:
         outputs_written = handles.target_torque.write(
-                              image, domain_is_healthy && valid_image
+                              image, outputs_enabled
                                          ? pdo.target_torque
                                          : std::int16_t{0}) &&
                           outputs_written;
@@ -817,12 +829,38 @@ Result<void> EthercatMaster::register_cyclic_output(CyclicField field) {
 }
 
 Result<void> EthercatMaster::set_cycle_handler(CycleHandler handler, void* context) {
-  if (admission_is_open() || handler == nullptr) {
+  if (admission_is_open() || handler == nullptr ||
+      supervised_cycle_handler_ != nullptr) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument, "cycle handler must be bound before open"});
   }
   cycle_handler_ = handler;
   cycle_handler_context_ = context;
+  return Result<void>::success();
+}
+
+Result<void> EthercatMaster::set_supervised_cycle_handler(
+    SupervisedCycleHandler handler, void* context) {
+  if (admission_is_open() || handler == nullptr || cycle_handler_ != nullptr ||
+      supervised_cycle_handler_ != nullptr) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument,
+         "supervised cycle handler must be exclusively bound before open"});
+  }
+  supervised_cycle_handler_ = handler;
+  cycle_handler_context_ = context;
+  return Result<void>::success();
+}
+
+Result<void> EthercatMaster::clear_supervised_cycle_handler(void* context) {
+  if (admission_is_open() || supervised_cycle_handler_ == nullptr ||
+      cycle_handler_context_ != context) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument,
+         "supervised cycle handler can only be cleared by its inactive owner"});
+  }
+  supervised_cycle_handler_ = nullptr;
+  cycle_handler_context_ = nullptr;
   return Result<void>::success();
 }
 

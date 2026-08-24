@@ -29,7 +29,10 @@ add_library(policy_runtime_core
     src/protocol/cia402/state_machine.cpp
     src/protocol/rpc/codec.cpp
     src/robot/devices/cia402/axis.cpp
+    src/robot_io/daemon.cpp
     src/robot_io/ipc_server.cpp
+    src/robot_io/realtime_loop.cpp
+    src/robot_io/safety_supervisor.cpp
     src/runtime/robot_io_client.cpp
     src/robot_io/transport_scheduler.cpp
     src/transport/ethercat/elmo_gold.cpp
@@ -38,6 +41,8 @@ target_include_directories(policy_runtime_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_link_libraries(policy_runtime_core PUBLIC nlohmann_json::nlohmann_json)
+find_package(Threads REQUIRED)
+target_link_libraries(policy_runtime_core PUBLIC Threads::Threads)
 target_compile_definitions(policy_runtime_core
     PUBLIC POLICY_RUNTIME_WITH_IGH=$<BOOL:${POLICY_RUNTIME_WITH_IGH}>)
 if(POLICY_RUNTIME_WITH_IGH)
@@ -45,6 +50,10 @@ if(POLICY_RUNTIME_WITH_IGH)
     target_link_libraries(policy_runtime_core PRIVATE EtherCAT::EtherCAT)
 endif()
 policy_runtime_configure_target(policy_runtime_core)
+
+add_executable(robot-io-daemon apps/robot_io_daemon_main.cpp)
+target_link_libraries(robot-io-daemon PRIVATE policy_runtime_core)
+policy_runtime_configure_target(robot-io-daemon)
 
 if(POLICY_RUNTIME_BUILD_TESTS)
     include(CTest)
@@ -128,6 +137,12 @@ if(POLICY_RUNTIME_BUILD_TESTS)
     target_link_libraries(igh_sdo_semantics_test PRIVATE GTest::gtest_main)
     policy_runtime_configure_target(igh_sdo_semantics_test)
 
+    add_executable(robot_io_daemon_test
+        tests/cpp/integration/robot_io_daemon_test.cpp)
+    target_link_libraries(robot_io_daemon_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(robot_io_daemon_test)
+
     include(GoogleTest)
     gtest_discover_tests(policy_runtime_unit_tests TEST_PREFIX result_test.
         DISCOVERY_MODE PRE_TEST)
@@ -149,4 +164,6 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         TEST_PREFIX ethercat_fake_backend_test. DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(igh_sdo_semantics_test
         TEST_PREFIX igh_sdo_semantics_test. DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(robot_io_daemon_test
+        TEST_PREFIX robot_io_daemon_test. DISCOVERY_MODE PRE_TEST)
 endif()

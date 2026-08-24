@@ -29,6 +29,12 @@ class RobotIoIpcServer {
   Result<void> publish_feedback(std::span<const AxisFeedback> axes,
                                 std::uint64_t sequence,
                                 std::int64_t timestamp_ns);
+  // Shared-memory-only data-plane operations for the real-time owner. Peer
+  // liveness remains on check_peer() in a non-real-time control path.
+  Result<Snapshot<AxisCommand>> read_commands_realtime() const noexcept;
+  Result<void> publish_feedback_realtime(std::span<const AxisFeedback> axes,
+                                         std::uint64_t sequence,
+                                         std::int64_t timestamp_ns) noexcept;
   Result<void> check_peer() const;
   Result<void> close();
 

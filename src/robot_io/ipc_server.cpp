@@ -446,6 +446,23 @@ Result<void> RobotIoIpcServer::publish_feedback(std::span<const AxisFeedback> ax
   return feedback_writer_->publish(axes, sequence, timestamp_ns);
 }
 
+Result<Snapshot<AxisCommand>>
+RobotIoIpcServer::read_commands_realtime() const noexcept {
+  if (!command_reader_.has_value()) {
+    return Result<Snapshot<AxisCommand>>::failure({ErrorCode::unavailable, {}});
+  }
+  return command_reader_->read_latest();
+}
+
+Result<void> RobotIoIpcServer::publish_feedback_realtime(
+    std::span<const AxisFeedback> axes, std::uint64_t sequence,
+    std::int64_t timestamp_ns) noexcept {
+  if (!feedback_writer_.has_value()) {
+    return Result<void>::failure({ErrorCode::unavailable, {}});
+  }
+  return feedback_writer_->publish(axes, sequence, timestamp_ns);
+}
+
 Result<void> RobotIoIpcServer::check_peer() const { return check_peer_fd(socket_fd_); }
 
 Result<void> RobotIoIpcServer::close() {

@@ -118,6 +118,9 @@ struct DomainHealth {
   bool link_up{};
   bool all_slaves_operational{};
   std::int64_t dc_deviation_ns{};
+  // Bit N describes configured axis N when all_slaves_operational is false.
+  // The first release supports at most twelve configured axes.
+  std::uint16_t operational_axes_mask{};
 };
 
 struct PdoFieldLocation {
