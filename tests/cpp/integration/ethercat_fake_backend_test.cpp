@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <array>
 #include <chrono>
@@ -18,6 +19,23 @@
 #include "policy_runtime/transport/ethercat/elmo_gold.hpp"
 #include "policy_runtime/transport/ethercat/master.hpp"
 
+namespace policy_runtime {
+
+class EthercatMailboxTestPeer {
+ public:
+  static void hold_frontend_lock(EthercatMailbox& mailbox, std::mutex& signal_mutex,
+                                 std::condition_variable& signal,
+                                 bool& entered, bool& release) {
+    std::unique_lock frontend_lock(mailbox.requests_mutex_);
+    std::unique_lock signal_lock(signal_mutex);
+    entered = true;
+    signal.notify_all();
+    signal.wait(signal_lock, [&release] { return release; });
+  }
+};
+
+}  // namespace policy_runtime
+
 namespace {
 
 using namespace std::chrono_literals;
@@ -32,6 +50,7 @@ using policy_runtime::EthercatAxisConfiguration;
 using policy_runtime::EthercatBackend;
 using policy_runtime::EthercatDeviceIdentity;
 using policy_runtime::EthercatMaster;
+using policy_runtime::EthercatMailboxTestPeer;
 using policy_runtime::EthercatSlaveAddress;
 using policy_runtime::EthercatSlaveConfiguration;
 using policy_runtime::MailboxRequestState;
@@ -99,30 +118,12 @@ class FakeEthercatBackend final : public EthercatBackend {
   unsigned deactivate_count() const noexcept { return deactivate_count_.load(); }
   unsigned receive_count() const noexcept { return receive_count_.load(); }
   unsigned download_count() const noexcept { return download_count_.load(); }
+  unsigned cancel_count() const noexcept { return cancel_count_.load(); }
   unsigned bind_count() const noexcept { return bind_count_.load(); }
 
   void make_download_pending_once() { pending_downloads_.store(1U); }
+  void make_cancel_pending_once() { pending_cancellations_.store(1U); }
   void fail_bind_at(unsigned call) { fail_bind_at_.store(call); }
-
-  void block_download() {
-    std::scoped_lock lock(block_mutex_);
-    block_download_ = true;
-    download_entered_ = false;
-    release_download_ = false;
-  }
-
-  bool wait_for_download(std::chrono::milliseconds timeout) {
-    std::unique_lock lock(block_mutex_);
-    return block_cv_.wait_for(lock, timeout, [this] { return download_entered_; });
-  }
-
-  void release_download() {
-    {
-      std::scoped_lock lock(block_mutex_);
-      release_download_ = true;
-    }
-    block_cv_.notify_all();
-  }
 
  protected:
   Result<void> initialize() override {
@@ -202,28 +203,45 @@ class FakeEthercatBackend final : public EthercatBackend {
   }
 
   SdoTransferProgress progress_download_sdo(
-      EthercatSlaveAddress, const SdoDownloadRequest&) override {
+      EthercatSlaveAddress, const SdoDownloadRequest& request) override {
+    if (sdo_active_ &&
+        (active_sdo_address_.index != request.address.index ||
+         active_sdo_address_.subindex != request.address.subindex)) {
+      return SdoTransferProgress{
+          SdoTransferState::failed,
+          Error{ErrorCode::protocol, "a different fake SDO remains active"}, 0U};
+    }
+    sdo_active_ = true;
+    active_sdo_address_ = request.address;
     download_count_.fetch_add(1U);
     record("download");
-    std::unique_lock lock(block_mutex_);
-    if (block_download_) {
-      download_entered_ = true;
-      block_cv_.notify_all();
-      block_cv_.wait(lock, [this] { return release_download_; });
-      block_download_ = false;
-    }
     if (pending_downloads_.load() != 0U) {
       pending_downloads_.fetch_sub(1U);
       return SdoTransferProgress{SdoTransferState::pending, std::nullopt, {}};
     }
+    sdo_active_ = false;
     return SdoTransferProgress{SdoTransferState::completed, std::nullopt, {}};
   }
 
   SdoTransferProgress progress_upload_sdo(EthercatSlaveAddress, ObjectAddress,
-                                           std::size_t) override {
+                                           std::span<std::byte> destination) override {
     record("upload");
+    constexpr std::array<std::byte, 2U> uploaded{std::byte{0x12U},
+                                                std::byte{0x34U}};
+    std::copy(uploaded.begin(), uploaded.end(), destination.begin());
     return SdoTransferProgress{SdoTransferState::completed, std::nullopt,
-                               {std::byte{0x12U}, std::byte{0x34U}}};
+                               uploaded.size()};
+  }
+
+  SdoTransferProgress progress_cancel_sdo(EthercatSlaveAddress) override {
+    cancel_count_.fetch_add(1U);
+    record("cancel");
+    if (pending_cancellations_.load() != 0U) {
+      pending_cancellations_.fetch_sub(1U);
+      return SdoTransferProgress{};
+    }
+    sdo_active_ = false;
+    return SdoTransferProgress{SdoTransferState::completed, std::nullopt, 0U};
   }
 
  private:
@@ -237,16 +255,14 @@ class FakeEthercatBackend final : public EthercatBackend {
   std::atomic<unsigned> deactivate_count_{};
   std::atomic<unsigned> receive_count_{};
   std::atomic<unsigned> download_count_{};
+  std::atomic<unsigned> cancel_count_{};
+  bool sdo_active_{};
+  ObjectAddress active_sdo_address_{};
   std::atomic<unsigned> pending_downloads_{};
+  std::atomic<unsigned> pending_cancellations_{};
   std::atomic<unsigned> bind_count_{};
   std::atomic<unsigned> fail_bind_at_{};
   DomainHealth domain_health_{1U, 1U, true, true, true, 0};
-
-  std::mutex block_mutex_;
-  std::condition_variable block_cv_;
-  bool block_download_{};
-  bool download_entered_{};
-  bool release_download_{};
 };
 
 AxisConfig axis_config(Cia402Mode mode = Cia402Mode::csp) {
@@ -453,13 +469,13 @@ TEST(EthercatFakeBackendTest, KeepsMailboxOutsidePdoCriticalWindow) {
   const std::vector<std::byte> value{std::byte{8U}};
   auto request = mailbox.queue_download({0x2000U, 0U}, value);
   ASSERT_TRUE(request.has_value());
+  mailbox.cycle({});
 
   std::thread pdo_thread([&] { master.cycle({}); });
   {
     std::unique_lock lock(stage.mutex);
     ASSERT_TRUE(stage.cv.wait_for(lock, 1s, [&stage] { return stage.entered; }));
   }
-  mailbox.cycle({});
   EXPECT_EQ(backend->download_count(), 0U);
   ASSERT_TRUE(mailbox.mailbox_status(request.value()).has_value());
   EXPECT_EQ(mailbox.mailbox_status(request.value())->state, MailboxRequestState::queued);
@@ -471,7 +487,6 @@ TEST(EthercatFakeBackendTest, KeepsMailboxOutsidePdoCriticalWindow) {
   stage.cv.notify_all();
   pdo_thread.join();
 
-  mailbox.cycle({});
   EXPECT_EQ(backend->download_count(), 1U);
   EXPECT_EQ(mailbox.mailbox_status(request.value())->state,
             MailboxRequestState::completed);
@@ -489,16 +504,19 @@ TEST(EthercatFakeBackendTest, AdvancesAsynchronousSdoAcrossUnifiedMasterCycles) 
 
   mailbox.cycle({});
   EXPECT_EQ(mailbox.mailbox_status(request.value())->state, MailboxRequestState::queued);
+  EXPECT_EQ(backend->download_count(), 0U);
+
+  master.cycle({});
+  EXPECT_EQ(mailbox.mailbox_status(request.value())->state, MailboxRequestState::queued);
   EXPECT_EQ(backend->download_count(), 1U);
 
   master.cycle({});
-  mailbox.cycle({});
   EXPECT_EQ(mailbox.mailbox_status(request.value())->state,
             MailboxRequestState::completed);
   EXPECT_EQ(backend->download_count(), 2U);
 }
 
-TEST(EthercatFakeBackendTest, PdoCycleIsNotDiscardedByAnInFlightMailboxTransfer) {
+TEST(EthercatFakeBackendTest, PausedMailboxStagingThreadCannotDelayPdoCycle) {
   auto backend = std::make_shared<FakeEthercatBackend>();
   EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
   ASSERT_TRUE(master.open().has_value());
@@ -506,25 +524,44 @@ TEST(EthercatFakeBackendTest, PdoCycleIsNotDiscardedByAnInFlightMailboxTransfer)
   const std::vector<std::byte> value{std::byte{8U}};
   auto request = mailbox.queue_download({0x2000U, 0U}, value);
   ASSERT_TRUE(request.has_value());
-  backend->block_download();
-  std::thread mailbox_thread([&] { mailbox.cycle({}); });
-  ASSERT_TRUE(backend->wait_for_download(1s));
 
+  std::mutex signal_mutex;
+  std::condition_variable signal;
+  bool staging_thread_ready{};
+  bool allow_staging{};
+  std::thread mailbox_thread([&] {
+    EthercatMailboxTestPeer::hold_frontend_lock(
+        static_cast<policy_runtime::EthercatMailbox&>(mailbox), signal_mutex,
+        signal, staging_thread_ready, allow_staging);
+  });
+  {
+    std::unique_lock lock(signal_mutex);
+    ASSERT_TRUE(signal.wait_for(
+        lock, 1s, [&staging_thread_ready] { return staging_thread_ready; }));
+  }
   const auto receives_before = backend->receive_count();
-  std::thread pdo_thread([&] { master.cycle({}); });
-  std::this_thread::sleep_for(10ms);
-  EXPECT_EQ(backend->receive_count(), receives_before);
-
-  backend->release_download();
-  mailbox_thread.join();
-  pdo_thread.join();
+  master.cycle({});
   EXPECT_EQ(backend->receive_count(), receives_before + 1U);
+  EXPECT_EQ(backend->download_count(), 0U);
+
+  {
+    std::scoped_lock lock(signal_mutex);
+    allow_staging = true;
+  }
+  signal.notify_all();
+  mailbox_thread.join();
+  EXPECT_EQ(backend->download_count(), 0U);
+
+  mailbox.cycle({});
+  master.cycle({});
+  EXPECT_EQ(backend->receive_count(), receives_before + 2U);
+  EXPECT_EQ(backend->download_count(), 1U);
   EXPECT_EQ(master.health(), TransportHealth::healthy);
   EXPECT_EQ(mailbox.mailbox_status(request.value())->state,
             MailboxRequestState::completed);
 }
 
-TEST(EthercatFakeBackendTest, PdoWaiterRunsBeforeAnotherMailboxRequest) {
+TEST(EthercatFakeBackendTest, AdvancesAtMostOneSdoAfterPdoStagingPerMasterCycle) {
   auto backend = std::make_shared<FakeEthercatBackend>();
   EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
   ASSERT_TRUE(master.open().has_value());
@@ -535,27 +572,63 @@ TEST(EthercatFakeBackendTest, PdoWaiterRunsBeforeAnotherMailboxRequest) {
   auto second = mailbox.queue_download({0x2001U, 0U}, second_value);
   ASSERT_TRUE(first.has_value());
   ASSERT_TRUE(second.has_value());
-  backend->block_download();
-  std::thread first_mailbox([&] { mailbox.cycle({}); });
-  ASSERT_TRUE(backend->wait_for_download(1s));
+  mailbox.cycle({});
+  mailbox.cycle({});
+  EXPECT_EQ(backend->download_count(), 0U);
 
   backend->clear_cycle_events();
-  std::thread pdo_thread([&] { master.cycle({}); });
-  std::this_thread::sleep_for(10ms);
-  std::thread competing_mailbox([&] { mailbox.cycle({}); });
-  competing_mailbox.join();
-  backend->release_download();
-  first_mailbox.join();
-  pdo_thread.join();
+  master.cycle({});
+
+  EXPECT_EQ(backend->download_count(), 1U);
+  EXPECT_EQ(mailbox.mailbox_status(first.value())->state,
+            MailboxRequestState::completed);
+  EXPECT_EQ(mailbox.mailbox_status(second.value())->state,
+            MailboxRequestState::queued);
+  EXPECT_EQ(backend->events(),
+            (std::vector<std::string>{"receive", "process", "health", "image",
+                                      "download", "queue", "send"}));
 
   mailbox.cycle({});
-  const auto events = backend->events();
-  const auto receive = std::find(events.begin(), events.end(), "receive");
-  const auto second_download = std::find(events.begin(), events.end(), "download");
-  ASSERT_NE(receive, events.end());
-  ASSERT_NE(second_download, events.end());
-  EXPECT_LT(receive, second_download);
+  master.cycle({});
+  EXPECT_EQ(backend->download_count(), 2U);
   EXPECT_EQ(mailbox.mailbox_status(second.value())->state,
+            MailboxRequestState::completed);
+}
+
+TEST(EthercatFakeBackendTest, AdvancesOnlyOneOfTwoAxisMailboxesPerMasterCycle) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  auto first_axis = axis_config();
+  first_axis.name = "first";
+  first_axis.alias = 1U;
+  auto second_axis = axis_config();
+  second_axis.name = "second";
+  second_axis.alias = 2U;
+  EthercatMaster master{backend,
+                        {EthercatAxisConfiguration{first_axis, {}},
+                         EthercatAxisConfiguration{second_axis, {}}}};
+  ASSERT_TRUE(master.open().has_value());
+  const std::vector<std::byte> value{std::byte{1U}};
+  auto& first_mailbox = master.mailbox(0U);
+  auto& second_mailbox = master.mailbox(1U);
+  auto first = first_mailbox.queue_download({0x2000U, 0U}, value);
+  auto second = second_mailbox.queue_download({0x2001U, 0U}, value);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  first_mailbox.cycle({});
+  second_mailbox.cycle({});
+
+  master.cycle({});
+
+  EXPECT_EQ(backend->download_count(), 1U);
+  EXPECT_EQ(first_mailbox.mailbox_status(first.value())->state,
+            MailboxRequestState::completed);
+  EXPECT_EQ(second_mailbox.mailbox_status(second.value())->state,
+            MailboxRequestState::queued);
+
+  master.cycle({});
+
+  EXPECT_EQ(backend->download_count(), 2U);
+  EXPECT_EQ(second_mailbox.mailbox_status(second.value())->state,
             MailboxRequestState::completed);
 }
 
@@ -629,50 +702,134 @@ TEST(EthercatFakeBackendTest, CloseWaitsForInFlightPdoBeforeDeactivation) {
   EXPECT_EQ(backend->deactivate_count(), 1U);
 }
 
-TEST(EthercatFakeBackendTest, CloseFailsMailboxWorkAndReopenHasNoStaleRequest) {
+TEST(EthercatFakeBackendTest,
+     MailboxOnlyCloseRequiresOwnerCancellationBeforeSameObjectReopen) {
   auto backend = std::make_shared<FakeEthercatBackend>();
   EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
   ASSERT_TRUE(master.open().has_value());
   auto& mailbox = master.mailbox(0U);
   const std::vector<std::byte> value{std::byte{1U}};
-  auto active = mailbox.queue_download({0x2000U, 0U}, value);
-  auto queued = mailbox.queue_download({0x2001U, 0U}, value);
-  ASSERT_TRUE(active.has_value());
-  ASSERT_TRUE(queued.has_value());
-  backend->block_download();
-  std::thread mailbox_thread([&] { mailbox.cycle({}); });
-  ASSERT_TRUE(backend->wait_for_download(1s));
+  auto stale = mailbox.queue_download({0x2000U, 0U}, value);
+  ASSERT_TRUE(stale.has_value());
+  backend->make_download_pending_once();
+  mailbox.cycle({});
+  master.cycle({});
+  ASSERT_EQ(backend->download_count(), 1U);
+  ASSERT_EQ(mailbox.mailbox_status(stale.value())->state,
+            MailboxRequestState::queued);
 
-  std::atomic<bool> close_completed{};
-  std::thread close_thread([&] {
-    master.close();
-    close_completed.store(true);
-  });
-  std::this_thread::sleep_for(10ms);
-  EXPECT_FALSE(close_completed.load());
-  EXPECT_TRUE(backend->activated());
+  mailbox.close();
+  EXPECT_EQ(mailbox.mailbox_status(stale.value())->state,
+            MailboxRequestState::failed);
+  auto premature_reopen = mailbox.open();
+  ASSERT_FALSE(premature_reopen.has_value());
+  EXPECT_EQ(premature_reopen.error().code, ErrorCode::unavailable);
 
-  backend->release_download();
-  mailbox_thread.join();
-  close_thread.join();
-  ASSERT_TRUE(mailbox.mailbox_status(active.value()).has_value());
-  ASSERT_TRUE(mailbox.mailbox_status(queued.value()).has_value());
-  EXPECT_EQ(mailbox.mailbox_status(active.value())->state, MailboxRequestState::failed);
-  EXPECT_EQ(mailbox.mailbox_status(queued.value())->state, MailboxRequestState::failed);
+  master.cycle({});
+  EXPECT_EQ(backend->cancel_count(), 1U);
+  ASSERT_TRUE(mailbox.open().has_value());
 
-  const auto downloads_before_reopen = backend->download_count();
-  ASSERT_TRUE(master.open().has_value());
-  master.mailbox(0U).cycle({});
-  EXPECT_EQ(backend->download_count(), downloads_before_reopen);
-  EXPECT_EQ(mailbox.mailbox_status(active.value())->state, MailboxRequestState::failed);
-  EXPECT_EQ(mailbox.mailbox_status(queued.value())->state, MailboxRequestState::failed);
-
-  auto fresh = mailbox.queue_download({0x2002U, 0U}, value);
+  auto fresh = mailbox.queue_download({0x2000U, 0U}, value);
   ASSERT_TRUE(fresh.has_value());
   mailbox.cycle({});
+  master.cycle({});
   EXPECT_EQ(mailbox.mailbox_status(fresh.value())->state,
             MailboxRequestState::completed);
-  EXPECT_EQ(backend->download_count(), downloads_before_reopen + 1U);
+  EXPECT_EQ(mailbox.mailbox_status(stale.value())->state,
+            MailboxRequestState::failed);
+  EXPECT_EQ(backend->download_count(), 2U);
+}
+
+TEST(EthercatFakeBackendTest,
+     MailboxOnlyCloseResetsOwnerBeforeDifferentObjectReopen) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
+  ASSERT_TRUE(master.open().has_value());
+  auto& mailbox = master.mailbox(0U);
+  const std::vector<std::byte> value{std::byte{1U}};
+  auto stale = mailbox.queue_download({0x2000U, 0U}, value);
+  ASSERT_TRUE(stale.has_value());
+  backend->make_download_pending_once();
+  mailbox.cycle({});
+  master.cycle({});
+
+  mailbox.close();
+  master.cycle({});
+  ASSERT_EQ(backend->cancel_count(), 1U);
+  ASSERT_TRUE(mailbox.open().has_value());
+
+  auto fresh = mailbox.queue_download({0x2001U, 0U}, value);
+  ASSERT_TRUE(fresh.has_value());
+  mailbox.cycle({});
+  master.cycle({});
+  EXPECT_EQ(mailbox.mailbox_status(stale.value())->state,
+            MailboxRequestState::failed);
+  EXPECT_EQ(mailbox.mailbox_status(fresh.value())->state,
+            MailboxRequestState::completed);
+  EXPECT_EQ(backend->download_count(), 2U);
+}
+
+TEST(EthercatFakeBackendTest,
+     PendingCancellationConsumesOneStepPerCycleAndKeepsMailboxClosed) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
+  ASSERT_TRUE(master.open().has_value());
+  auto& mailbox = master.mailbox(0U);
+  const std::vector<std::byte> value{std::byte{1U}};
+  auto stale = mailbox.queue_download({0x2000U, 0U}, value);
+  ASSERT_TRUE(stale.has_value());
+  backend->make_download_pending_once();
+  mailbox.cycle({});
+  master.cycle({});
+  mailbox.close();
+  backend->make_cancel_pending_once();
+  const auto receives_before = backend->receive_count();
+
+  master.cycle({});
+
+  EXPECT_EQ(backend->receive_count(), receives_before + 1U);
+  EXPECT_EQ(backend->cancel_count(), 1U);
+  auto early_open = mailbox.open();
+  ASSERT_FALSE(early_open.has_value());
+  EXPECT_EQ(early_open.error().code, ErrorCode::unavailable);
+
+  master.cycle({});
+
+  EXPECT_EQ(backend->receive_count(), receives_before + 2U);
+  EXPECT_EQ(backend->cancel_count(), 2U);
+  EXPECT_EQ(mailbox.mailbox_status(stale.value())->state,
+            MailboxRequestState::failed);
+  EXPECT_TRUE(mailbox.open().has_value());
+}
+
+TEST(EthercatFakeBackendTest,
+     ChildCannotOpenWithoutAnActiveMatchingParentGeneration) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
+  ASSERT_TRUE(master.open().has_value());
+  auto& mailbox = master.mailbox(0U);
+  const std::vector<std::byte> value{std::byte{1U}};
+  auto stale = mailbox.queue_download({0x2000U, 0U}, value);
+  ASSERT_TRUE(stale.has_value());
+  mailbox.cycle({});
+
+  master.close();
+  EXPECT_EQ(mailbox.mailbox_status(stale.value())->state,
+            MailboxRequestState::failed);
+  auto child_only_open = mailbox.open();
+  ASSERT_FALSE(child_only_open.has_value());
+  EXPECT_EQ(child_only_open.error().code, ErrorCode::unavailable);
+  EXPECT_FALSE(mailbox.queue_download({0x2001U, 0U}, value).has_value());
+
+  ASSERT_TRUE(master.open().has_value());
+  auto fresh = mailbox.queue_download({0x2001U, 0U}, value);
+  ASSERT_TRUE(fresh.has_value());
+  mailbox.cycle({});
+  master.cycle({});
+  EXPECT_EQ(mailbox.mailbox_status(fresh.value())->state,
+            MailboxRequestState::completed);
+  EXPECT_EQ(mailbox.mailbox_status(stale.value())->state,
+            MailboxRequestState::failed);
 }
 
 }  // namespace

@@ -437,14 +437,15 @@ SdoTransferProgress IghBackend::progress_download_sdo(
 }
 
 SdoTransferProgress IghBackend::progress_upload_sdo(
-    EthercatSlaveAddress slave, ObjectAddress address, std::size_t maximum_size) {
+    EthercatSlaveAddress slave, ObjectAddress address,
+    std::span<std::byte> destination) {
   auto* configured_slave = impl_->find_slave(slave);
   if (!impl_->activated || configured_slave == nullptr ||
       configured_slave->upload_request == nullptr) {
     return sdo_failure(ErrorCode::unavailable,
                        "IgH asynchronous SDO endpoint is unavailable");
   }
-  if (maximum_size == 0U || maximum_size > kMailboxCapacity) {
+  if (destination.empty() || destination.size() > kMailboxCapacity) {
     return sdo_failure(ErrorCode::invalid_argument,
                        "IgH SDO upload size is outside the configured capacity");
   }
@@ -461,7 +462,7 @@ SdoTransferProgress IghBackend::progress_upload_sdo(
     configured_slave->active_sdo = ActiveSdo::upload;
     configured_slave->active_request = configured_slave->upload_request;
     configured_slave->active_address = address;
-    configured_slave->active_upload_limit = maximum_size;
+    configured_slave->active_upload_limit = destination.size();
     return SdoTransferProgress{};
   }
   if (configured_slave->active_sdo != ActiveSdo::upload ||
@@ -485,11 +486,10 @@ SdoTransferProgress IghBackend::progress_upload_sdo(
       }
       const auto* data = reinterpret_cast<const std::byte*>(
           ecrt_sdo_request_data(configured_slave->active_request));
-      std::vector<std::byte> uploaded(data, data + size);
+      std::copy_n(data, size, destination.begin());
       configured_slave->active_sdo = ActiveSdo::none;
       configured_slave->active_request = nullptr;
-      return SdoTransferProgress{SdoTransferState::completed, std::nullopt,
-                                 std::move(uploaded)};
+      return SdoTransferProgress{SdoTransferState::completed, std::nullopt, size};
     }
     case EC_REQUEST_ERROR:
       configured_slave->active_sdo = ActiveSdo::none;
@@ -498,6 +498,36 @@ SdoTransferProgress IghBackend::progress_upload_sdo(
   }
   configured_slave->active_sdo = ActiveSdo::none;
   configured_slave->active_request = nullptr;
+  return sdo_failure(ErrorCode::internal, "unknown IgH SDO request state");
+}
+
+SdoTransferProgress IghBackend::progress_cancel_sdo(
+    EthercatSlaveAddress slave) {
+  auto* configured_slave = impl_->find_slave(slave);
+  if (!impl_->activated || configured_slave == nullptr) {
+    return sdo_failure(ErrorCode::unavailable,
+                       "IgH asynchronous SDO endpoint is unavailable");
+  }
+  if (configured_slave->active_sdo == ActiveSdo::none ||
+      configured_slave->active_request == nullptr) {
+    return SdoTransferProgress{SdoTransferState::completed, std::nullopt, 0U};
+  }
+
+  // IgH's public asynchronous request API has no abort operation. The sole
+  // master owner therefore drains one request-state observation per cycle and
+  // releases the logical request only after IgH reports a terminal state.
+  switch (ecrt_sdo_request_state(configured_slave->active_request)) {
+    case EC_REQUEST_UNUSED:
+    case EC_REQUEST_BUSY:
+      return SdoTransferProgress{};
+    case EC_REQUEST_SUCCESS:
+    case EC_REQUEST_ERROR:
+      configured_slave->active_sdo = ActiveSdo::none;
+      configured_slave->active_request = nullptr;
+      configured_slave->active_address = {};
+      configured_slave->active_upload_limit = 0U;
+      return SdoTransferProgress{SdoTransferState::completed, std::nullopt, 0U};
+  }
   return sdo_failure(ErrorCode::internal, "unknown IgH SDO request state");
 }
 

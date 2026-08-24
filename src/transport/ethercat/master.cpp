@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <array>
-#include <exception>
 #include <set>
 #include <utility>
 
@@ -38,46 +37,49 @@ bool valid_static_mode(profiles::Cia402Mode mode) noexcept {
 }  // namespace
 
 EthercatMailbox::EthercatMailbox(std::shared_ptr<EthercatBackend> backend,
-                                 EthercatSlaveAddress slave)
-    : backend_(std::move(backend)), slave_(slave) {}
+                                 EthercatSlaveAddress slave,
+                                 std::shared_ptr<OwnerLifecycle> owner_lifecycle)
+    : backend_(std::move(backend)),
+      owner_lifecycle_(std::move(owner_lifecycle)),
+      slave_(slave) {}
 
 Result<void> EthercatMailbox::open() {
   std::scoped_lock lifecycle_lock(lifecycle_mutex_);
-  if (backend_ == nullptr) {
+  if (backend_ == nullptr || owner_lifecycle_ == nullptr) {
     return Result<void>::failure(
         {ErrorCode::unavailable, "EtherCAT mailbox has no backend"});
   }
-  bool expected = false;
-  if (!open_.compare_exchange_strong(expected, true)) {
+  const auto parent_generation =
+      owner_lifecycle_->active_generation.load(std::memory_order_acquire);
+  if (parent_generation == 0U) {
+    return Result<void>::failure(
+        {ErrorCode::unavailable, "EtherCAT mailbox parent is closed"});
+  }
+  if (open_generation_.load(std::memory_order_acquire) != 0U) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument, "EtherCAT mailbox is already open"});
   }
+  if (cancel_requested_generation_.load(std::memory_order_acquire) != 0U ||
+      staged_request_.load(std::memory_order_acquire) != nullptr) {
+    return Result<void>::failure(
+        {ErrorCode::unavailable,
+         "EtherCAT mailbox cancellation is awaiting an owner cycle"});
+  }
+  if (owner_lifecycle_->active_generation.load(std::memory_order_acquire) !=
+      parent_generation) {
+    return Result<void>::failure(
+        {ErrorCode::unavailable, "EtherCAT mailbox parent generation changed"});
+  }
+  open_generation_.store(parent_generation, std::memory_order_release);
   health_.store(TransportHealth::healthy, std::memory_order_release);
   return Result<void>::success();
 }
 
 void EthercatMailbox::close() noexcept {
   std::scoped_lock lifecycle_lock(lifecycle_mutex_);
-  open_.store(false, std::memory_order_release);
-  try {
-    std::scoped_lock lock(requests_mutex_);
-    for (auto& [request_id, request] : requests_) {
-      static_cast<void>(request_id);
-      if (request.status.state == MailboxRequestState::queued) {
-        request.status = MailboxRequestStatus{
-            MailboxRequestState::failed,
-            Error{ErrorCode::unavailable, "EtherCAT mailbox closed before completion"},
-            {}};
-      }
-    }
-  } catch (...) {
-    std::scoped_lock lock(requests_mutex_);
-    requests_.clear();
-  }
-  auto active = cycles_in_flight_.load(std::memory_order_acquire);
-  while (active != 0U) {
-    cycles_in_flight_.wait(active, std::memory_order_acquire);
-    active = cycles_in_flight_.load(std::memory_order_acquire);
+  const auto generation = open_generation_.exchange(0U, std::memory_order_acq_rel);
+  if (generation != 0U) {
+    close_generation(generation, true);
   }
   health_.store(TransportHealth::failed, std::memory_order_release);
 }
@@ -92,7 +94,10 @@ SchedulingClass EthercatMailbox::scheduling_class() const noexcept {
 
 Result<MailboxRequestId> EthercatMailbox::enqueue(
     bool upload, ObjectAddress address, std::span<const std::byte> data) {
-  if (!open_.load(std::memory_order_acquire)) {
+  const auto generation = open_generation_.load(std::memory_order_acquire);
+  if (generation == 0U || owner_lifecycle_ == nullptr ||
+      owner_lifecycle_->active_generation.load(std::memory_order_acquire) !=
+          generation) {
     return Result<MailboxRequestId>::failure(
         {ErrorCode::unavailable, "EtherCAT mailbox is closed"});
   }
@@ -106,16 +111,31 @@ Result<MailboxRequestId> EthercatMailbox::enqueue(
          "runtime writes to static CiA 402 mode objects are forbidden"});
   }
   std::scoped_lock lock(requests_mutex_);
-  if (!open_.load(std::memory_order_acquire)) {
+  if (open_generation_.load(std::memory_order_acquire) != generation ||
+      owner_lifecycle_->active_generation.load(std::memory_order_acquire) !=
+          generation) {
     return Result<MailboxRequestId>::failure(
         {ErrorCode::unavailable, "EtherCAT mailbox is closed"});
   }
   const auto request_id = next_request_id_++;
-  Request request{};
-  request.upload = upload;
-  request.address = address;
-  request.data.assign(data.begin(), data.end());
-  requests_.emplace(request_id, std::move(request));
+  auto [request, inserted] = requests_.try_emplace(request_id);
+  if (!inserted) {
+    return Result<MailboxRequestId>::failure(
+        {ErrorCode::internal, "EtherCAT mailbox request ID collision"});
+  }
+  try {
+    request->second.generation = generation;
+    request->second.upload = upload;
+    request->second.transfer.address = address;
+    if (upload) {
+      request->second.transfer.data.resize(kMaximumSdoUploadBytes);
+    } else {
+      request->second.transfer.data.assign(data.begin(), data.end());
+    }
+  } catch (...) {
+    requests_.erase(request);
+    throw;
+  }
   return Result<MailboxRequestId>::success(request_id);
 }
 
@@ -135,126 +155,267 @@ std::optional<MailboxRequestStatus> EthercatMailbox::mailbox_status(
   if (request == requests_.end()) {
     return std::nullopt;
   }
-  return request->second.status;
-}
-
-bool EthercatMailbox::try_enter_cycle() noexcept {
-  cycles_in_flight_.fetch_add(1U, std::memory_order_acq_rel);
-  if (open_.load(std::memory_order_acquire)) {
-    return true;
+  const auto phase = request->second.phase.load(std::memory_order_acquire);
+  if (phase == RequestPhase::completed) {
+    const auto size = std::min(request->second.uploaded_size,
+                               request->second.transfer.data.size());
+    return MailboxRequestStatus{
+        MailboxRequestState::completed, std::nullopt,
+        request->second.upload
+            ? std::vector<std::byte>(request->second.transfer.data.begin(),
+                                     request->second.transfer.data.begin() + size)
+            : std::vector<std::byte>{}};
   }
-  leave_cycle();
-  return false;
-}
-
-void EthercatMailbox::leave_cycle() noexcept {
-  if (cycles_in_flight_.fetch_sub(1U, std::memory_order_acq_rel) == 1U) {
-    cycles_in_flight_.notify_all();
+  if (phase == RequestPhase::failed ||
+      (phase == RequestPhase::terminalizing &&
+       open_generation_.load(std::memory_order_acquire) !=
+           request->second.generation)) {
+    Error error = request->second.failure_kind == FailureKind::backend
+                      ? Error{ErrorCode::io, "EtherCAT SDO transfer failed"}
+                      : Error{ErrorCode::unavailable,
+                              "EtherCAT mailbox closed before completion"};
+    if (request->second.failure_kind == FailureKind::backend &&
+        request->second.backend_error.has_value()) {
+      error = *request->second.backend_error;
+    }
+    return MailboxRequestStatus{MailboxRequestState::failed, std::move(error), {}};
   }
+  return MailboxRequestStatus{MailboxRequestState::queued, std::nullopt, {}};
 }
 
 void EthercatMailbox::cycle(const CycleContext&) noexcept {
-  if (!try_enter_cycle()) {
+  const auto generation = open_generation_.load(std::memory_order_acquire);
+  if (generation == 0U || owner_lifecycle_ == nullptr ||
+      owner_lifecycle_->active_generation.load(std::memory_order_acquire) !=
+          generation) {
     health_.store(TransportHealth::failed, std::memory_order_release);
-    return;
-  }
-  if (backend_ == nullptr) {
-    health_.store(TransportHealth::failed, std::memory_order_release);
-    leave_cycle();
     return;
   }
   try {
-    service_one();
+    stage_one();
   } catch (...) {
     health_.store(TransportHealth::degraded, std::memory_order_release);
   }
-  leave_cycle();
 }
 
-void EthercatMailbox::service_one() {
-  MailboxRequestId request_id{};
-  Request execution;
-  {
-    std::scoped_lock lock(requests_mutex_);
-    const auto request = std::find_if(
-        requests_.begin(), requests_.end(), [](const auto& entry) {
-          return entry.second.status.state == MailboxRequestState::queued &&
-                 !entry.second.executing;
-        });
-    if (request == requests_.end()) {
+void EthercatMailbox::stage_one() {
+  if (staged_request_.load(std::memory_order_acquire) != nullptr) {
+    return;
+  }
+  std::scoped_lock lock(requests_mutex_);
+  const auto generation = open_generation_.load(std::memory_order_acquire);
+  if (generation == 0U || owner_lifecycle_ == nullptr ||
+      owner_lifecycle_->active_generation.load(std::memory_order_acquire) !=
+          generation ||
+      staged_request_.load(std::memory_order_acquire) != nullptr) {
+    return;
+  }
+  const auto candidate = std::find_if(
+      requests_.begin(), requests_.end(), [generation](const auto& entry) {
+        return entry.second.generation == generation &&
+               entry.second.phase.load(std::memory_order_acquire) ==
+                   RequestPhase::queued;
+      });
+  if (candidate == requests_.end()) {
+    return;
+  }
+  auto expected_phase = RequestPhase::queued;
+  if (!candidate->second.phase.compare_exchange_strong(
+          expected_phase, RequestPhase::staged, std::memory_order_acq_rel)) {
+    return;
+  }
+  Request* expected_request = nullptr;
+  if (!staged_request_.compare_exchange_strong(
+          expected_request, &candidate->second, std::memory_order_release,
+          std::memory_order_relaxed)) {
+    expected_phase = RequestPhase::staged;
+    static_cast<void>(candidate->second.phase.compare_exchange_strong(
+        expected_phase, RequestPhase::queued, std::memory_order_release,
+        std::memory_order_relaxed));
+  }
+}
+
+void EthercatMailbox::fail_request(Request& request, FailureKind kind) noexcept {
+  auto phase = request.phase.load(std::memory_order_acquire);
+  if (phase == RequestPhase::completed || phase == RequestPhase::failed) {
+    return;
+  }
+  for (;;) {
+    if (phase == RequestPhase::terminalizing) {
+      request.phase.wait(RequestPhase::terminalizing, std::memory_order_acquire);
+      phase = request.phase.load(std::memory_order_acquire);
+      if (phase == RequestPhase::failed) {
+        return;
+      }
+    }
+    if (phase == RequestPhase::failed) {
       return;
     }
-    request->second.executing = true;
-    request_id = request->first;
-    execution = request->second;
+    if (request.phase.compare_exchange_weak(
+            phase, RequestPhase::terminalizing, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      request.failure_kind = kind;
+      request.phase.store(RequestPhase::failed, std::memory_order_release);
+      request.phase.notify_all();
+      return;
+    }
+  }
+}
+
+void EthercatMailbox::close_generation(std::uint64_t generation,
+                                       bool request_cancel) noexcept {
+  {
+    std::scoped_lock lock(requests_mutex_);
+    for (auto& [request_id, request] : requests_) {
+      static_cast<void>(request_id);
+      if (request.generation == generation) {
+        fail_request(request, FailureKind::closed);
+      }
+    }
+  }
+  if (request_cancel) {
+    cancel_requested_generation_.store(generation, std::memory_order_release);
+  }
+}
+
+Result<void> EthercatMailbox::open_for_parent(std::uint64_t parent_generation) {
+  std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+  if (parent_generation == 0U ||
+      open_generation_.load(std::memory_order_acquire) != 0U ||
+      cancel_requested_generation_.load(std::memory_order_acquire) != 0U ||
+      staged_request_.load(std::memory_order_acquire) != nullptr) {
+    return Result<void>::failure(
+        {ErrorCode::unavailable, "EtherCAT mailbox has stale lifecycle state"});
+  }
+  open_generation_.store(parent_generation, std::memory_order_release);
+  health_.store(TransportHealth::healthy, std::memory_order_release);
+  return Result<void>::success();
+}
+
+void EthercatMailbox::close_for_parent(std::uint64_t parent_generation) noexcept {
+  std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+  if (open_generation_.load(std::memory_order_acquire) == parent_generation) {
+    open_generation_.store(0U, std::memory_order_release);
+  }
+  close_generation(parent_generation, false);
+  health_.store(TransportHealth::failed, std::memory_order_release);
+}
+
+void EthercatMailbox::reset_after_parent_deactivate() noexcept {
+  std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+  staged_request_.store(nullptr, std::memory_order_release);
+  cancel_requested_generation_.store(0U, std::memory_order_release);
+  open_generation_.store(0U, std::memory_order_release);
+  health_.store(TransportHealth::failed, std::memory_order_release);
+}
+
+bool EthercatMailbox::owner_step(std::uint64_t parent_generation) noexcept {
+  const auto cancel_generation =
+      cancel_requested_generation_.load(std::memory_order_acquire);
+  if (cancel_generation != 0U) {
+    SdoTransferProgress cancellation;
+    try {
+      cancellation = backend_->progress_cancel_sdo(slave_);
+    } catch (...) {
+      health_.store(TransportHealth::degraded, std::memory_order_release);
+      return true;
+    }
+    if (cancellation.state == SdoTransferState::completed) {
+      staged_request_.store(nullptr, std::memory_order_release);
+      cancel_requested_generation_.store(0U, std::memory_order_release);
+    }
+    if (cancellation.state == SdoTransferState::failed) {
+      health_.store(TransportHealth::failed, std::memory_order_release);
+    }
+    return true;
   }
 
-  if (!backend_->try_acquire_mailbox()) {
-    std::scoped_lock lock(requests_mutex_);
-    requests_.at(request_id).executing = false;
-    health_.store(TransportHealth::degraded, std::memory_order_release);
-    return;
+  auto* request = staged_request_.load(std::memory_order_acquire);
+  if (request == nullptr) {
+    return false;
+  }
+  if (request->generation != parent_generation || owner_lifecycle_ == nullptr ||
+      owner_lifecycle_->active_generation.load(std::memory_order_acquire) !=
+          parent_generation ||
+      open_generation_.load(std::memory_order_acquire) != parent_generation) {
+    return false;
+  }
+
+  auto phase = request->phase.load(std::memory_order_acquire);
+  if (phase == RequestPhase::staged) {
+    if (!request->phase.compare_exchange_strong(
+            phase, RequestPhase::active, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      return false;
+    }
+    phase = RequestPhase::active;
+  }
+  if (phase != RequestPhase::active) {
+    return false;
   }
 
   SdoTransferProgress progress;
   try {
-    if (execution.upload) {
-      progress = backend_->progress_upload_sdo(slave_, execution.address,
-                                               kMaximumSdoUploadBytes);
+    if (request->upload) {
+      progress = backend_->progress_upload_sdo(
+          slave_, request->transfer.address, request->transfer.data);
     } else {
-      progress = backend_->progress_download_sdo(
-          slave_, SdoDownloadRequest{execution.address, execution.data});
+      progress = backend_->progress_download_sdo(slave_, request->transfer);
     }
-  } catch (const std::exception& exception) {
-    progress = SdoTransferProgress{
-        SdoTransferState::failed,
-        Error{ErrorCode::internal, exception.what()}, {}};
   } catch (...) {
-    progress = SdoTransferProgress{
-        SdoTransferState::failed,
-        Error{ErrorCode::internal, "unknown EtherCAT mailbox failure"}, {}};
+    progress.state = SdoTransferState::failed;
+    progress.error.reset();
+    progress.uploaded_size = 0U;
   }
-  backend_->release_access();
+  if (progress.state == SdoTransferState::pending) {
+    return true;
+  }
 
-  {
-    std::scoped_lock lock(requests_mutex_);
-    auto& request = requests_.at(request_id);
-    request.executing = false;
-    if (!open_.load(std::memory_order_acquire) ||
-        request.status.state != MailboxRequestState::queued) {
-      return;
-    }
-    switch (progress.state) {
-      case SdoTransferState::pending:
-        health_.store(TransportHealth::healthy, std::memory_order_release);
-        break;
-      case SdoTransferState::completed:
-        request.status = MailboxRequestStatus{MailboxRequestState::completed, std::nullopt,
-                                              std::move(progress.uploaded_bytes)};
-        health_.store(TransportHealth::healthy, std::memory_order_release);
-        break;
-      case SdoTransferState::failed:
-        if (!progress.error.has_value()) {
-          progress.error = Error{ErrorCode::io, "EtherCAT SDO transfer failed"};
-        }
-        request.status = MailboxRequestStatus{MailboxRequestState::failed,
-                                              std::move(progress.error), {}};
-        health_.store(TransportHealth::degraded, std::memory_order_release);
-        break;
-    }
+  auto expected_phase = RequestPhase::active;
+  if (!request->phase.compare_exchange_strong(
+          expected_phase, RequestPhase::terminalizing, std::memory_order_acq_rel,
+          std::memory_order_acquire)) {
+    return true;
   }
+  const bool still_current =
+      owner_lifecycle_->active_generation.load(std::memory_order_acquire) ==
+          parent_generation &&
+      open_generation_.load(std::memory_order_acquire) == parent_generation;
+  if (progress.state == SdoTransferState::completed && still_current &&
+      (!request->upload || progress.uploaded_size <= request->transfer.data.size())) {
+    request->uploaded_size = progress.uploaded_size;
+    request->phase.store(RequestPhase::completed, std::memory_order_release);
+    health_.store(TransportHealth::healthy, std::memory_order_release);
+  } else {
+    request->failure_kind = still_current ? FailureKind::backend : FailureKind::closed;
+    if (still_current) {
+      request->backend_error = std::move(progress.error);
+    }
+    request->phase.store(RequestPhase::failed, std::memory_order_release);
+    health_.store(still_current ? TransportHealth::degraded
+                                : TransportHealth::failed,
+                  std::memory_order_release);
+  }
+  request->phase.notify_all();
+  Request* expected_request = request;
+  static_cast<void>(staged_request_.compare_exchange_strong(
+      expected_request, nullptr, std::memory_order_release,
+      std::memory_order_relaxed));
+  return true;
 }
 
 EthercatMaster::EthercatMaster(std::shared_ptr<EthercatBackend> backend,
                                std::vector<EthercatAxisConfiguration> axes)
     : backend_(std::move(backend)),
+      owner_lifecycle_(std::make_shared<EthercatMailbox::OwnerLifecycle>()),
       axes_(std::move(axes)),
       pdo_views_(axes_.size()) {
   mailboxes_.reserve(axes_.size());
   for (const auto& configuration : axes_) {
-    mailboxes_.push_back(std::make_unique<EthercatMailbox>(
+    mailboxes_.push_back(std::unique_ptr<EthercatMailbox>(new EthercatMailbox(
         backend_, EthercatSlaveAddress{configuration.axis.alias,
-                                       configuration.axis.position}));
+                                       configuration.axis.position},
+        owner_lifecycle_)));
   }
 }
 
@@ -401,19 +562,32 @@ Result<void> EthercatMaster::open() {
     backend_->deactivate();
     return activated;
   }
+  auto parent_generation = next_generation_++;
+  if (parent_generation == 0U) {
+    parent_generation = next_generation_++;
+  }
+  std::size_t opened_mailboxes{};
   for (auto& mailbox : mailboxes_) {
-    auto opened = mailbox->open();
+    auto opened = mailbox->open_for_parent(parent_generation);
     if (!opened.has_value()) {
-      for (auto& rollback : mailboxes_) {
-        rollback->close();
+      for (std::size_t index = 0U; index < opened_mailboxes; ++index) {
+        mailboxes_[index]->close_for_parent(parent_generation);
       }
       backend_->deactivate();
+      for (auto& rollback : mailboxes_) {
+        rollback->reset_after_parent_deactivate();
+      }
       return opened;
     }
+    ++opened_mailboxes;
   }
 
   pdo_handles_ = std::move(handles);
   std::fill(pdo_views_.begin(), pdo_views_.end(), Cia402PdoView{});
+  generation_ = parent_generation;
+  mailbox_cursor_ = 0U;
+  owner_lifecycle_->active_generation.store(parent_generation,
+                                             std::memory_order_release);
   open_.store(true, std::memory_order_release);
   health_.store(TransportHealth::healthy, std::memory_order_release);
   return Result<void>::success();
@@ -424,8 +598,9 @@ void EthercatMaster::close() noexcept {
   if (!open_.exchange(false, std::memory_order_acq_rel)) {
     return;
   }
+  owner_lifecycle_->active_generation.store(0U, std::memory_order_release);
   for (auto& mailbox : mailboxes_) {
-    mailbox->close();
+    mailbox->close_for_parent(generation_);
   }
   auto active = cycles_in_flight_.load(std::memory_order_acquire);
   while (active != 0U) {
@@ -433,6 +608,10 @@ void EthercatMaster::close() noexcept {
     active = cycles_in_flight_.load(std::memory_order_acquire);
   }
   backend_->deactivate();
+  for (auto& mailbox : mailboxes_) {
+    mailbox->reset_after_parent_deactivate();
+  }
+  generation_ = 0U;
   health_.store(TransportHealth::failed, std::memory_order_release);
 }
 
@@ -469,8 +648,6 @@ void EthercatMaster::cycle(const CycleContext&) noexcept {
     leave_cycle();
     return;
   }
-  backend_->acquire_pdo();
-
   backend_->receive();
   backend_->process_domain();
   const auto domain = backend_->domain_health();
@@ -534,9 +711,18 @@ void EthercatMaster::cycle(const CycleContext&) noexcept {
     }
   }
 
+  if (!mailboxes_.empty()) {
+    for (std::size_t offset = 0U; offset < mailboxes_.size(); ++offset) {
+      const auto mailbox_index = (mailbox_cursor_ + offset) % mailboxes_.size();
+      if (mailboxes_[mailbox_index]->owner_step(generation_)) {
+        mailbox_cursor_ = (mailbox_index + 1U) % mailboxes_.size();
+        break;
+      }
+    }
+  }
+
   backend_->queue_domain();
   backend_->send();
-  backend_->release_access();
 
   health_.store(domain_is_healthy && valid_image && outputs_written
                     ? TransportHealth::healthy

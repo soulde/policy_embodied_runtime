@@ -26,9 +26,9 @@ struct MailboxRequestStatus {
 };
 
 // An OD endpoint must use blocking_event_driven or asynchronous scheduling and
-// must not also implement CyclicTransport. EtherCAT PDO and mailbox endpoints
-// may share a backend below this interface; that composition must serialize
-// backend access outside the hard-real-time PDO critical window.
+// must not also implement CyclicTransport. A mailbox frontend may share a
+// physical owner with a cyclic endpoint; in that composition public calls only
+// stage work and observe completion, while the cyclic owner performs all I/O.
 class ObjectDictionaryTransport : public virtual Transport {
  public:
   // Must return blocking_event_driven or asynchronous, never a real-time class.
@@ -43,7 +43,8 @@ class ObjectDictionaryTransport : public virtual Transport {
   virtual std::optional<MailboxRequestStatus> mailbox_status(
       MailboxRequestId request_id) const = 0;
 
-  // cycle() is inherited as the only physical-I/O entry point and services queued requests.
+  // cycle() is inherited as the scheduling entry point. A composed frontend may
+  // use it only to publish queued work to its physical owner.
 };
 
 }  // namespace policy_runtime

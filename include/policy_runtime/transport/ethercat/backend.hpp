@@ -1,7 +1,6 @@
 #pragma once
 
 #include <bit>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -66,7 +65,7 @@ enum class SdoTransferState { pending, completed, failed };
 struct SdoTransferProgress {
   SdoTransferState state{SdoTransferState::pending};
   std::optional<Error> error;
-  std::vector<std::byte> uploaded_bytes;
+  std::size_t uploaded_size{};
 };
 
 struct EthercatSlaveConfiguration {
@@ -180,40 +179,18 @@ class EthercatBackend {
   virtual void send() noexcept = 0;
   virtual DomainHealth domain_health() const noexcept = 0;
 
-  // These polling calls share the master userspace context with the PDO path.
-  // Implementations must be bounded and nonblocking so an already-entered mailbox
-  // call cannot create unbounded priority inversion for the next PDO cycle.
+  // Only EthercatMaster::cycle() may call these functions. Each call advances at
+  // most one bounded, nonblocking state-machine step in the same userspace owner
+  // context as PDO exchange.
   virtual SdoTransferProgress progress_download_sdo(
       EthercatSlaveAddress slave, const SdoDownloadRequest& request) = 0;
   virtual SdoTransferProgress progress_upload_sdo(EthercatSlaveAddress slave,
                                                    ObjectAddress address,
-                                                   std::size_t maximum_size) = 0;
+                                                   std::span<std::byte> destination) = 0;
+  virtual SdoTransferProgress progress_cancel_sdo(
+      EthercatSlaveAddress slave) = 0;
 
  private:
-  void acquire_pdo() noexcept {
-    pdo_waiters_.fetch_add(1U, std::memory_order_acq_rel);
-    while (access_busy_.test_and_set(std::memory_order_acquire)) {
-    }
-    pdo_waiters_.fetch_sub(1U, std::memory_order_release);
-  }
-
-  bool try_acquire_mailbox() noexcept {
-    if (pdo_waiters_.load(std::memory_order_acquire) != 0U ||
-        access_busy_.test_and_set(std::memory_order_acquire)) {
-      return false;
-    }
-    if (pdo_waiters_.load(std::memory_order_acquire) != 0U) {
-      access_busy_.clear(std::memory_order_release);
-      return false;
-    }
-    return true;
-  }
-
-  void release_access() noexcept { access_busy_.clear(std::memory_order_release); }
-
-  std::atomic_flag access_busy_ = ATOMIC_FLAG_INIT;
-  std::atomic<unsigned int> pdo_waiters_{};
-
   friend class EthercatMaster;
   friend class EthercatMailbox;
 };
@@ -251,7 +228,9 @@ class IghBackend final : public EthercatBackend {
       EthercatSlaveAddress slave, const SdoDownloadRequest& request) override;
   SdoTransferProgress progress_upload_sdo(EthercatSlaveAddress slave,
                                            ObjectAddress address,
-                                           std::size_t maximum_size) override;
+                                           std::span<std::byte> destination) override;
+  SdoTransferProgress progress_cancel_sdo(
+      EthercatSlaveAddress slave) override;
 
  private:
   struct Impl;

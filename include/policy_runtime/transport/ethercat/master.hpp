@@ -37,9 +37,6 @@ struct Cia402PdoHandles {
 
 class EthercatMailbox final : public ObjectDictionaryTransport {
  public:
-  EthercatMailbox(std::shared_ptr<EthercatBackend> backend,
-                  EthercatSlaveAddress slave);
-
   Result<void> open() override;
   void close() noexcept override;
   TransportHealth health() const noexcept override;
@@ -53,29 +50,65 @@ class EthercatMailbox final : public ObjectDictionaryTransport {
       MailboxRequestId request_id) const override;
 
  private:
-  struct Request {
-    bool upload{};
-    bool executing{};
-    ObjectAddress address{};
-    std::vector<std::byte> data;
-    MailboxRequestStatus status{MailboxRequestState::queued, std::nullopt, {}};
+  struct OwnerLifecycle {
+    std::atomic<std::uint64_t> active_generation{};
   };
+
+  enum class RequestPhase {
+    queued,
+    staged,
+    active,
+    terminalizing,
+    completed,
+    failed,
+  };
+
+  enum class FailureKind { none, closed, backend };
+
+  struct Request {
+    std::uint64_t generation{};
+    bool upload{};
+    SdoDownloadRequest transfer;
+    std::atomic<RequestPhase> phase{RequestPhase::queued};
+    FailureKind failure_kind{FailureKind::none};
+    std::optional<Error> backend_error;
+    std::size_t uploaded_size{};
+  };
+
+  static_assert(std::atomic<Request*>::is_always_lock_free,
+                "EtherCAT mailbox handoff requires lock-free pointer atomics");
+  static_assert(std::atomic<RequestPhase>::is_always_lock_free &&
+                    std::atomic<std::uint64_t>::is_always_lock_free,
+                "EtherCAT mailbox state requires lock-free atomics");
+
+  EthercatMailbox(std::shared_ptr<EthercatBackend> backend,
+                  EthercatSlaveAddress slave,
+                  std::shared_ptr<OwnerLifecycle> owner_lifecycle);
 
   Result<MailboxRequestId> enqueue(bool upload, ObjectAddress address,
                                     std::span<const std::byte> data);
-  bool try_enter_cycle() noexcept;
-  void leave_cycle() noexcept;
-  void service_one();
+  void stage_one();
+  bool owner_step(std::uint64_t parent_generation) noexcept;
+  Result<void> open_for_parent(std::uint64_t parent_generation);
+  void close_for_parent(std::uint64_t parent_generation) noexcept;
+  void reset_after_parent_deactivate() noexcept;
+  void close_generation(std::uint64_t generation, bool request_cancel) noexcept;
+  static void fail_request(Request& request, FailureKind kind) noexcept;
 
   std::shared_ptr<EthercatBackend> backend_;
+  std::shared_ptr<OwnerLifecycle> owner_lifecycle_;
   EthercatSlaveAddress slave_{};
   std::mutex lifecycle_mutex_;
   mutable std::mutex requests_mutex_;
   std::map<MailboxRequestId, Request> requests_;
+  std::atomic<Request*> staged_request_{};
   MailboxRequestId next_request_id_{1U};
-  std::atomic<bool> open_{false};
-  std::atomic<unsigned int> cycles_in_flight_{};
+  std::atomic<std::uint64_t> open_generation_{};
+  std::atomic<std::uint64_t> cancel_requested_generation_{};
   std::atomic<TransportHealth> health_{TransportHealth::failed};
+
+  friend class EthercatMaster;
+  friend class EthercatMailboxTestPeer;
 };
 
 class EthercatMaster final : public CyclicTransport {
@@ -110,6 +143,7 @@ class EthercatMaster final : public CyclicTransport {
   void leave_cycle() noexcept;
 
   std::shared_ptr<EthercatBackend> backend_;
+  std::shared_ptr<EthercatMailbox::OwnerLifecycle> owner_lifecycle_;
   std::vector<EthercatAxisConfiguration> axes_;
   std::vector<Cia402PdoView> pdo_views_;
   std::vector<Cia402PdoHandles> pdo_handles_;
@@ -122,6 +156,9 @@ class EthercatMaster final : public CyclicTransport {
   std::atomic<bool> open_{false};
   std::atomic<unsigned int> cycles_in_flight_{};
   std::atomic<TransportHealth> health_{TransportHealth::failed};
+  std::uint64_t generation_{};
+  std::uint64_t next_generation_{1U};
+  std::size_t mailbox_cursor_{};
 };
 
 }  // namespace policy_runtime

@@ -36,7 +36,8 @@ TEST(IghSdoSemanticsTest, DownloadUsesExactCallerSizeAfterUploadChangesDataSize)
   auto upload = mailbox.queue_upload({0x2000U, 0U});
   ASSERT_TRUE(upload.has_value());
   mailbox.cycle({});
-  mailbox.cycle({});
+  master.cycle({});
+  master.cycle({});
   ASSERT_TRUE(mailbox.mailbox_status(upload.value()).has_value());
   ASSERT_EQ(mailbox.mailbox_status(upload.value())->state,
             MailboxRequestState::completed);
@@ -46,6 +47,7 @@ TEST(IghSdoSemanticsTest, DownloadUsesExactCallerSizeAfterUploadChangesDataSize)
   auto download = mailbox.queue_download({0x2001U, 0U}, caller_data);
   ASSERT_TRUE(download.has_value());
   mailbox.cycle({});
+  master.cycle({});
 
   EXPECT_EQ(policy_runtime::test::igh_shim::last_download_size(), 2U);
   const auto written = policy_runtime::test::igh_shim::last_download_data();
@@ -66,6 +68,7 @@ TEST(IghSdoSemanticsTest, RejectsDownloadSizesWithoutAPreactivatedRequest) {
   ASSERT_TRUE(download.has_value());
 
   mailbox.cycle({});
+  master.cycle({});
 
   const auto status = mailbox.mailbox_status(download.value());
   ASSERT_TRUE(status.has_value());
