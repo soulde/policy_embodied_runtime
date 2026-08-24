@@ -447,6 +447,12 @@ SafetyEvaluation SafetySupervisor::evaluate(
       decision = AxisRequest::disable;
     } else {
       state.fault_reset_output_active = false;
+      if (requested == AxisRequest::fault_reset) {
+        // A reset request is meaningful only in Fault. Passing it through in
+        // any other state would arm the CiA 402 edge latch without emitting
+        // 0x0080, poisoning the first real reset opportunity.
+        decision = AxisRequest::disable;
+      }
     }
 
     output.commands[axis] = commands_[axis];

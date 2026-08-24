@@ -52,6 +52,32 @@ std::uint64_t current_thread_token() noexcept {
   return static_cast<std::uint64_t>(::syscall(SYS_gettid));
 }
 
+class CycleOwnerGuard {
+ public:
+  explicit CycleOwnerGuard(std::atomic<std::uint64_t>& owner) noexcept
+      : owner_(&owner), token_(current_thread_token()) {
+    std::uint64_t expected{};
+    acquired_ = owner_->compare_exchange_strong(
+        expected, token_, std::memory_order_acq_rel, std::memory_order_acquire);
+  }
+
+  CycleOwnerGuard(const CycleOwnerGuard&) = delete;
+  CycleOwnerGuard& operator=(const CycleOwnerGuard&) = delete;
+
+  ~CycleOwnerGuard() {
+    if (acquired_) {
+      owner_->store(0U, std::memory_order_release);
+    }
+  }
+
+  explicit operator bool() const noexcept { return acquired_; }
+
+ private:
+  std::atomic<std::uint64_t>* owner_{};
+  std::uint64_t token_{};
+  bool acquired_{};
+};
+
 }  // namespace
 
 DaemonSignalLatch::~DaemonSignalLatch() {
@@ -174,14 +200,17 @@ bool RobotIoDaemon::health_atomics_are_lock_free() const noexcept {
          last_command_timestamp_ns_.is_lock_free() &&
          feedback_timestamp_ns_.is_lock_free() && dc_deviation_ns_.is_lock_free() &&
          timing_fault_.is_lock_free() && sleep_error_.is_lock_free() &&
-         cycle_owner_token_.is_lock_free() && run_active_.is_lock_free() &&
+         cycle_owner_token_.is_lock_free() &&
+         rejected_command_publication_.is_lock_free() &&
          loop_.atomics_are_lock_free() &&
          command_handoff_.atomics_are_lock_free() &&
          axis_publication_.atomics_are_lock_free();
 }
 
 Result<void> RobotIoDaemon::start() {
-  if (!configured_ || running_.load(std::memory_order_acquire)) {
+  if (!configured_ || running_.load(std::memory_order_acquire) ||
+      stop_requested_.load(std::memory_order_acquire) ||
+      shutdown_complete_.load(std::memory_order_acquire)) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument, "robot I/O daemon is not startable"});
   }
@@ -236,9 +265,13 @@ CommandAcceptance RobotIoDaemon::stage_commands(
   }
   const auto accepted =
       command_ingress_.accept_commands(snapshot, clock_->now_ns());
-  if (accepted != CommandAcceptance::duplicate) {
+  if (accepted == CommandAcceptance::accepted) {
     ++command_publication_;
-    command_handoff_.publish({command_publication_, accepted, snapshot});
+    command_handoff_.publish({command_publication_, snapshot});
+  } else if (accepted == CommandAcceptance::rejected) {
+    ++command_publication_;
+    rejected_command_publication_.store(command_publication_,
+                                        std::memory_order_release);
   }
   command_ingress_gate_.clear(std::memory_order_release);
   if (accepted == CommandAcceptance::accepted) {
@@ -250,25 +283,39 @@ CommandAcceptance RobotIoDaemon::stage_commands(
 }
 
 CommandAcceptance RobotIoDaemon::consume_staged_commands() noexcept {
+  const auto rejected_publication =
+      rejected_command_publication_.load(std::memory_order_acquire);
   auto event = command_handoff_.read();
+  if (rejected_publication != acknowledged_rejection_publication_) {
+    acknowledged_rejection_publication_ = rejected_publication;
+    if (event.has_value() && event->publication > rejected_publication &&
+        consumed_command_publication_ == event->publication) {
+      // The valid command raced ahead of an earlier rejection. Replay it on
+      // the cycle after the rejection is acknowledged so recovery remains
+      // possible without letting it hide the required safe-stop cycle.
+      consumed_command_publication_ = rejected_publication;
+    }
+    Snapshot<AxisCommand> invalid{};
+    invalid.axis_count = kRobotIoMaximumAxes + 1U;
+    return safety_.accept_commands(invalid, clock_->now_ns());
+  }
   if (!event.has_value() ||
       event->publication == consumed_command_publication_) {
     return CommandAcceptance::duplicate;
   }
   consumed_command_publication_ = event->publication;
-  if (event->acceptance == CommandAcceptance::rejected) {
-    Snapshot<AxisCommand> invalid{};
-    invalid.axis_count = kRobotIoMaximumAxes + 1U;
-    return safety_.accept_commands(invalid, clock_->now_ns());
-  }
   return safety_.accept_commands(event->snapshot, clock_->now_ns());
 }
 
 CommandAcceptance RobotIoDaemon::refresh_commands() noexcept {
-  const auto owner = cycle_owner_token_.load(std::memory_order_acquire);
-  if (owner != 0U && owner != current_thread_token()) {
+  CycleOwnerGuard owner{cycle_owner_token_};
+  if (!owner) {
     return CommandAcceptance::rejected;
   }
+  return refresh_commands_owned();
+}
+
+CommandAcceptance RobotIoDaemon::refresh_commands_owned() noexcept {
   auto acceptance = consume_staged_commands();
   if (!ipc_.has_value()) {
     return acceptance;
@@ -297,10 +344,16 @@ CommandAcceptance RobotIoDaemon::refresh_commands() noexcept {
 void RobotIoDaemon::process_device_cycle(std::span<Cia402PdoView> pdos,
                                          const DomainHealth& domain,
                                          bool process_data_valid) noexcept {
-  const auto owner = cycle_owner_token_.load(std::memory_order_acquire);
-  if (owner != 0U && owner != current_thread_token()) {
+  CycleOwnerGuard owner{cycle_owner_token_};
+  if (!owner) {
     return;
   }
+  process_device_cycle_owned(pdos, domain, process_data_valid);
+}
+
+void RobotIoDaemon::process_device_cycle_owned(
+    std::span<Cia402PdoView> pdos, const DomainHealth& domain,
+    bool process_data_valid) noexcept {
   if (!running_.load(std::memory_order_acquire) || pdos.size() != axis_count_) {
     process_data_valid_.store(false, std::memory_order_release);
     return;
@@ -358,19 +411,26 @@ void RobotIoDaemon::process_device_cycle(std::span<Cia402PdoView> pdos,
 void RobotIoDaemon::ethercat_cycle_handler(
     void* context, std::span<Cia402PdoView> pdos, const DomainHealth& domain,
     bool process_data_valid) noexcept {
-  static_cast<RobotIoDaemon*>(context)->process_device_cycle(
-      pdos, domain, process_data_valid);
+  auto& daemon = *static_cast<RobotIoDaemon*>(context);
+  if (daemon.owns_cycle()) {
+    daemon.process_device_cycle_owned(pdos, domain, process_data_valid);
+  }
 }
 
-void RobotIoDaemon::cycle(const CycleContext& context) noexcept {
-  static_cast<void>(refresh_commands());
+bool RobotIoDaemon::owns_cycle() const noexcept {
+  return cycle_owner_token_.load(std::memory_order_acquire) ==
+         current_thread_token();
+}
+
+void RobotIoDaemon::cycle_owned(const CycleContext& context) noexcept {
+  static_cast<void>(refresh_commands_owned());
   if (ethercat_master_ != nullptr) {
     ethercat_master_->cycle(context);
   } else {
     const auto mask = axis_count_ == 0U
                           ? std::uint16_t{0U}
                           : static_cast<std::uint16_t>((1U << axis_count_) - 1U);
-    process_device_cycle(
+    process_device_cycle_owned(
         std::span<Cia402PdoView>(standalone_pdos_.data(), axis_count_),
         DomainHealth{1U, 1U, true, true, true, 0, mask}, true);
   }
@@ -378,25 +438,25 @@ void RobotIoDaemon::cycle(const CycleContext& context) noexcept {
 }
 
 void RobotIoDaemon::cycle() noexcept {
-  const auto owner = cycle_owner_token_.load(std::memory_order_acquire);
-  if (owner != 0U && owner != current_thread_token()) {
+  CycleOwnerGuard owner{cycle_owner_token_};
+  if (!owner) {
     return;
   }
   const auto now = clock_->now_ns();
-  cycle(CycleContext{
+  cycle_owned(CycleContext{
       cycle_sequence_.load(std::memory_order_acquire) + 1U,
       std::chrono::steady_clock::time_point{std::chrono::nanoseconds{now}},
       loop_.config().period});
 }
 
 void RobotIoDaemon::run() noexcept {
-  bool expected_run_active = false;
-  if (!running_.load(std::memory_order_acquire) ||
-      !run_active_.compare_exchange_strong(expected_run_active, true,
-                                           std::memory_order_acq_rel)) {
+  if (!running_.load(std::memory_order_acquire)) {
     return;
   }
-  cycle_owner_token_.store(current_thread_token(), std::memory_order_release);
+  CycleOwnerGuard owner{cycle_owner_token_};
+  if (!owner || !running_.load(std::memory_order_acquire)) {
+    return;
+  }
   auto realtime = loop_.prepare();
   if (!realtime.has_value()) {
     realtime_guarantee_.store(false, std::memory_order_release);
@@ -416,7 +476,7 @@ void RobotIoDaemon::run() noexcept {
     if (!sleep_failed) {
       const auto release = loop_.wait_next();
       if (release.sleep_error == 0) {
-        cycle(release.context);
+        cycle_owned(release.context);
         continue;
       }
       sleep_failed = true;
@@ -426,15 +486,13 @@ void RobotIoDaemon::run() noexcept {
       static_cast<void>(request_stop());
     }
     const auto now = clock_->now_ns();
-    cycle(CycleContext{
+    cycle_owned(CycleContext{
         cycle_sequence_.load(std::memory_order_acquire) + 1U,
         std::chrono::steady_clock::time_point{std::chrono::nanoseconds{now}},
         loop_.config().period});
   }
   loop_.release();
   stop_transports();
-  cycle_owner_token_.store(0U, std::memory_order_release);
-  run_active_.store(false, std::memory_order_release);
 }
 
 Result<void> RobotIoDaemon::request_stop() {

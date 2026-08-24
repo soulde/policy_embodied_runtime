@@ -156,7 +156,9 @@ using policy_runtime::kAxisCommandEnable;
 using policy_runtime::kAxisCommandFaultReset;
 using policy_runtime::kAxisFeedbackSafetyFollowingError;
 using policy_runtime::kAxisFeedbackSafetyDriveFault;
+using policy_runtime::kAxisFeedbackSafetyFaultResetLimit;
 using policy_runtime::kAxisFeedbackSafetyGroup;
+using policy_runtime::kAxisFeedbackSafetyInvalidCommand;
 using policy_runtime::kAxisFeedbackSafetyModeMismatch;
 using policy_runtime::kAxisFeedbackSafetyWkc;
 using policy_runtime::profiles::AxisConfig;
@@ -229,6 +231,8 @@ class FakeRealtimeSystem final : public RealtimeSystem {
   bool capture_current_thread_state() noexcept override {
     ++capture_calls;
     setup_thread = std::this_thread::get_id();
+    prepare_entered.store(true, std::memory_order_release);
+    prepare_entered.notify_all();
     return capture_ok;
   }
   bool preempt_rt_kernel() const noexcept override { return preempt_rt; }
@@ -267,6 +271,7 @@ class FakeRealtimeSystem final : public RealtimeSystem {
   int fifo_priority{};
   std::thread::id setup_thread;
   std::thread::id restore_thread;
+  std::atomic<bool> prepare_entered{};
 };
 
 class FakeEthercatBackend final : public EthercatBackend {
@@ -274,6 +279,23 @@ class FakeEthercatBackend final : public EthercatBackend {
   void set_health(DomainHealth health) noexcept { health_ = health; }
   std::span<std::byte> image() noexcept { return image_; }
   void fail_next_activation() noexcept { fail_activation_ = true; }
+  void pause_next_receive() noexcept {
+    release_receive_.store(false, std::memory_order_release);
+    receive_entered_.store(false, std::memory_order_release);
+    pause_receive_.store(true, std::memory_order_release);
+  }
+  void wait_for_receive() noexcept {
+    while (!receive_entered_.load(std::memory_order_acquire)) {
+      receive_entered_.wait(false, std::memory_order_acquire);
+    }
+  }
+  void release_receive() noexcept {
+    release_receive_.store(true, std::memory_order_release);
+    release_receive_.notify_all();
+  }
+  unsigned activation_count() const noexcept {
+    return activation_count_.load(std::memory_order_acquire);
+  }
   void observe_control_word(std::size_t byte_offset) noexcept {
     control_word_offset_ = byte_offset;
   }
@@ -308,6 +330,7 @@ class FakeEthercatBackend final : public EthercatBackend {
           {policy_runtime::ErrorCode::io, "injected activation failure"});
     }
     active_ = true;
+    activation_count_.fetch_add(1U, std::memory_order_acq_rel);
     return Result<void>::success();
   }
   void deactivate() noexcept override {
@@ -315,7 +338,16 @@ class FakeEthercatBackend final : public EthercatBackend {
     deactivate_order_.store(event_order_.fetch_add(1) + 1,
                             std::memory_order_release);
   }
-  void receive() noexcept override {}
+  void receive() noexcept override {
+    if (!pause_receive_.exchange(false, std::memory_order_acq_rel)) {
+      return;
+    }
+    receive_entered_.store(true, std::memory_order_release);
+    receive_entered_.notify_all();
+    while (!release_receive_.load(std::memory_order_acquire)) {
+      release_receive_.wait(false, std::memory_order_acquire);
+    }
+  }
   void process_domain() noexcept override {}
   std::span<std::byte> process_image() noexcept override { return image_; }
   void queue_domain() noexcept override {}
@@ -355,6 +387,10 @@ class FakeEthercatBackend final : public EthercatBackend {
   std::size_t next_offset_{};
   bool active_{};
   bool fail_activation_{};
+  std::atomic<bool> pause_receive_{};
+  std::atomic<bool> receive_entered_{};
+  std::atomic<bool> release_receive_{true};
+  std::atomic<unsigned> activation_count_{};
   std::optional<std::size_t> control_word_offset_;
   std::atomic<std::uint16_t> last_sent_control_word_{};
   std::atomic<int> event_order_{};
@@ -685,6 +721,83 @@ TEST(RobotIoDaemonTest, EthercatOwnerKeepsIndependentOperationalGroupRunning) {
   EXPECT_EQ(daemon.axis_request(1), AxisRequest::enable);
 }
 
+TEST(RobotIoDaemonTest,
+     CycleAdmissionRejectsConcurrentCycleAndDeviceCycleAtTheBoundary) {
+  FakeClock clock;
+  FakeRealtimeSystem realtime;
+  auto profile = profile_with_axes(1);
+  profile.axes[0].command_timeout = 10s;
+  profile.axes[0].following_error_limit = 10.0;
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{
+      backend, {EthercatAxisConfiguration{profile.axes[0], {}}}};
+  RobotIoDaemon daemon{clock, realtime};
+  ASSERT_TRUE(daemon.configure(profile).has_value());
+  ASSERT_TRUE(daemon.attach_ethercat(master).has_value());
+  ASSERT_TRUE(daemon.start().has_value());
+  const auto& handles = master.pdo_handles()[0];
+  ASSERT_TRUE(handles.status_word.write(backend->image(), 0x0027U));
+  ASSERT_TRUE(handles.mode_display.write(backend->image(), 8));
+  ASSERT_TRUE(handles.actual_position.write(backend->image(), 0));
+  ASSERT_TRUE(handles.actual_velocity.write(backend->image(), 0));
+  ASSERT_TRUE(handles.actual_torque.write(backend->image(), 0));
+  ASSERT_EQ(daemon.stage_commands(commands(1, 1U, 0)),
+            CommandAcceptance::accepted);
+
+  backend->pause_next_receive();
+  std::thread owner([&] { daemon.cycle(); });
+  backend->wait_for_receive();
+
+  auto direct_pdos = enabled_pdos(1);
+  daemon.process_device_cycle(direct_pdos, healthy_domain(1), true);
+  daemon.cycle();
+  EXPECT_EQ(daemon.health().cycle_sequence, 0U);
+
+  backend->release_receive();
+  owner.join();
+  EXPECT_EQ(daemon.health().cycle_sequence, 1U);
+}
+
+TEST(RobotIoDaemonTest, RunCannotClaimOwnershipWhileACycleEntryIsActive) {
+  FakeClock clock;
+  FakeRealtimeSystem realtime;
+  auto profile = profile_with_axes(1);
+  profile.axes[0].command_timeout = 10s;
+  profile.axes[0].following_error_limit = 10.0;
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{
+      backend, {EthercatAxisConfiguration{profile.axes[0], {}}}};
+  RobotIoDaemon daemon{clock, realtime};
+  ASSERT_TRUE(daemon.configure(profile).has_value());
+  ASSERT_TRUE(daemon.attach_ethercat(master).has_value());
+  ASSERT_TRUE(daemon.start().has_value());
+  const auto& handles = master.pdo_handles()[0];
+  ASSERT_TRUE(handles.status_word.write(backend->image(), 0x0027U));
+  ASSERT_TRUE(handles.mode_display.write(backend->image(), 8));
+  ASSERT_TRUE(handles.actual_position.write(backend->image(), 0));
+  ASSERT_TRUE(handles.actual_velocity.write(backend->image(), 0));
+  ASSERT_TRUE(handles.actual_torque.write(backend->image(), 0));
+
+  backend->pause_next_receive();
+  std::thread owner([&] { daemon.cycle(); });
+  backend->wait_for_receive();
+  std::atomic<bool> run_returned{};
+  std::thread runner([&] {
+    daemon.run();
+    run_returned.store(true, std::memory_order_release);
+  });
+  while (!run_returned.load(std::memory_order_acquire) &&
+         !realtime.prepare_entered.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+
+  ASSERT_TRUE(daemon.request_stop().has_value());
+  backend->release_receive();
+  owner.join();
+  runner.join();
+  EXPECT_FALSE(realtime.prepare_entered.load(std::memory_order_acquire));
+}
+
 TEST(RobotIoDaemonTest, RejectsOutOfOrderAndMutatedDuplicateCommands) {
   DaemonHarness harness{profile_with_axes(1)};
   const auto accepted = commands(1, 5U, 0);
@@ -701,6 +814,89 @@ TEST(RobotIoDaemonTest, RejectsOutOfOrderAndMutatedDuplicateCommands) {
   harness.pdos[0].actual_velocity = 100;
   harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
   EXPECT_EQ(harness.daemon.axis_request(0), AxisRequest::quick_stop);
+}
+
+TEST(RobotIoDaemonTest, RetainsRejectedPublicationUntilRealtimeOwnerConsumesIt) {
+  DaemonHarness harness{profile_with_axes(1)};
+  const auto first = commands(1, 1U, 0, 0.1);
+  ASSERT_EQ(harness.daemon.stage_commands(first), CommandAcceptance::accepted);
+
+  auto changed_duplicate = first;
+  changed_duplicate.axes[0].target = 0.2;
+  ASSERT_EQ(harness.daemon.stage_commands(changed_duplicate),
+            CommandAcceptance::rejected);
+  ASSERT_EQ(harness.daemon.stage_commands(commands(1, 2U, 0, 0.3)),
+            CommandAcceptance::accepted);
+
+  harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
+  EXPECT_EQ(harness.daemon.axis_request(0), AxisRequest::quick_stop);
+  EXPECT_NE(harness.daemon.feedback(0).flags &
+                kAxisFeedbackSafetyInvalidCommand,
+            0U);
+  EXPECT_EQ(harness.daemon.feedback(0).sequence, 0U);
+
+  // Acknowledging the sticky rejection clears it. The newer valid command is
+  // consumed on the next cycle and may restart only after the safe-stop phase.
+  harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
+  EXPECT_NE(harness.daemon.axis_request(0), AxisRequest::enable);
+  harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
+  EXPECT_EQ(harness.daemon.axis_request(0), AxisRequest::enable);
+  EXPECT_EQ(harness.daemon.feedback(0).flags &
+                kAxisFeedbackSafetyInvalidCommand,
+            0U);
+  EXPECT_EQ(harness.daemon.feedback(0).sequence, 2U);
+}
+
+TEST(RobotIoDaemonTest,
+     ConcurrentCommandPublicationCannotLoseAStickyRejection) {
+  auto profile = profile_with_axes(1);
+  profile.axes[0].command_timeout = 10s;
+  profile.axes[0].following_error_limit = 10.0;
+  DaemonHarness harness{std::move(profile)};
+  std::atomic<bool> publisher_done{};
+  std::atomic<bool> publication_valid{true};
+  std::thread publisher([&] {
+    for (std::uint64_t sequence = 1U; sequence <= 2'000U; sequence += 2U) {
+      const auto valid = commands(1, sequence, 0, 0.1);
+      auto changed_duplicate = valid;
+      changed_duplicate.axes[0].target = 0.2;
+      if (harness.daemon.stage_commands(valid) !=
+              CommandAcceptance::accepted ||
+          harness.daemon.stage_commands(changed_duplicate) !=
+              CommandAcceptance::rejected ||
+          harness.daemon.stage_commands(commands(1, sequence + 1U, 0, 0.3)) !=
+              CommandAcceptance::accepted) {
+        publication_valid.store(false, std::memory_order_release);
+        break;
+      }
+    }
+    publisher_done.store(true, std::memory_order_release);
+  });
+
+  bool observed_rejection{};
+  while (!publisher_done.load(std::memory_order_acquire)) {
+    harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
+    observed_rejection =
+        observed_rejection ||
+        (harness.daemon.feedback(0).flags &
+         kAxisFeedbackSafetyInvalidCommand) != 0U;
+  }
+  publisher.join();
+  harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
+  observed_rejection =
+      observed_rejection ||
+      (harness.daemon.feedback(0).flags &
+       kAxisFeedbackSafetyInvalidCommand) != 0U;
+  for (unsigned cycle = 0; cycle < 3U; ++cycle) {
+    harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
+  }
+
+  EXPECT_TRUE(publication_valid.load(std::memory_order_acquire));
+  EXPECT_TRUE(observed_rejection);
+  EXPECT_EQ(harness.daemon.feedback(0).sequence, 2'000U);
+  EXPECT_EQ(harness.daemon.feedback(0).flags &
+                kAxisFeedbackSafetyInvalidCommand,
+            0U);
 }
 
 TEST(RobotIoDaemonTest, BoundsActualFaultResetEdgesPerPersistentFaultEpisode) {
@@ -777,6 +973,44 @@ TEST(RobotIoDaemonTest, BoundsActualFaultResetEdgesPerPersistentFaultEpisode) {
             CommandAcceptance::accepted);
   harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
   EXPECT_EQ(harness.pdos[0].control_word, 0x0080U);
+}
+
+TEST(RobotIoDaemonTest,
+     DoesNotPoisonFirstFaultResetWithARequestMadeBeforeTheFault) {
+  SafetyOptions options{};
+  options.maximum_fault_resets = 1U;
+  DaemonHarness harness{profile_with_axes(1), options};
+  harness.pdos[0].status_word = 0x0040U;
+  harness.pdos[0].actual_velocity = 100;
+
+  ASSERT_EQ(harness.daemon.stage_commands(
+                commands(1, 1U, 0, 0.0, kAxisCommandFaultReset)),
+            CommandAcceptance::accepted);
+  harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
+  EXPECT_EQ(harness.daemon.axis_request(0), AxisRequest::disable);
+  EXPECT_EQ(harness.pdos[0].control_word, 0x0000U);
+
+  // The held request first reaches the state machine in Fault, so its sole
+  // permitted edge must produce the physical 0x0080 pulse.
+  harness.pdos[0].status_word = 0x0008U;
+  harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
+  EXPECT_EQ(harness.daemon.axis_request(0), AxisRequest::fault_reset);
+  EXPECT_EQ(harness.pdos[0].control_word, 0x0080U);
+
+  ASSERT_EQ(harness.daemon.stage_commands(
+                commands(1, 2U, 0, 0.0,
+                         policy_runtime::kAxisCommandDisable)),
+            CommandAcceptance::accepted);
+  harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
+  ASSERT_EQ(harness.daemon.stage_commands(
+                commands(1, 3U, 0, 0.0, kAxisCommandFaultReset)),
+            CommandAcceptance::accepted);
+  harness.daemon.process_device_cycle(harness.pdos, healthy_domain(1), true);
+  EXPECT_NE(harness.daemon.axis_request(0), AxisRequest::fault_reset);
+  EXPECT_NE(harness.pdos[0].control_word, 0x0080U);
+  EXPECT_NE(harness.daemon.feedback(0).flags &
+                kAxisFeedbackSafetyFaultResetLimit,
+            0U);
 }
 
 TEST(RobotIoDaemonTest, KeepsSafetyGroupPeersStoppedWhileFaultedAxisResets) {
@@ -940,6 +1174,38 @@ TEST(RobotIoDaemonTest, RollsBackMasterRegistrationAfterFailedStart) {
   ASSERT_TRUE(daemon.request_stop().has_value());
   daemon.run();
   EXPECT_TRUE(daemon.health().shutdown_complete);
+}
+
+TEST(RobotIoDaemonTest, RejectsRestartAfterTerminalShutdownWithoutReactivation) {
+  FakeClock clock;
+  FakeRealtimeSystem realtime;
+  auto profile = profile_with_axes(1);
+  profile.axes[0].command_timeout = 10s;
+  profile.axes[0].following_error_limit = 10.0;
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{
+      backend, {EthercatAxisConfiguration{profile.axes[0], {}}}};
+  RobotIoDaemon daemon{clock, realtime};
+  ASSERT_TRUE(daemon.configure(profile).has_value());
+  ASSERT_TRUE(daemon.attach_ethercat(master).has_value());
+  ASSERT_TRUE(daemon.start().has_value());
+  const auto& handles = master.pdo_handles()[0];
+  ASSERT_TRUE(handles.status_word.write(backend->image(), 0x0027U));
+  ASSERT_TRUE(handles.mode_display.write(backend->image(), 8));
+  ASSERT_TRUE(handles.actual_position.write(backend->image(), 0));
+  ASSERT_TRUE(handles.actual_velocity.write(backend->image(), 0));
+  ASSERT_TRUE(handles.actual_torque.write(backend->image(), 0));
+  ASSERT_EQ(backend->activation_count(), 1U);
+
+  std::thread runner([&] { daemon.run(); });
+  while (!realtime.prepare_entered.load(std::memory_order_acquire)) {
+    realtime.prepare_entered.wait(false, std::memory_order_acquire);
+  }
+  ASSERT_TRUE(daemon.request_stop().has_value());
+  runner.join();
+  ASSERT_TRUE(daemon.health().shutdown_complete);
+  EXPECT_FALSE(daemon.start().has_value());
+  EXPECT_EQ(backend->activation_count(), 1U);
 }
 
 TEST(RobotIoDaemonTest, SleepFailureDegradesTimingAndCompletesSafeStop) {

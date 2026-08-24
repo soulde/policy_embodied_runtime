@@ -116,7 +116,12 @@ class RobotIoDaemon {
                                      std::span<Cia402PdoView> pdos,
                                      const DomainHealth& domain,
                                      bool process_data_valid) noexcept;
-  void cycle(const CycleContext& context) noexcept;
+  void cycle_owned(const CycleContext& context) noexcept;
+  CommandAcceptance refresh_commands_owned() noexcept;
+  void process_device_cycle_owned(std::span<Cia402PdoView> pdos,
+                                  const DomainHealth& domain,
+                                  bool process_data_valid) noexcept;
+  bool owns_cycle() const noexcept;
   CommandAcceptance consume_staged_commands() noexcept;
   void stop_transports() noexcept;
   bool health_atomics_are_lock_free() const noexcept;
@@ -138,7 +143,6 @@ class RobotIoDaemon {
 
   struct StagedCommandEvent {
     std::uint64_t publication{};
-    CommandAcceptance acceptance{CommandAcceptance::duplicate};
     Snapshot<AxisCommand> snapshot{};
   };
 
@@ -147,6 +151,8 @@ class RobotIoDaemon {
   std::atomic_flag command_ingress_gate_ = ATOMIC_FLAG_INIT;
   std::uint64_t command_publication_{};
   std::uint64_t consumed_command_publication_{};
+  std::uint64_t acknowledged_rejection_publication_{};
+  std::atomic<std::uint64_t> rejected_command_publication_{};
 
   std::atomic<bool> running_{};
   std::atomic<bool> accepting_commands_{};
@@ -166,7 +172,6 @@ class RobotIoDaemon {
   std::atomic<bool> timing_fault_{};
   std::atomic<int> sleep_error_{};
   std::atomic<std::uint64_t> cycle_owner_token_{};
-  std::atomic<bool> run_active_{};
 };
 
 }  // namespace policy_runtime

@@ -49,3 +49,37 @@ Real-time guarantees still require qualification on the target ARM64/x86-64 PREE
 - Seven timing, fault-reset, SIGTERM, owner-thread, and concurrent-handoff regressions: 350/350 passed across 50 repetitions.
 - TSan-instrumented focused target: built. Runtime remains unavailable in this container (`ThreadSanitizer: unexpected memory mapping`), so no TSan execution result is claimed.
 - `git diff --check`: clean.
+
+## Review Fix Round 2
+
+- Fault reset is never forwarded to the CiA 402 state machine outside the
+  resettable Fault state. A request made before a fault therefore cannot arm
+  the edge latch, and the configured budget is spent only when the axis can
+  emit the `0x0080` control-word pulse.
+- `run()`, `cycle()`, `process_device_cycle()`, and command refresh now share
+  one CAS-acquired RAII cycle-owner token. Competing public entries return
+  without touching the backend, process image, axes, or safety state; the
+  EtherCAT callback runs only on the admitted owner thread.
+- Rejected command publications carry a sticky monotonic publication number.
+  The RT owner acknowledges the rejection before any later valid snapshot. If
+  a racing valid snapshot was consumed first, it is replayed on the following
+  cycle, preserving both the required safe-stop cycle and bounded recovery.
+- Shutdown is one-shot. Once stop or terminal shutdown is observed, `start()`
+  rejects permanently and cannot reactivate the EtherCAT backend.
+
+### Round 2 Verification
+
+- Five initial regression tests reproduced all four findings and passed 0/5
+  before the fixes. A concurrent producer/RT-owner test then exposed and drove
+  the valid-snapshot replay fix.
+- Fresh normal build of all targets: passed.
+- CTest without the 20 sandbox-forbidden socket cases: 118/118 passed.
+- Python without the two socket-dependent ZMQ cases: 26/26 passed.
+- ASan/UBSan daemon suite without the two IPC cases: 31/31 passed with leak
+  detection disabled for the container ptrace restriction.
+- Six fault-reset, admission, sticky-rejection, concurrency, and lifecycle
+  regressions: 300/300 passed across 50 repetitions.
+- TSan-instrumented target: built. Runtime remains unavailable in this
+  container (`ThreadSanitizer: unexpected memory mapping`), so no TSan runtime
+  result is claimed.
+- `git diff --check`: clean.
