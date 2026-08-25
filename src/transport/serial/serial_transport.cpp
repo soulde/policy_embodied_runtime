@@ -15,7 +15,9 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/eventfd.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -25,6 +27,7 @@ namespace {
 constexpr std::size_t kMaximumFrameStorage = 259U;
 constexpr std::size_t kMaximumReadBuffer = 4096U;
 constexpr std::size_t kQueueCapacity = 64U;
+constexpr auto kMaximumIoTimeout = std::chrono::milliseconds{100};
 
 using PortIdentity =
     std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>;
@@ -122,6 +125,26 @@ class SerialTransport::Impl {
     return true;
   }
 
+  void request_stop() noexcept {
+    const int descriptor = wake_fd.load(std::memory_order_acquire);
+    if (descriptor < 0) {
+      return;
+    }
+    const std::uint64_t signal{1U};
+    static_cast<void>(::write(descriptor, &signal, sizeof(signal)));
+  }
+
+  bool stop_requested() noexcept {
+    const int descriptor = wake_fd.load(std::memory_order_acquire);
+    if (descriptor < 0) {
+      return false;
+    }
+    std::uint64_t signal{};
+    const auto result = ::read(descriptor, &signal, sizeof(signal));
+    return result == static_cast<ssize_t>(sizeof(signal)) ||
+           (result < 0 && errno != EAGAIN && errno != EWOULDBLOCK);
+  }
+
   template <class Queue>
   static bool pop(Queue& queue, std::size_t& head, std::size_t& size,
                   Frame& frame) noexcept {
@@ -138,9 +161,6 @@ class SerialTransport::Impl {
     std::size_t offset{};
     const auto deadline = std::chrono::steady_clock::now() + config.write_timeout;
     while (offset < frame.size) {
-      if (std::chrono::steady_clock::now() >= deadline) {
-        return SerialError::timeout;
-      }
       const auto written =
           ::write(fd, frame.data.data() + offset, frame.size - offset);
       if (written > 0) {
@@ -153,14 +173,17 @@ class SerialTransport::Impl {
       if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
         return SerialError::io;
       }
-      struct pollfd descriptor { fd, POLLOUT, 0 };
+      std::array<struct pollfd, 2> descriptors{{
+          {fd, POLLOUT, 0},
+          {wake_fd.load(std::memory_order_acquire), POLLIN, 0},
+      }};
       int ready{};
       for (;;) {
         const int timeout = remaining_timeout_ms(deadline);
         if (timeout == 0) {
           return SerialError::timeout;
         }
-        ready = ::poll(&descriptor, 1, timeout);
+        ready = ::poll(descriptors.data(), static_cast<nfds_t>(descriptors.size()), timeout);
         if (ready >= 0 || errno != EINTR) {
           break;
         }
@@ -169,8 +192,13 @@ class SerialTransport::Impl {
         return SerialError::timeout;
       }
       if (ready < 0 ||
-          (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+          (descriptors[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
         return SerialError::io;
+      }
+      if ((descriptors[1].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) !=
+          0) {
+        static_cast<void>(stop_requested());
+        return SerialError::closed;
       }
     }
     return SerialError::none;
@@ -234,7 +262,10 @@ class SerialTransport::Impl {
         return saw_framing_error ? SerialError::framing
                                  : SerialError::timeout;
       }
-      struct pollfd descriptor { fd, POLLIN, 0 };
+      std::array<struct pollfd, 2> descriptors{{
+          {fd, POLLIN, 0},
+          {wake_fd.load(std::memory_order_acquire), POLLIN, 0},
+      }};
       int ready{};
       for (;;) {
         const auto bounded_wait = nonblocking ? 0 : remaining_timeout_ms(deadline);
@@ -243,7 +274,8 @@ class SerialTransport::Impl {
                                    : SerialError::timeout;
         }
         polled = true;
-        ready = ::poll(&descriptor, 1, bounded_wait);
+        ready = ::poll(descriptors.data(), static_cast<nfds_t>(descriptors.size()),
+                       bounded_wait);
         if (ready >= 0 || errno != EINTR) {
           break;
         }
@@ -255,10 +287,15 @@ class SerialTransport::Impl {
       if (ready < 0) {
         return SerialError::io;
       }
-      if ((descriptor.revents & (POLLERR | POLLNVAL)) != 0) {
+      if ((descriptors[1].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) !=
+          0) {
+        static_cast<void>(stop_requested());
+        return SerialError::closed;
+      }
+      if ((descriptors[0].revents & (POLLERR | POLLNVAL)) != 0) {
         return SerialError::io;
       }
-      if ((descriptor.revents & (POLLIN | POLLHUP)) == 0) {
+      if ((descriptors[0].revents & (POLLIN | POLLHUP)) == 0) {
         continue;
       }
       std::array<std::byte, kMaximumReadBuffer> incoming{};
@@ -293,6 +330,18 @@ class SerialTransport::Impl {
     }
   }
 
+  void resynchronize_after_timeout() noexcept {
+    // ST3215 carries no transaction identifier. After a timed-out request,
+    // quarantine one full response window and discard anything received so a
+    // late same-device frame cannot satisfy the next queued transaction.
+    static_cast<void>(receive_one(config.read_timeout));
+    stream_size = 0U;
+    static_cast<void>(::tcflush(fd, TCIFLUSH));
+    std::scoped_lock queue_lock(queue_mutex);
+    rx_head = 0U;
+    rx_size = 0U;
+  }
+
   void publish_error(SerialError error) noexcept {
     last_error.store(error, std::memory_order_release);
     if (error == SerialError::none) {
@@ -317,6 +366,7 @@ class SerialTransport::Impl {
   std::mutex io_mutex;
   std::mutex queue_mutex;
   int fd{-1};
+  std::atomic<int> wake_fd{-1};
   struct termios original_termios {};
   bool has_original_termios{};
   PortIdentity port_identity{};
@@ -353,7 +403,9 @@ Result<void> SerialTransport::open() {
       impl_->config.maximum_frame_size < 6U ||
       impl_->config.maximum_frame_size > kMaximumFrameStorage ||
       impl_->config.read_timeout.count() < 0 ||
-      impl_->config.write_timeout.count() < 0) {
+      impl_->config.write_timeout.count() < 0 ||
+      impl_->config.read_timeout > kMaximumIoTimeout ||
+      impl_->config.write_timeout > kMaximumIoTimeout) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument, "invalid serial configuration"});
   }
@@ -361,7 +413,17 @@ Result<void> SerialTransport::open() {
   const int descriptor = ::open(impl_->config.path.c_str(),
                                 O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
   if (descriptor < 0) {
+    if (errno == EBUSY) {
+      return Result<void>::failure(
+          {ErrorCode::unavailable, "serial port is already open exclusively"});
+    }
     return Result<void>::failure(system_error("open serial port"));
+  }
+  if (::ioctl(descriptor, TIOCEXCL) != 0) {
+    const auto message = std::string("claim serial port exclusively: ") +
+                         std::error_code(errno, std::generic_category()).message();
+    ::close(descriptor);
+    return Result<void>::failure({ErrorCode::unavailable, message});
   }
   struct stat identity {};
   if (::fstat(descriptor, &identity) != 0) {
@@ -415,8 +477,20 @@ Result<void> SerialTransport::open() {
     ::close(descriptor);
     return Result<void>::failure(error);
   }
+  const int wake_descriptor = ::eventfd(0U, EFD_NONBLOCK | EFD_CLOEXEC);
+  if (wake_descriptor < 0) {
+    const auto error = system_error("create serial stop wakeup");
+    static_cast<void>(::tcsetattr(descriptor, TCSANOW, &original));
+    {
+      std::scoped_lock ports_lock(open_ports_mutex);
+      open_ports.erase(port_identity);
+    }
+    ::close(descriptor);
+    return Result<void>::failure(error);
+  }
 
   impl_->fd = descriptor;
+  impl_->wake_fd.store(wake_descriptor, std::memory_order_release);
   impl_->original_termios = original;
   impl_->has_original_termios = true;
   impl_->port_identity = port_identity;
@@ -441,8 +515,10 @@ void SerialTransport::close() noexcept {
       impl_->fd < 0) {
     return;
   }
+  impl_->request_stop();
   std::scoped_lock io_lock(impl_->io_mutex);
   if (impl_->fd >= 0) {
+    static_cast<void>(::ioctl(impl_->fd, TIOCNXCL));
     if (impl_->has_original_termios) {
       static_cast<void>(
           ::tcsetattr(impl_->fd, TCSANOW, &impl_->original_termios));
@@ -455,10 +531,16 @@ void SerialTransport::close() noexcept {
     open_ports.erase(impl_->port_identity);
     impl_->has_port_identity = false;
   }
+  const int wake_descriptor = impl_->wake_fd.exchange(-1, std::memory_order_acq_rel);
+  if (wake_descriptor >= 0) {
+    static_cast<void>(::close(wake_descriptor));
+  }
   impl_->has_original_termios = false;
   impl_->last_error.store(SerialError::closed, std::memory_order_release);
   impl_->health.store(TransportHealth::failed, std::memory_order_release);
 }
+
+void SerialTransport::request_stop() noexcept { impl_->request_stop(); }
 
 TransportHealth SerialTransport::health() const noexcept {
   return impl_->health.load(std::memory_order_acquire);
@@ -474,6 +556,11 @@ void SerialTransport::cycle(const CycleContext&) noexcept {
     if (!impl_->opened.load(std::memory_order_acquire) || impl_->fd < 0) {
       impl_->publish_error(SerialError::closed);
       return;
+    }
+    if (impl_->last_error.load(std::memory_order_acquire) ==
+        SerialError::timeout) {
+      impl_->resynchronize_after_timeout();
+      impl_->last_error.store(SerialError::none, std::memory_order_release);
     }
     Impl::Frame outgoing;
     bool has_outgoing;
@@ -520,6 +607,8 @@ Result<void> SerialTransport::write(ChannelId channel,
   if (!Impl::push(impl_->tx_queue, impl_->tx_head, impl_->tx_size, frame)) {
     impl_->last_error.store(SerialError::queue_full,
                             std::memory_order_release);
+    impl_->health.store(TransportHealth::degraded,
+                        std::memory_order_release);
     return Result<void>::failure(
         {ErrorCode::unavailable, "serial transmit queue is full"});
   }

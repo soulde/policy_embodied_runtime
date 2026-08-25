@@ -23,15 +23,26 @@ class RobotIoClientAdapter final : public RuntimeRobotIo {
   std::uint32_t axis_count() const noexcept override {
     return client_.axis_count();
   }
+  std::uint32_t servo_count() const noexcept override {
+    return client_.servo_count();
+  }
 
   Result<Snapshot<AxisFeedback>> read_feedback() override {
     return client_.read_feedback();
+  }
+  Result<Snapshot<St3215ServoFeedback>> read_servo_feedback() override {
+    return client_.read_servo_feedback();
   }
 
   Result<void> publish_commands(std::span<const AxisCommand> commands,
                                 std::uint64_t sequence,
                                 std::int64_t timestamp_ns) override {
     return client_.publish_commands(commands, sequence, timestamp_ns);
+  }
+  Result<void> publish_servo_commands(
+      std::span<const St3215ServoCommand> commands, std::uint64_t sequence,
+      std::int64_t timestamp_ns) override {
+    return client_.publish_servo_commands(commands, sequence, timestamp_ns);
   }
 
   void close() noexcept override { static_cast<void>(client_.close()); }
@@ -301,7 +312,8 @@ RuntimeHost::RuntimeHost(profiles::PolicyProfile profile,
       robot_io_(std::move(robot_io)) {}
 
 Result<void> RuntimeHost::open() {
-  if (!robot_profile_.axes.empty() && !robot_io_) {
+  if ((!robot_profile_.axes.empty() || !robot_profile_.st3215_servos.empty()) &&
+      !robot_io_) {
     return Result<void>::failure(
         {ErrorCode::unavailable,
          "robot profile requires a robot I/O daemon connection"});
@@ -310,6 +322,12 @@ Result<void> RuntimeHost::open() {
     return Result<void>::failure(
         {ErrorCode::invalid_argument,
          "robot I/O axis count does not match robot profile"});
+  }
+  if (robot_io_ &&
+      robot_io_->servo_count() != robot_profile_.st3215_servos.size()) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument,
+         "robot I/O servo count does not match robot profile"});
   }
   open_ = true;
   return Result<void>::success();
@@ -375,7 +393,7 @@ Result<rpc::MessageEnvelope> RuntimeHost::handle(
     auto request_observation =
         normalized_observation(request.payload.at("observation"));
     auto sensor_fields = request_observation;
-    if (robot_io_) {
+    if (robot_io_ && !robot_profile_.axes.empty()) {
       auto feedback = robot_io_->read_feedback();
       if (!feedback.has_value()) {
         return Result<rpc::MessageEnvelope>::success(error_envelope(
@@ -392,6 +410,31 @@ Result<rpc::MessageEnvelope> RuntimeHost::handle(
         sensor_fields[robot_profile_.axes[axis].name] =
             feedback_value(robot_profile_.axes[axis],
                            feedback.value().axes[axis]);
+      }
+    }
+    if (robot_io_ && !robot_profile_.st3215_servos.empty()) {
+      auto feedback = robot_io_->read_servo_feedback();
+      if (!feedback.has_value()) {
+        return Result<rpc::MessageEnvelope>::success(error_envelope(
+            request, "runtime_error", feedback.error().message.empty()
+                                          ? "robot servo feedback is unavailable"
+                                          : feedback.error().message));
+      }
+      if (feedback.value().axis_count != robot_profile_.st3215_servos.size()) {
+        return Result<rpc::MessageEnvelope>::success(error_envelope(
+            request, "runtime_error",
+            "robot feedback servo count does not match robot profile"));
+      }
+      for (std::size_t index = 0; index < robot_profile_.st3215_servos.size();
+           ++index) {
+        const auto& profile = robot_profile_.st3215_servos[index];
+        const auto& value = feedback.value().axes[index];
+        sensor_fields[profile.sensor_name] = {
+            {"servo_id", profile.servo_id},
+            {"position_rad", value.position_rad},
+            {"raw_position", value.raw_position},
+            {"status_error", value.status_error},
+        };
       }
     }
 
@@ -477,13 +520,67 @@ Result<rpc::MessageEnvelope> RuntimeHost::handle(
         commands[axis].target = *target;
         commands[axis].flags = kAxisCommandEnable;
       }
-      auto published =
-          robot_io_->publish_commands(commands, sequence, timestamp_ns);
-      if (!published.has_value()) {
-        return Result<rpc::MessageEnvelope>::success(error_envelope(
-            request, "runtime_error", published.error().message.empty()
-                                                  ? "robot command publication failed"
-                                                  : published.error().message));
+      if (!commands.empty()) {
+        auto published =
+            robot_io_->publish_commands(commands, sequence, timestamp_ns);
+        if (!published.has_value()) {
+          return Result<rpc::MessageEnvelope>::success(error_envelope(
+              request, "runtime_error", published.error().message.empty()
+                                                    ? "robot command publication failed"
+                                                    : published.error().message));
+        }
+      }
+      std::vector<St3215ServoCommand> servo_commands(
+          robot_profile_.st3215_servos.size());
+      for (std::size_t index = 0; index < robot_profile_.st3215_servos.size();
+           ++index) {
+        const auto& servo = robot_profile_.st3215_servos[index];
+        std::string action_field = servo.actuator_name;
+        for (const auto& binding : profile_.outputs) {
+          if (binding.robot_data == servo.actuator_name) {
+            action_field = binding.canonical_field;
+            break;
+          }
+        }
+        const auto value = output.find(action_field);
+        std::optional<double> target;
+        if (value != output.end()) {
+          if (value->is_number()) {
+            target = value->get<double>();
+          } else if (value->is_object()) {
+            const auto position = value->find("position_rad");
+            if (position != value->end() && position->is_number()) {
+              target = position->get<double>();
+            } else {
+              const auto nested = value->find("target_position_rad");
+              if (nested != value->end() && nested->is_number()) {
+                target = nested->get<double>();
+              }
+            }
+          }
+        }
+        if (!target.has_value()) {
+          return Result<rpc::MessageEnvelope>::success(error_envelope(
+              request, "runtime_error",
+              "action does not contain a numeric target for robot field: " +
+                  servo.actuator_name));
+        }
+        auto& command = servo_commands[index];
+        command.sequence = sequence;
+        command.timestamp_ns = timestamp_ns;
+        command.target_position_rad = *target;
+        command.enabled = true;
+      }
+      if (!servo_commands.empty()) {
+        auto servo_published = robot_io_->publish_servo_commands(
+            servo_commands, sequence, timestamp_ns);
+        if (!servo_published.has_value()) {
+          return Result<rpc::MessageEnvelope>::success(error_envelope(
+              request, "runtime_error",
+              servo_published.error().message.empty()
+                  ? "robot servo command publication failed"
+                  : servo_published.error().message));
+        }
       }
       command_sequence_ = sequence;
       last_command_timestamp_ns_ = timestamp_ns;

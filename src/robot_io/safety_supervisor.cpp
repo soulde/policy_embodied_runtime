@@ -293,6 +293,10 @@ SafetyEvaluation SafetySupervisor::evaluate(
     if (!commands_valid_) {
       reasons[axis] |= kAxisFeedbackSafetyInvalidCommand;
     }
+    if ((bus.external_stop_axes_mask &
+         (std::uint16_t{1U} << axis)) != 0U) {
+      reasons[axis] |= kAxisFeedbackSafetySerial;
+    }
     if (!bus.link_up) {
       reasons[axis] |= kAxisFeedbackSafetyLink;
     }

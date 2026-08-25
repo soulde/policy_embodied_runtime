@@ -100,7 +100,8 @@ class RecordingFrameTransport final : public policy_runtime::FrameTransport {
       positions[device_id] = static_cast<std::uint16_t>(
           std::to_integer<std::uint8_t>(pending[6]) |
           (std::to_integer<std::uint8_t>(pending[7]) << 8U));
-      response = St3215Protocol::status_packet(device_id, 0U, {});
+      response = St3215Protocol::status_packet(
+          device_id, status_error.load(std::memory_order_acquire), {});
     } else if (instruction == 0x02U) {
       const auto raw = positions[device_id];
       const std::array<std::byte, 2> parameters{
@@ -124,6 +125,7 @@ class RecordingFrameTransport final : public policy_runtime::FrameTransport {
   std::atomic<unsigned> open_calls{};
   std::atomic<unsigned> close_calls{};
   std::atomic<bool> throw_on_write{};
+  std::atomic<std::uint8_t> status_error{};
   std::array<std::uint16_t, 254> positions{};
 
  private:
@@ -249,6 +251,23 @@ TEST(St3215Test, MatchesPythonModuloRoundingAndRadiansConversion) {
                    std::numeric_limits<double>::infinity(), 4095)
                    .has_value());
   EXPECT_FALSE(policy_runtime::position_units_to_radians(1, 0).has_value());
+
+  constexpr double tau = 2.0 * std::numbers::pi;
+  ASSERT_TRUE(policy_runtime::radians_to_position_units(
+                  tau * (0.5 / 4095.0), 4095)
+                  .has_value());
+  EXPECT_EQ(policy_runtime::radians_to_position_units(
+                tau * (0.5 / 4095.0), 4095)
+                .value(),
+            0U);
+  EXPECT_EQ(policy_runtime::radians_to_position_units(
+                tau * (1.5 / 4095.0), 4095)
+                .value(),
+            2U);
+  EXPECT_EQ(policy_runtime::radians_to_position_units(
+                tau * (2.5 / 4095.0), 4095)
+                .value(),
+            2U);
 }
 
 TEST(St3215Test, SharedBusUsesOneNonRealtimeOwnerForAllPhysicalIo) {
@@ -290,6 +309,72 @@ TEST(St3215Test, SharedBusUsesOneNonRealtimeOwnerForAllPhysicalIo) {
     EXPECT_TRUE(St3215Protocol::decode_packet(frame).has_value());
   }
   EXPECT_FALSE(scheduler.executor_id(*transport).has_value());
+}
+
+TEST(St3215Test, RejectsStaleAndFutureCommandsAndStopsResendingExpiredEnable) {
+  const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+  auto transport = std::make_shared<RecordingFrameTransport>();
+  auto servo = std::make_shared<St3215Servo>(St3215ServoConfig{
+      "freshness", 1, 1, 4095, 0, 0, 250ms, 20ms, 5ms});
+  EXPECT_EQ(servo->stage_command(
+                St3215ServoCommand{1, now_ns - 21'000'000, 0.5, true, false}),
+            St3215CommandAcceptance::rejected);
+  EXPECT_EQ(servo->stage_command(
+                St3215ServoCommand{1, now_ns + 6'000'000, 0.5, true, false}),
+            St3215CommandAcceptance::rejected);
+
+  St3215Bus bus{transport, St3215BusOptions{1ms}};
+  policy_runtime::TransportScheduler scheduler;
+  ASSERT_TRUE(bus.add_servo(servo).has_value());
+  ASSERT_TRUE(bus.start(scheduler).has_value());
+  const auto fresh_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+  ASSERT_EQ(servo->stage_command(
+                St3215ServoCommand{2, fresh_ns, 0.5, true, false}),
+            St3215CommandAcceptance::accepted);
+  ASSERT_TRUE(wait_for_feedback(*servo, 2));
+  std::this_thread::sleep_for(40ms);
+  const auto first = transport->written_frames();
+  const auto goals_before = std::count_if(first.begin(), first.end(), [](const auto& frame) {
+    return frame.size() > 4U && std::to_integer<std::uint8_t>(frame[4]) == 0x03U;
+  });
+  std::this_thread::sleep_for(20ms);
+  const auto second = transport->written_frames();
+  const auto goals_after = std::count_if(second.begin(), second.end(), [](const auto& frame) {
+    return frame.size() > 4U && std::to_integer<std::uint8_t>(frame[4]) == 0x03U;
+  });
+  EXPECT_GT(goals_before, 0);
+  EXPECT_EQ(goals_after, goals_before);
+  EXPECT_NE(servo->feedback().flags & policy_runtime::kSt3215FeedbackDisabled,
+            0U);
+  bus.stop(scheduler);
+}
+
+TEST(St3215Test, PublishesDeviceErrorBeforeSuccessShapeValidation) {
+  auto transport = std::make_shared<RecordingFrameTransport>();
+  transport->status_error.store(4U, std::memory_order_release);
+  auto servo = std::make_shared<St3215Servo>(St3215ServoConfig{
+      "device-error", 1, 1, 4095, 0, 0, 250ms});
+  St3215Bus bus{transport, St3215BusOptions{1ms}};
+  policy_runtime::TransportScheduler scheduler;
+  ASSERT_TRUE(bus.add_servo(servo).has_value());
+  ASSERT_TRUE(bus.start(scheduler).has_value());
+  ASSERT_EQ(servo->stage_command(
+                St3215ServoCommand{1, 1, 0.5, true, false}),
+            St3215CommandAcceptance::accepted);
+  const auto deadline = std::chrono::steady_clock::now() + 200ms;
+  while ((servo->feedback().flags & policy_runtime::kSt3215FeedbackDeviceError) ==
+             0U &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  EXPECT_EQ(servo->feedback().status_error, 4U);
+  EXPECT_NE(servo->feedback().flags & policy_runtime::kSt3215FeedbackDeviceError,
+            0U);
+  bus.stop(scheduler);
 }
 
 TEST(St3215Test, RegistryFreezesMultipleServosOntoOneConfiguredPort) {
@@ -342,4 +427,18 @@ TEST(St3215Test, ExecutorContainsTransportExceptionsAndPublishesFailure) {
   EXPECT_NE(servo->feedback().flags & policy_runtime::kSt3215FeedbackStale,
             0U);
   bus.stop(scheduler);
+}
+
+TEST(St3215Test, StopWakesAOneSecondServicePeriodWithoutWaitingForDeadline) {
+  auto transport = std::make_shared<RecordingFrameTransport>();
+  auto servo = std::make_shared<St3215Servo>(St3215ServoConfig{
+      "bounded-stop", 1, 1, 4095, 0, 0, 250ms});
+  St3215Bus bus{transport, St3215BusOptions{1s}};
+  policy_runtime::TransportScheduler scheduler;
+  ASSERT_TRUE(bus.add_servo(servo).has_value());
+  ASSERT_TRUE(bus.start(scheduler).has_value());
+  std::this_thread::sleep_for(5ms);
+  const auto started = std::chrono::steady_clock::now();
+  bus.stop(scheduler);
+  EXPECT_LT(std::chrono::steady_clock::now() - started, 100ms);
 }

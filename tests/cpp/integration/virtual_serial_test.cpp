@@ -1,5 +1,6 @@
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -13,12 +14,18 @@
 #include <poll.h>
 #include <stdlib.h>
 #include <termios.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <gtest/gtest.h>
 
 #include "policy_runtime/protocol/st3215/protocol.hpp"
+#include "policy_runtime/robot/devices/st3215/servo.hpp"
 #include "policy_runtime/robot_io/daemon.hpp"
+#include "policy_runtime/robot_io/ipc_server.hpp"
+#include "policy_runtime/robot_io/transport_scheduler.hpp"
+#include "policy_runtime/runtime/robot_io_client.hpp"
 #include "policy_runtime/transport/serial/serial_transport.hpp"
 
 namespace {
@@ -159,6 +166,132 @@ TEST(VirtualSerialTest, BoundsTimeoutAndRejectsDuplicatePhysicalPortOpen) {
   duplicate.close();
 }
 
+TEST(VirtualSerialTest, RejectsUnboundedIoTimeoutConfiguration) {
+  PtyEndpoint endpoint;
+  auto config = config_for(endpoint);
+  config.read_timeout = 101ms;
+  SerialTransport transport{config};
+  auto opened = transport.open();
+  ASSERT_FALSE(opened.has_value());
+  EXPECT_EQ(opened.error().code, ErrorCode::invalid_argument);
+}
+
+TEST(VirtualSerialTest, ReportsQueueSaturationAsADegradedPreciseError) {
+  PtyEndpoint endpoint;
+  SerialTransport transport{config_for(endpoint)};
+  ASSERT_TRUE(transport.open().has_value());
+  const auto request = St3215Protocol::ping_command(1);
+  for (unsigned index = 0; index < 64U; ++index) {
+    ASSERT_TRUE(transport.write(0, request).has_value());
+  }
+
+  auto saturated = transport.write(0, request);
+  ASSERT_FALSE(saturated.has_value());
+  EXPECT_EQ(saturated.error().code, ErrorCode::unavailable);
+  EXPECT_EQ(saturated.error().message, "serial transmit queue is full");
+  EXPECT_EQ(transport.last_error(), policy_runtime::SerialError::queue_full);
+  EXPECT_EQ(transport.health(), policy_runtime::TransportHealth::degraded);
+  transport.close();
+}
+
+TEST(VirtualSerialTest, StopCancelsAnInFlightSerialReceive) {
+  PtyEndpoint endpoint;
+  auto config = config_for(endpoint);
+  config.read_timeout = 100ms;
+  auto transport = std::make_shared<SerialTransport>(config);
+  auto servo = std::make_shared<policy_runtime::St3215Servo>(
+      policy_runtime::St3215ServoConfig{
+          "cancel", 1, 1, 4095, 0, 0, 250ms});
+  policy_runtime::St3215Bus bus{
+      transport, policy_runtime::St3215BusOptions{1ms}};
+  policy_runtime::TransportScheduler scheduler;
+  ASSERT_TRUE(bus.add_servo(servo).has_value());
+  ASSERT_TRUE(bus.start(scheduler).has_value());
+
+  // The executor has issued its present-position read and is blocked waiting
+  // for a response. Stopping must interrupt that wait rather than inherit the
+  // configured receive deadline.
+  ASSERT_FALSE(endpoint.read_frame(200ms).empty());
+  const auto started = std::chrono::steady_clock::now();
+  bus.stop(scheduler);
+  EXPECT_LT(std::chrono::steady_clock::now() - started, 50ms);
+}
+
+TEST(VirtualSerialTest, ExclusiveClaimRejectsASeparateProcess) {
+  PtyEndpoint endpoint;
+  SerialTransport owner{config_for(endpoint)};
+  ASSERT_TRUE(owner.open().has_value());
+  const auto child = ::fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    // Do not construct another SerialTransport here: after fork, its
+    // process-local duplicate-open registry is copied from the parent and
+    // would make this pass without exercising the kernel TIOCEXCL claim.
+    const int contender = ::open(endpoint.path().c_str(),
+                                 O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+    const int open_error = errno;
+    if (contender >= 0) {
+      ::close(contender);
+    }
+    ::_exit(contender < 0 && open_error == EBUSY ? 0 : 1);
+  }
+  int status{};
+  ASSERT_EQ(::waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 0);
+  owner.close();
+
+  const auto after_close = ::fork();
+  ASSERT_GE(after_close, 0);
+  if (after_close == 0) {
+    const int contender = ::open(endpoint.path().c_str(),
+                                 O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+    if (contender >= 0) {
+      ::close(contender);
+    }
+    ::_exit(contender >= 0 ? 0 : 1);
+  }
+  ASSERT_EQ(::waitpid(after_close, &status, 0), after_close);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 0);
+}
+
+TEST(VirtualSerialTest, QuarantinesDelayedSameIdResponseAfterTimeout) {
+  PtyEndpoint endpoint;
+  auto config = config_for(endpoint);
+  config.read_timeout = 30ms;
+  SerialTransport transport{config};
+  ASSERT_TRUE(transport.open().has_value());
+  const auto request = St3215Protocol::read_present_position_command(1);
+  ASSERT_TRUE(transport.write(0, request).has_value());
+  std::thread first_device([&] {
+    EXPECT_EQ(endpoint.read_frame(200ms), request);
+  });
+  transport.cycle({});
+  first_device.join();
+  EXPECT_EQ(transport.last_error(), policy_runtime::SerialError::timeout);
+
+  ASSERT_TRUE(transport.write(0, request).has_value());
+  const auto late = St3215Protocol::status_packet(
+      1, 0, std::array<std::byte, 2>{std::byte{0x6f}, std::byte{0x00}});
+  const auto current = St3215Protocol::status_packet(
+      1, 0, std::array<std::byte, 2>{std::byte{0xde}, std::byte{0x00}});
+  std::thread second_device([&] {
+    std::this_thread::sleep_for(5ms);
+    endpoint.write_chunks(late);
+    EXPECT_EQ(endpoint.read_frame(200ms), request);
+    endpoint.write_chunks(current);
+  });
+  transport.cycle({});
+  second_device.join();
+
+  std::array<std::byte, 259> response{};
+  auto read = transport.read(0, response);
+  ASSERT_TRUE(read.has_value()) << read.error().message;
+  EXPECT_EQ(Bytes(response.begin(), response.begin() + read.value()), current);
+  transport.close();
+}
+
 TEST(VirtualSerialTest, RestoresTermiosAndSurvivesNoiseBeforeAValidFrame) {
   PtyEndpoint endpoint;
   const int observer = ::open(endpoint.path().c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC);
@@ -249,7 +382,10 @@ TEST(VirtualSerialTest, SerialTimeoutFeedsSafetyWithoutBlockingDaemonCycles) {
             0U);
   EXPECT_NE(serial_feedback.flags & policy_runtime::kSt3215FeedbackStale,
             0U);
-  EXPECT_EQ(daemon.axis_request(0), policy_runtime::AxisRequest::quick_stop);
+  // The serial fault entered the supervisor before evaluation. By the time
+  // this asynchronous timeout is observed the latched stop may already have
+  // confirmed zero velocity and advanced to its terminal disabled phase.
+  EXPECT_EQ(daemon.axis_request(0), policy_runtime::AxisRequest::disable);
   EXPECT_NE(daemon.feedback(0).flags &
                 policy_runtime::kAxisFeedbackSafetySerial,
             0U);
@@ -258,6 +394,82 @@ TEST(VirtualSerialTest, SerialTimeoutFeedsSafetyWithoutBlockingDaemonCycles) {
   EXPECT_EQ(health.serial_fault_count, 1U);
   EXPECT_NE(health.serial_safety_flags, 0U);
   ASSERT_TRUE(daemon.request_stop().has_value());
+}
+
+TEST(VirtualSerialTest, St3215OnlyDaemonRelaysV2IpcCommandsAndFeedback) {
+  PtyEndpoint endpoint;
+  std::array<int, 2> sockets{-1, -1};
+  ASSERT_EQ(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0,
+                       sockets.data()),
+            0);
+  auto server = policy_runtime::RobotIoIpcServer::create(
+      sockets[0], 0U, 1U, 93U);
+  ASSERT_TRUE(server.has_value()) << server.error().message;
+
+  policy_runtime::profiles::RobotProfile profile;
+  profile.st3215_servos.push_back(
+      policy_runtime::profiles::St3215ServoProfile{
+          "servo_position", "servo_target",
+          policy_runtime::profiles::SerialPortConfig{
+              endpoint.path(), 1'000'000U, 64U, 259U, 20ms, 20ms, 1ms},
+          1, 1, 4095, 0, 0, 250ms, "arm"});
+  policy_runtime::RobotIoDaemon daemon;
+  ASSERT_TRUE(daemon.configure(profile).has_value());
+  ASSERT_TRUE(daemon.attach_ipc(std::move(server.value())).has_value());
+  auto client = policy_runtime::RobotIoClient::connect(sockets[1], 93U);
+  ASSERT_TRUE(client.has_value()) << client.error().message;
+  ASSERT_EQ(client.value().axis_count(), 0U);
+  ASSERT_EQ(client.value().servo_count(), 1U);
+  ASSERT_TRUE(daemon.start().has_value());
+
+  std::jthread device([&](std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      const auto request = endpoint.read_frame(20ms);
+      if (request.empty()) {
+        continue;
+      }
+      auto decoded = St3215Protocol::decode_packet(request);
+      if (!decoded.has_value()) {
+        continue;
+      }
+      if (decoded.value().instruction_or_status == 0x03U) {
+        endpoint.write_chunks(St3215Protocol::status_packet(1, 0, {}));
+      } else if (decoded.value().instruction_or_status == 0x02U) {
+        endpoint.write_chunks(St3215Protocol::status_packet(
+            1, 0, std::array<std::byte, 2>{std::byte{0x00}, std::byte{0x08}}));
+      }
+    }
+  });
+
+  const auto timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+  const std::array command{policy_runtime::St3215ServoCommand{
+      7U, timestamp_ns, std::numbers::pi, true, false}};
+  ASSERT_TRUE(client.value().publish_servo_commands(command, 7U, timestamp_ns)
+                  .has_value());
+
+  policy_runtime::St3215ServoFeedback observed{};
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (std::chrono::steady_clock::now() < deadline) {
+    daemon.cycle();
+    auto feedback = client.value().read_servo_feedback();
+    if (feedback.has_value() && feedback.value().axis_count == 1U) {
+      observed = feedback.value().axes[0];
+      if (observed.command_sequence == 7U &&
+          (observed.flags & policy_runtime::kSt3215FeedbackValid) != 0U) {
+        break;
+      }
+    }
+    std::this_thread::sleep_for(1ms);
+  }
+
+  EXPECT_EQ(observed.command_sequence, 7U);
+  EXPECT_EQ(observed.raw_position, 2048U);
+  EXPECT_NE(observed.flags & policy_runtime::kSt3215FeedbackValid, 0U);
+  ASSERT_TRUE(daemon.request_stop().has_value());
+  daemon.run();
+  device.request_stop();
 }
 
 TEST(VirtualSerialTest, SharedBusRecoversFromMalformedFrameAndConcurrentCommands) {

@@ -16,6 +16,17 @@
 
 namespace policy_runtime {
 
+template <class T>
+inline constexpr std::uint32_t kSnapshotMaximumItems = kRobotIoMaximumAxes;
+
+template <>
+inline constexpr std::uint32_t
+    kSnapshotMaximumItems<St3215ServoCommand> = kRobotIoMaximumServos;
+
+template <>
+inline constexpr std::uint32_t
+    kSnapshotMaximumItems<St3215ServoFeedback> = kRobotIoMaximumServos;
+
 namespace detail {
 
 inline constexpr std::size_t kCacheLineSize = 64;
@@ -101,9 +112,9 @@ Result<SnapshotLayout<T>> calculate_layout(std::uint32_t axis_count) {
   static_assert(sizeof(T) % sizeof(std::uint64_t) == 0);
   static_assert(alignof(T) <= alignof(std::uint64_t));
 
-  if (axis_count > kRobotIoMaximumAxes) {
+  if (axis_count > kSnapshotMaximumItems<T>) {
     return Result<SnapshotLayout<T>>::failure(
-        {ErrorCode::invalid_argument, "IPC axis count must be between 0 and 12"});
+        {ErrorCode::invalid_argument, "IPC item count exceeds its fixed bound"});
   }
   std::size_t payload_size{};
   std::size_t unaligned_slot_size{};
@@ -131,7 +142,7 @@ struct Snapshot {
   std::uint64_t sequence{};
   std::int64_t timestamp_ns{};
   std::uint32_t axis_count{};
-  std::array<T, kRobotIoMaximumAxes> axes{};
+  std::array<T, kSnapshotMaximumItems<T>> axes{};
 };
 
 enum class SnapshotMappingAccess : std::uint8_t {
@@ -398,7 +409,8 @@ class SnapshotRegion {
     if (header_->magic != kRobotIoIpcMagic ||
         header_->abi_version != kRobotIoIpcAbiVersion ||
         header_->generation != expected_generation_ || header_->axis_count != axis_count_ ||
-        header_->axis_count > kRobotIoMaximumAxes || header_->axis_stride != sizeof(T) ||
+        header_->axis_count > kSnapshotMaximumItems<T> ||
+        header_->axis_stride != sizeof(T) ||
         header_->region_kind != static_cast<std::uint32_t>(expected_kind_) ||
         header_->header_size != sizeof(IpcHeader) || header_->slot_stride != slot_stride_ ||
         header_->mapping_size != size_ || header_->reserved0 != 0 ||

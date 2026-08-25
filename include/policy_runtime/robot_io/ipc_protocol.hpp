@@ -19,13 +19,17 @@
 namespace policy_runtime {
 
 inline constexpr std::uint32_t kRobotIoIpcAbiVersion = 1;
+inline constexpr std::uint32_t kRobotIoIpcAbiVersion2 = 2;
 inline constexpr std::uint32_t kRobotIoMaximumAxes = 12;
+inline constexpr std::uint32_t kRobotIoMaximumServos = 32;
 inline constexpr std::array<char, 8> kRobotIoIpcMagic{'R', 'O', 'B', 'O', 'T', 'I', 'O', '1'};
 inline constexpr std::array<char, 8> kRobotIoSetupMagic{'R', 'I', 'O', 'F', 'D', '0', '0', '1'};
 
 enum class IpcRegionKind : std::uint32_t {
   command = 1,
   feedback = 2,
+  servo_command = 3,
+  servo_feedback = 4,
 };
 
 struct AxisCommand {
@@ -47,6 +51,28 @@ struct AxisFeedback {
   std::uint32_t mode_display{};
   std::uint32_t reserved0{};
   std::uint64_t reserved1{};
+};
+
+struct St3215ServoCommand {
+  std::uint64_t sequence{};
+  std::int64_t timestamp_ns{};
+  double target_position_rad{};
+  bool enabled{};
+  bool emergency_stop{};
+  std::array<std::byte, 6> reserved{};
+};
+
+struct St3215ServoFeedback {
+  std::uint64_t feedback_sequence{};
+  std::uint64_t command_sequence{};
+  std::int64_t timestamp_ns{};
+  double position_rad{};
+  std::uint32_t raw_position{};
+  std::uint32_t flags{1U << 1U};
+  std::uint32_t transport_health{};
+  std::uint32_t status_error{};
+  std::uint64_t timeout_count{};
+  std::uint64_t io_error_count{};
 };
 
 struct BusHealth {
@@ -85,15 +111,37 @@ struct IpcSetupMessage {
   std::array<std::uint64_t, 2> reserved{};
 };
 
+struct IpcMappingDescription {
+  std::uint32_t region_kind{};
+  std::uint32_t item_count{};
+  std::uint32_t item_stride{};
+  std::uint32_t reserved{};
+  std::uint64_t mapping_size{};
+};
+
+struct IpcSetupMessageV2 {
+  std::array<char, 8> magic{'R', 'I', 'O', 'F', 'D', '0', '0', '2'};
+  std::uint32_t abi_version{kRobotIoIpcAbiVersion2};
+  std::uint32_t generation{};
+  std::uint32_t descriptor_count{4};
+  std::uint32_t reserved0{};
+  std::array<IpcMappingDescription, 4> mappings{};
+  std::uint64_t reserved1{};
+};
+
 static_assert(std::endian::native == std::endian::little,
               "Robot I/O IPC ABI requires little-endian Linux");
 static_assert(sizeof(void*) == 8, "Robot I/O IPC ABI requires a 64-bit process");
 static_assert(sizeof(AxisCommand) == 32);
 static_assert(sizeof(AxisFeedback) == 64);
+static_assert(sizeof(St3215ServoCommand) == 32);
+static_assert(sizeof(St3215ServoFeedback) == 64);
 static_assert(sizeof(BusHealth) == 32);
 static_assert(sizeof(IpcHeader) == 64);
 static_assert(alignof(IpcHeader) == 64);
 static_assert(sizeof(IpcSetupMessage) == 64);
+static_assert(sizeof(IpcMappingDescription) == 24);
+static_assert(sizeof(IpcSetupMessageV2) == 128);
 static_assert(offsetof(IpcHeader, magic) == 0);
 static_assert(offsetof(IpcHeader, abi_version) == 8);
 static_assert(offsetof(IpcHeader, generation) == 12);
@@ -112,11 +160,15 @@ static_assert(offsetof(AxisFeedback, position) == 16);
 static_assert(offsetof(AxisFeedback, status_word) == 40);
 static_assert(std::is_trivially_copyable_v<AxisCommand>);
 static_assert(std::is_trivially_copyable_v<AxisFeedback>);
+static_assert(std::is_trivially_copyable_v<St3215ServoCommand>);
+static_assert(std::is_trivially_copyable_v<St3215ServoFeedback>);
 static_assert(std::is_trivially_copyable_v<BusHealth>);
 static_assert(std::is_trivially_copyable_v<IpcHeader>);
 static_assert(std::is_trivially_copyable_v<IpcSetupMessage>);
 static_assert(std::is_standard_layout_v<AxisCommand>);
 static_assert(std::is_standard_layout_v<AxisFeedback>);
+static_assert(std::is_standard_layout_v<St3215ServoCommand>);
+static_assert(std::is_standard_layout_v<St3215ServoFeedback>);
 static_assert(std::is_standard_layout_v<BusHealth>);
 static_assert(std::is_standard_layout_v<IpcHeader>);
 
@@ -136,8 +188,7 @@ inline Result<void> validate_header_fields(const IpcHeader& header,
   if (header.generation != expected_generation) {
     return Result<void>::failure({ErrorCode::unavailable, "stale daemon generation"});
   }
-  if (header.axis_count > kRobotIoMaximumAxes ||
-      header.axis_count != expected_axis_count) {
+  if (header.axis_count != expected_axis_count) {
     return Result<void>::failure({ErrorCode::protocol, "invalid IPC axis count"});
   }
   if (header.axis_stride != expected_axis_stride) {

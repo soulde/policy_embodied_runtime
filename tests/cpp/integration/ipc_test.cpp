@@ -38,6 +38,8 @@ using policy_runtime::SnapshotMappingAccess;
 using policy_runtime::SnapshotReader;
 using policy_runtime::SnapshotRegion;
 using policy_runtime::SnapshotWriter;
+using policy_runtime::St3215ServoCommand;
+using policy_runtime::St3215ServoFeedback;
 
 constexpr std::uint32_t kGeneration = 73;
 
@@ -416,6 +418,51 @@ TEST(IpcTest, MappingSizeAcceptsFrozenAxisRangeOnly) {
       std::numeric_limits<std::uint32_t>::max());
   ASSERT_FALSE(absurd.has_value());
   EXPECT_EQ(absurd.error().code, ErrorCode::invalid_argument);
+}
+
+TEST(IpcTest, ServoMappingsUseTheirIndependentFrozenBound) {
+  EXPECT_TRUE(SnapshotRegion<St3215ServoCommand>::mapping_size(0).has_value());
+  EXPECT_TRUE(SnapshotRegion<St3215ServoCommand>::mapping_size(32).has_value());
+  EXPECT_TRUE(SnapshotRegion<St3215ServoFeedback>::mapping_size(32).has_value());
+  EXPECT_FALSE(SnapshotRegion<St3215ServoCommand>::mapping_size(33).has_value());
+  EXPECT_FALSE(SnapshotRegion<St3215ServoFeedback>::mapping_size(33).has_value());
+}
+
+TEST(IpcTest, VersionTwoTransfersSelfDescribingServoMappingsBothDirections) {
+  auto sockets = make_socket_pair();
+  auto server_result = RobotIoIpcServer::create(sockets[0], 0U, 2U, kGeneration);
+  ASSERT_TRUE(server_result.has_value()) << server_result.error().message;
+  auto server = std::move(server_result.value());
+  ASSERT_TRUE(server.send_setup().has_value());
+
+  auto client_result = RobotIoClient::connect(sockets[1], kGeneration);
+  ASSERT_TRUE(client_result.has_value()) << client_result.error().message;
+  auto client = std::move(client_result.value());
+  EXPECT_EQ(client.axis_count(), 0U);
+  EXPECT_EQ(client.servo_count(), 2U);
+
+  std::array<St3215ServoCommand, 2> commands{};
+  commands[0] = St3215ServoCommand{4U, 400, 1.25, true, false};
+  commands[1] = St3215ServoCommand{4U, 400, -0.5, true, false};
+  ASSERT_TRUE(client.publish_servo_commands(commands, 4U, 400).has_value());
+  auto daemon_commands = server.read_servo_commands();
+  ASSERT_TRUE(daemon_commands.has_value());
+  EXPECT_EQ(daemon_commands.value().axis_count, 2U);
+  EXPECT_DOUBLE_EQ(daemon_commands.value().axes[1].target_position_rad, -0.5);
+
+  std::array<St3215ServoFeedback, 2> feedback_values{};
+  feedback_values[0].feedback_sequence = 7U;
+  feedback_values[0].command_sequence = 4U;
+  feedback_values[0].timestamp_ns = 700;
+  feedback_values[0].position_rad = 1.5;
+  feedback_values[0].flags = 1U;
+  feedback_values[1] = feedback_values[0];
+  feedback_values[1].position_rad = -1.5;
+  ASSERT_TRUE(server.publish_servo_feedback(feedback_values, 7U, 700).has_value());
+  auto host_feedback = client.read_servo_feedback();
+  ASSERT_TRUE(host_feedback.has_value());
+  EXPECT_EQ(host_feedback.value().axis_count, 2U);
+  EXPECT_DOUBLE_EQ(host_feedback.value().axes[0].position_rad, 1.5);
 }
 
 TEST(IpcTest, TransfersSealedCloexecMemfdsAndSnapshotsBothDirections) {

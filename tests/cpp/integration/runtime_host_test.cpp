@@ -55,6 +55,7 @@ policy_runtime::RuntimeHost open_host(std::string_view profile) {
 class FakeRobotIoChannel final : public policy_runtime::RuntimeRobotIo {
  public:
   std::uint32_t axis_count() const noexcept override { return configured_axis_count; }
+  std::uint32_t servo_count() const noexcept override { return configured_servo_count; }
 
   policy_runtime::Result<policy_runtime::Snapshot<policy_runtime::AxisFeedback>>
   read_feedback() override {
@@ -66,6 +67,11 @@ class FakeRobotIoChannel final : public policy_runtime::RuntimeRobotIo {
     return policy_runtime::Result<
         policy_runtime::Snapshot<policy_runtime::AxisFeedback>>::success(
         feedback);
+  }
+
+  policy_runtime::Result<policy_runtime::Snapshot<policy_runtime::St3215ServoFeedback>>
+  read_servo_feedback() override {
+    return policy_runtime::Result<policy_runtime::Snapshot<policy_runtime::St3215ServoFeedback>>::success(servo_feedback);
   }
 
   policy_runtime::Result<void> publish_commands(
@@ -81,11 +87,23 @@ class FakeRobotIoChannel final : public policy_runtime::RuntimeRobotIo {
     return policy_runtime::Result<void>::success();
   }
 
+  policy_runtime::Result<void> publish_servo_commands(
+      std::span<const policy_runtime::St3215ServoCommand> commands,
+      std::uint64_t sequence, std::int64_t timestamp_ns) override {
+    published_servos.assign(commands.begin(), commands.end());
+    published_sequence = sequence;
+    published_timestamp_ns = timestamp_ns;
+    return policy_runtime::Result<void>::success();
+  }
+
   void close() noexcept override { closed = true; }
 
   policy_runtime::Snapshot<policy_runtime::AxisFeedback> feedback{};
   std::uint32_t configured_axis_count{2};
+  std::uint32_t configured_servo_count{};
+  policy_runtime::Snapshot<policy_runtime::St3215ServoFeedback> servo_feedback{};
   std::vector<policy_runtime::AxisCommand> published;
+  std::vector<policy_runtime::St3215ServoCommand> published_servos;
   std::uint64_t published_sequence{};
   std::int64_t published_timestamp_ns{};
   bool fail_feedback{};
@@ -426,6 +444,35 @@ TEST(RuntimeHostTest, BindsDaemonFeedbackAndPublishesCanonicalAxisCommands) {
 
   host.value().close();
   EXPECT_TRUE(channel_view->closed);
+}
+
+TEST(RuntimeHostTest, BindsAndPublishesSt3215OnlyProfileInFrozenProfileOrder) {
+  auto channel = std::make_unique<FakeRobotIoChannel>();
+  auto* view = channel.get();
+  channel->configured_axis_count = 0U;
+  channel->configured_servo_count = 1U;
+  channel->servo_feedback.axis_count = 1U;
+  channel->servo_feedback.sequence = 9U;
+  channel->servo_feedback.timestamp_ns = 123U;
+  channel->servo_feedback.axes[0].position_rad = 1.25;
+  channel->servo_feedback.axes[0].raw_position = 815U;
+  channel->servo_feedback.axes[0].status_error = 0U;
+  auto host = policy_runtime::RuntimeHost::from_profiles(
+      source_path("tests/golden/st3215_only_policy_profile.json"),
+      source_path("tests/golden/st3215_only_robot_profile.json"),
+      std::move(channel));
+  ASSERT_TRUE(host.has_value()) << host.error().message;
+  ASSERT_TRUE(host.value().open().has_value());
+
+  auto response = host.value().handle(request(
+      "observation_request", {{"observation", nlohmann::json::object()}}));
+  ASSERT_TRUE(response.has_value()) << response.error().message;
+  EXPECT_EQ(response.value().type, "action_response");
+  ASSERT_EQ(view->published_servos.size(), 1U);
+  EXPECT_EQ(view->published_servos[0].sequence, 1U);
+  EXPECT_EQ(view->published_servos[0].target_position_rad, 1.25);
+  EXPECT_TRUE(view->published_servos[0].enabled);
+  EXPECT_EQ(view->published.size(), 0U);
 }
 
 TEST(RuntimeHostCliTest, PreservesCurrentFlagsDefaultsAndEndpointResolution) {

@@ -17,6 +17,11 @@ class FrameTransport : public virtual Transport {
 
   // Returns bytes already received by cycle(); this call does not perform physical I/O.
   virtual Result<std::size_t> read(ChannelId channel, std::span<std::byte> buffer) = 0;
+
+  // Interrupt a blocking cycle so an owning executor can stop promptly. Most
+  // transports are cycle-bounded already; transports with blocking I/O may
+  // override this with a non-blocking wakeup.
+  virtual void request_stop() noexcept {}
 };
 
 }  // namespace policy_runtime

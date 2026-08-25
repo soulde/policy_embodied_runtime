@@ -93,6 +93,7 @@ struct AncillaryStorage {
 static_assert(alignof(AncillaryStorage<2>) >= alignof(cmsghdr));
 static_assert(alignof(AncillaryStorage<2>) >= alignof(int));
 static_assert(sizeof(AncillaryStorage<2>) == CMSG_SPACE(2 * sizeof(int)));
+static_assert(sizeof(AncillaryStorage<4>) == CMSG_SPACE(4 * sizeof(int)));
 
 Result<void> prepare_socket(int socket_fd) {
   if (socket_fd < 0) {
@@ -196,6 +197,60 @@ Result<void> validate_setup(const IpcSetupMessage& setup,
   return Result<void>::success();
 }
 
+Result<void> validate_setup_v2(const IpcSetupMessageV2& setup,
+                               std::uint32_t expected_generation) {
+  constexpr std::array<char, 8> kMagic{'R', 'I', 'O', 'F', 'D', '0', '0', '2'};
+  if (setup.magic != kMagic || setup.abi_version != kRobotIoIpcAbiVersion2) {
+    return Result<void>::failure({ErrorCode::protocol, "invalid IPC v2 setup version"});
+  }
+  if (setup.generation != expected_generation) {
+    return Result<void>::failure({ErrorCode::unavailable, "stale daemon generation"});
+  }
+  if (setup.descriptor_count != 4U || setup.reserved0 != 0U ||
+      setup.reserved1 != 0U) {
+    return Result<void>::failure({ErrorCode::protocol, "invalid IPC v2 setup header"});
+  }
+  const std::array<std::uint32_t, 4> kinds{
+      static_cast<std::uint32_t>(IpcRegionKind::command),
+      static_cast<std::uint32_t>(IpcRegionKind::feedback),
+      static_cast<std::uint32_t>(IpcRegionKind::servo_command),
+      static_cast<std::uint32_t>(IpcRegionKind::servo_feedback)};
+  const std::array<std::uint32_t, 4> strides{
+      sizeof(AxisCommand), sizeof(AxisFeedback), sizeof(St3215ServoCommand),
+      sizeof(St3215ServoFeedback)};
+  if (setup.mappings[0].item_count > kRobotIoMaximumAxes ||
+      setup.mappings[1].item_count != setup.mappings[0].item_count ||
+      setup.mappings[2].item_count == 0U ||
+      setup.mappings[2].item_count > kRobotIoMaximumServos ||
+      setup.mappings[3].item_count != setup.mappings[2].item_count) {
+    return Result<void>::failure({ErrorCode::protocol, "invalid IPC v2 topology"});
+  }
+  for (std::size_t index = 0; index < setup.mappings.size(); ++index) {
+    const auto& mapping = setup.mappings[index];
+    if (mapping.region_kind != kinds[index] ||
+        mapping.item_stride != strides[index] || mapping.reserved != 0U) {
+      return Result<void>::failure({ErrorCode::protocol, "invalid IPC v2 mapping role"});
+    }
+  }
+  auto axis_command = SnapshotRegion<AxisCommand>::mapping_size(
+      setup.mappings[0].item_count);
+  auto axis_feedback = SnapshotRegion<AxisFeedback>::mapping_size(
+      setup.mappings[1].item_count);
+  auto servo_command = SnapshotRegion<St3215ServoCommand>::mapping_size(
+      setup.mappings[2].item_count);
+  auto servo_feedback = SnapshotRegion<St3215ServoFeedback>::mapping_size(
+      setup.mappings[3].item_count);
+  if (!axis_command.has_value() || !axis_feedback.has_value() ||
+      !servo_command.has_value() || !servo_feedback.has_value() ||
+      setup.mappings[0].mapping_size != axis_command.value() ||
+      setup.mappings[1].mapping_size != axis_feedback.value() ||
+      setup.mappings[2].mapping_size != servo_command.value() ||
+      setup.mappings[3].mapping_size != servo_feedback.value()) {
+    return Result<void>::failure({ErrorCode::protocol, "invalid IPC v2 mapping size"});
+  }
+  return Result<void>::success();
+}
+
 Result<void> validate_received_fd(int fd, std::uint64_t expected_size,
                                   SnapshotMappingAccess expected_access) {
   if (expected_size > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
@@ -239,9 +294,10 @@ Result<RobotIoClient> RobotIoClient::connect(int connected_socket,
     return Result<RobotIoClient>::failure(socket_result.error());
   }
 
-  IpcSetupMessage setup{};
-  AncillaryStorage<2> control{};
-  iovec vector{&setup, sizeof(setup)};
+  alignas(IpcSetupMessageV2)
+      std::array<std::byte, sizeof(IpcSetupMessageV2)> setup_storage{};
+  AncillaryStorage<4> control{};
+  iovec vector{setup_storage.data(), setup_storage.size()};
   msghdr message{};
   message.msg_iov = &vector;
   message.msg_iovlen = 1;
@@ -262,7 +318,7 @@ Result<RobotIoClient> RobotIoClient::connect(int connected_socket,
     return Result<RobotIoClient>::failure(system_error(code, "recvmsg(SCM_RIGHTS)"));
   }
 
-  std::array<ScopedFd, 2> descriptors{};
+  std::array<ScopedFd, 4> descriptors{};
   std::size_t descriptor_count = 0;
   std::size_t rights_messages = 0;
   bool ancillary_invalid = false;
@@ -280,7 +336,8 @@ Result<RobotIoClient> RobotIoClient::connect(int connected_socket,
       continue;
     }
     const auto item_descriptor_count = payload_size / sizeof(int);
-    if (item_descriptor_count != 2 || rights_messages != 1) {
+    if ((item_descriptor_count != 2 && item_descriptor_count != 4) ||
+        rights_messages != 1) {
       ancillary_invalid = true;
     }
     const auto* received_descriptors =
@@ -293,52 +350,94 @@ Result<RobotIoClient> RobotIoClient::connect(int connected_socket,
       }
     }
   }
-  if (static_cast<std::size_t>(received) != sizeof(setup) ||
+  const auto received_size = static_cast<std::size_t>(received);
+  const bool is_v1 = received_size == sizeof(IpcSetupMessage);
+  const bool is_v2 = received_size == sizeof(IpcSetupMessageV2);
+  const std::size_t expected_descriptors = is_v2 ? 4U : 2U;
+  if ((!is_v1 && !is_v2) ||
       (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0 ||
-      descriptor_count != 2 || rights_messages != 1 || ancillary_invalid) {
+      descriptor_count != expected_descriptors || rights_messages != 1 ||
+      ancillary_invalid) {
     return Result<RobotIoClient>::failure(
         {ErrorCode::protocol, "malformed IPC setup packet or ancillary data"});
   }
 
-  const auto setup_result = validate_setup(setup, expected_generation);
+  IpcSetupMessage setup{};
+  IpcSetupMessageV2 setup_v2{};
+  if (is_v1) {
+    std::memcpy(&setup, setup_storage.data(), sizeof(setup));
+  } else {
+    std::memcpy(&setup_v2, setup_storage.data(), sizeof(setup_v2));
+  }
+  const auto setup_result = is_v1
+                                ? validate_setup(setup, expected_generation)
+                                : validate_setup_v2(setup_v2,
+                                                    expected_generation);
   if (!setup_result.has_value()) {
     return Result<RobotIoClient>::failure(setup_result.error());
   }
+  const auto axis_count =
+      is_v1 ? setup.axis_count : setup_v2.mappings[0].item_count;
+  const auto servo_count = is_v1 ? 0U : setup_v2.mappings[2].item_count;
+  const auto command_mapping_size = is_v1
+                                        ? setup.command_mapping_size
+                                        : setup_v2.mappings[0].mapping_size;
+  const auto feedback_mapping_size = is_v1
+                                         ? setup.feedback_mapping_size
+                                         : setup_v2.mappings[1].mapping_size;
   const auto command_fd_result =
-      validate_received_fd(descriptors[0].get(), setup.command_mapping_size,
+      validate_received_fd(descriptors[0].get(), command_mapping_size,
                            SnapshotMappingAccess::read_write);
   if (!command_fd_result.has_value()) {
     return Result<RobotIoClient>::failure(command_fd_result.error());
   }
   const auto feedback_fd_result =
-      validate_received_fd(descriptors[1].get(), setup.feedback_mapping_size,
+      validate_received_fd(descriptors[1].get(), feedback_mapping_size,
                            SnapshotMappingAccess::read_only);
   if (!feedback_fd_result.has_value()) {
     return Result<RobotIoClient>::failure(feedback_fd_result.error());
   }
+  const auto servo_command_mapping_size =
+      is_v2 ? setup_v2.mappings[2].mapping_size : 0U;
+  const auto servo_feedback_mapping_size =
+      is_v2 ? setup_v2.mappings[3].mapping_size : 0U;
+  if (is_v2) {
+    const auto servo_command_fd_result = validate_received_fd(
+        descriptors[2].get(), servo_command_mapping_size,
+        SnapshotMappingAccess::read_write);
+    if (!servo_command_fd_result.has_value()) {
+      return Result<RobotIoClient>::failure(servo_command_fd_result.error());
+    }
+    const auto servo_feedback_fd_result = validate_received_fd(
+        descriptors[3].get(), servo_feedback_mapping_size,
+        SnapshotMappingAccess::read_only);
+    if (!servo_feedback_fd_result.has_value()) {
+      return Result<RobotIoClient>::failure(servo_feedback_fd_result.error());
+    }
+  }
 
-  void* command_address = mmap(nullptr, setup.command_mapping_size,
+  void* command_address = mmap(nullptr, command_mapping_size,
                                PROT_READ | PROT_WRITE, MAP_SHARED,
                                descriptors[0].get(), 0);
   if (command_address == MAP_FAILED) {
     return Result<RobotIoClient>::failure(system_error(ErrorCode::io, "mmap(command)"));
   }
-  ScopedMapping command_mapping(command_address, setup.command_mapping_size);
-  void* feedback_address = mmap(nullptr, setup.feedback_mapping_size, PROT_READ,
+  ScopedMapping command_mapping(command_address, command_mapping_size);
+  void* feedback_address = mmap(nullptr, feedback_mapping_size, PROT_READ,
                                 MAP_SHARED, descriptors[1].get(), 0);
   if (feedback_address == MAP_FAILED) {
     return Result<RobotIoClient>::failure(system_error(ErrorCode::io, "mmap(feedback)"));
   }
-  ScopedMapping feedback_mapping(feedback_address, setup.feedback_mapping_size);
+  ScopedMapping feedback_mapping(feedback_address, feedback_mapping_size);
 
   auto command_region = SnapshotRegion<AxisCommand>::attach(
-      command_address, setup.command_mapping_size, setup.generation, setup.axis_count,
+      command_address, command_mapping_size, expected_generation, axis_count,
       IpcRegionKind::command, SnapshotMappingAccess::read_write);
   if (!command_region.has_value()) {
     return Result<RobotIoClient>::failure(command_region.error());
   }
   auto feedback_region = SnapshotRegion<AxisFeedback>::attach(
-      feedback_address, setup.feedback_mapping_size, setup.generation, setup.axis_count,
+      feedback_address, feedback_mapping_size, expected_generation, axis_count,
       IpcRegionKind::feedback, SnapshotMappingAccess::read_only);
   if (!feedback_region.has_value()) {
     return Result<RobotIoClient>::failure(feedback_region.error());
@@ -353,12 +452,68 @@ Result<RobotIoClient> RobotIoClient::connect(int connected_socket,
     return Result<RobotIoClient>::failure(feedback_reader.error());
   }
 
+  ScopedMapping servo_command_mapping;
+  ScopedMapping servo_feedback_mapping;
+  std::optional<SnapshotWriter<St3215ServoCommand>> servo_command_writer;
+  std::optional<SnapshotReader<St3215ServoFeedback>> servo_feedback_reader;
+  if (is_v2) {
+    void* servo_command_address =
+        mmap(nullptr, servo_command_mapping_size, PROT_READ | PROT_WRITE,
+             MAP_SHARED, descriptors[2].get(), 0);
+    if (servo_command_address == MAP_FAILED) {
+      return Result<RobotIoClient>::failure(
+          system_error(ErrorCode::io, "mmap(servo command)"));
+    }
+    servo_command_mapping =
+        ScopedMapping(servo_command_address, servo_command_mapping_size);
+    void* servo_feedback_address =
+        mmap(nullptr, servo_feedback_mapping_size, PROT_READ, MAP_SHARED,
+             descriptors[3].get(), 0);
+    if (servo_feedback_address == MAP_FAILED) {
+      return Result<RobotIoClient>::failure(
+          system_error(ErrorCode::io, "mmap(servo feedback)"));
+    }
+    servo_feedback_mapping =
+        ScopedMapping(servo_feedback_address, servo_feedback_mapping_size);
+    auto servo_command_region = SnapshotRegion<St3215ServoCommand>::attach(
+        servo_command_address, servo_command_mapping_size,
+        expected_generation, servo_count, IpcRegionKind::servo_command,
+        SnapshotMappingAccess::read_write);
+    if (!servo_command_region.has_value()) {
+      return Result<RobotIoClient>::failure(servo_command_region.error());
+    }
+    auto servo_feedback_region = SnapshotRegion<St3215ServoFeedback>::attach(
+        servo_feedback_address, servo_feedback_mapping_size,
+        expected_generation, servo_count, IpcRegionKind::servo_feedback,
+        SnapshotMappingAccess::read_only);
+    if (!servo_feedback_region.has_value()) {
+      return Result<RobotIoClient>::failure(servo_feedback_region.error());
+    }
+    auto writer = servo_command_region.value().writer();
+    auto reader = servo_feedback_region.value().reader();
+    if (!writer.has_value()) {
+      return Result<RobotIoClient>::failure(writer.error());
+    }
+    if (!reader.has_value()) {
+      return Result<RobotIoClient>::failure(reader.error());
+    }
+    servo_command_writer.emplace(std::move(writer.value()));
+    servo_feedback_reader.emplace(std::move(reader.value()));
+  }
+
   RobotIoClient client(
       socket.release(), descriptors[0].release(), descriptors[1].release(),
-      command_mapping.release(), setup.command_mapping_size,
-      feedback_mapping.release(), setup.feedback_mapping_size, setup.axis_count,
-      setup.generation, std::move(command_writer.value()),
-      std::move(feedback_reader.value()));
+      command_mapping.release(), command_mapping_size,
+      feedback_mapping.release(), feedback_mapping_size,
+      is_v2 ? descriptors[2].release() : -1,
+      is_v2 ? descriptors[3].release() : -1,
+      is_v2 ? servo_command_mapping.release() : nullptr,
+      servo_command_mapping_size,
+      is_v2 ? servo_feedback_mapping.release() : nullptr,
+      servo_feedback_mapping_size, axis_count, expected_generation,
+      std::move(command_writer.value()), std::move(feedback_reader.value()),
+      servo_count, std::move(servo_command_writer),
+      std::move(servo_feedback_reader));
   return Result<RobotIoClient>::success(std::move(client));
 }
 
@@ -366,35 +521,72 @@ RobotIoClient::RobotIoClient(int socket_fd, int command_writer_fd,
                              int feedback_reader_fd, void* command_mapping,
                              std::size_t command_mapping_size, void* feedback_mapping,
                              std::size_t feedback_mapping_size,
+                             int servo_command_writer_fd,
+                             int servo_feedback_reader_fd,
+                             void* servo_command_mapping,
+                             std::size_t servo_command_mapping_size,
+                             void* servo_feedback_mapping,
+                             std::size_t servo_feedback_mapping_size,
                              std::uint32_t axis_count, std::uint32_t generation,
                              SnapshotWriter<AxisCommand> command_writer,
-                             SnapshotReader<AxisFeedback> feedback_reader) noexcept
+                             SnapshotReader<AxisFeedback> feedback_reader,
+                             std::uint32_t servo_count,
+                             std::optional<SnapshotWriter<St3215ServoCommand>>
+                                 servo_command_writer,
+                             std::optional<SnapshotReader<St3215ServoFeedback>>
+                                 servo_feedback_reader) noexcept
     : socket_fd_(socket_fd),
       command_writer_fd_(command_writer_fd),
       feedback_reader_fd_(feedback_reader_fd),
+      servo_command_writer_fd_(servo_command_writer_fd),
+      servo_feedback_reader_fd_(servo_feedback_reader_fd),
       command_mapping_(command_mapping),
       command_mapping_size_(command_mapping_size),
       feedback_mapping_(feedback_mapping),
       feedback_mapping_size_(feedback_mapping_size),
+      servo_command_mapping_(servo_command_mapping),
+      servo_command_mapping_size_(servo_command_mapping_size),
+      servo_feedback_mapping_(servo_feedback_mapping),
+      servo_feedback_mapping_size_(servo_feedback_mapping_size),
       axis_count_(axis_count),
+      servo_count_(servo_count),
       generation_(generation),
       command_writer_(std::move(command_writer)),
-      feedback_reader_(std::move(feedback_reader)) {}
+      feedback_reader_(std::move(feedback_reader)),
+      servo_command_writer_(std::move(servo_command_writer)),
+      servo_feedback_reader_(std::move(servo_feedback_reader)) {}
 
 RobotIoClient::RobotIoClient(RobotIoClient&& other) noexcept
     : socket_fd_(std::exchange(other.socket_fd_, -1)),
       command_writer_fd_(std::exchange(other.command_writer_fd_, -1)),
       feedback_reader_fd_(std::exchange(other.feedback_reader_fd_, -1)),
+      servo_command_writer_fd_(
+          std::exchange(other.servo_command_writer_fd_, -1)),
+      servo_feedback_reader_fd_(
+          std::exchange(other.servo_feedback_reader_fd_, -1)),
       command_mapping_(std::exchange(other.command_mapping_, nullptr)),
       command_mapping_size_(std::exchange(other.command_mapping_size_, 0)),
       feedback_mapping_(std::exchange(other.feedback_mapping_, nullptr)),
       feedback_mapping_size_(std::exchange(other.feedback_mapping_size_, 0)),
+      servo_command_mapping_(
+          std::exchange(other.servo_command_mapping_, nullptr)),
+      servo_command_mapping_size_(
+          std::exchange(other.servo_command_mapping_size_, 0)),
+      servo_feedback_mapping_(
+          std::exchange(other.servo_feedback_mapping_, nullptr)),
+      servo_feedback_mapping_size_(
+          std::exchange(other.servo_feedback_mapping_size_, 0)),
       axis_count_(std::exchange(other.axis_count_, 0)),
+      servo_count_(std::exchange(other.servo_count_, 0)),
       generation_(std::exchange(other.generation_, 0)),
       command_writer_(std::move(other.command_writer_)),
-      feedback_reader_(std::move(other.feedback_reader_)) {
+      feedback_reader_(std::move(other.feedback_reader_)),
+      servo_command_writer_(std::move(other.servo_command_writer_)),
+      servo_feedback_reader_(std::move(other.servo_feedback_reader_)) {
   other.command_writer_.reset();
   other.feedback_reader_.reset();
+  other.servo_command_writer_.reset();
+  other.servo_feedback_reader_.reset();
 }
 
 RobotIoClient& RobotIoClient::operator=(RobotIoClient&& other) noexcept {
@@ -403,16 +595,33 @@ RobotIoClient& RobotIoClient::operator=(RobotIoClient&& other) noexcept {
     socket_fd_ = std::exchange(other.socket_fd_, -1);
     command_writer_fd_ = std::exchange(other.command_writer_fd_, -1);
     feedback_reader_fd_ = std::exchange(other.feedback_reader_fd_, -1);
+    servo_command_writer_fd_ =
+        std::exchange(other.servo_command_writer_fd_, -1);
+    servo_feedback_reader_fd_ =
+        std::exchange(other.servo_feedback_reader_fd_, -1);
     command_mapping_ = std::exchange(other.command_mapping_, nullptr);
     command_mapping_size_ = std::exchange(other.command_mapping_size_, 0);
     feedback_mapping_ = std::exchange(other.feedback_mapping_, nullptr);
     feedback_mapping_size_ = std::exchange(other.feedback_mapping_size_, 0);
+    servo_command_mapping_ =
+        std::exchange(other.servo_command_mapping_, nullptr);
+    servo_command_mapping_size_ =
+        std::exchange(other.servo_command_mapping_size_, 0);
+    servo_feedback_mapping_ =
+        std::exchange(other.servo_feedback_mapping_, nullptr);
+    servo_feedback_mapping_size_ =
+        std::exchange(other.servo_feedback_mapping_size_, 0);
     axis_count_ = std::exchange(other.axis_count_, 0);
+    servo_count_ = std::exchange(other.servo_count_, 0);
     generation_ = std::exchange(other.generation_, 0);
     command_writer_ = std::move(other.command_writer_);
     feedback_reader_ = std::move(other.feedback_reader_);
+    servo_command_writer_ = std::move(other.servo_command_writer_);
+    servo_feedback_reader_ = std::move(other.servo_feedback_reader_);
     other.command_writer_.reset();
     other.feedback_reader_.reset();
+    other.servo_command_writer_.reset();
+    other.servo_feedback_reader_.reset();
   }
   return *this;
 }
@@ -445,6 +654,33 @@ Result<Snapshot<AxisFeedback>> RobotIoClient::read_feedback() const {
   return feedback_reader_->read_latest();
 }
 
+Result<void> RobotIoClient::publish_servo_commands(
+    std::span<const St3215ServoCommand> servos, std::uint64_t sequence,
+    std::int64_t timestamp_ns) {
+  auto peer = check_peer();
+  if (!peer.has_value()) {
+    return peer;
+  }
+  if (!servo_command_writer_.has_value()) {
+    return Result<void>::failure(
+        {ErrorCode::unavailable, "IPC servo command writer is closed"});
+  }
+  return servo_command_writer_->publish(servos, sequence, timestamp_ns);
+}
+
+Result<Snapshot<St3215ServoFeedback>>
+RobotIoClient::read_servo_feedback() const {
+  auto peer = check_peer();
+  if (!peer.has_value()) {
+    return Result<Snapshot<St3215ServoFeedback>>::failure(peer.error());
+  }
+  if (!servo_feedback_reader_.has_value()) {
+    return Result<Snapshot<St3215ServoFeedback>>::failure(
+        {ErrorCode::unavailable, "IPC servo feedback reader is closed"});
+  }
+  return servo_feedback_reader_->read_latest();
+}
+
 Result<void> RobotIoClient::check_peer() const { return check_peer_fd(socket_fd_); }
 
 Result<void> RobotIoClient::close() {
@@ -458,6 +694,8 @@ Result<void> RobotIoClient::close() {
   };
   command_writer_.reset();
   feedback_reader_.reset();
+  servo_command_writer_.reset();
+  servo_feedback_reader_.reset();
   if (command_mapping_ != nullptr) {
     if (munmap(command_mapping_, command_mapping_size_) != 0) {
       remember("munmap(command)");
@@ -470,8 +708,21 @@ Result<void> RobotIoClient::close() {
     }
     feedback_mapping_ = nullptr;
   }
+  if (servo_command_mapping_ != nullptr) {
+    if (munmap(servo_command_mapping_, servo_command_mapping_size_) != 0) {
+      remember("munmap(servo command)");
+    }
+    servo_command_mapping_ = nullptr;
+  }
+  if (servo_feedback_mapping_ != nullptr) {
+    if (munmap(servo_feedback_mapping_, servo_feedback_mapping_size_) != 0) {
+      remember("munmap(servo feedback)");
+    }
+    servo_feedback_mapping_ = nullptr;
+  }
   for (auto* descriptor :
-       {&command_writer_fd_, &feedback_reader_fd_, &socket_fd_}) {
+       {&command_writer_fd_, &feedback_reader_fd_,
+        &servo_command_writer_fd_, &servo_feedback_reader_fd_, &socket_fd_}) {
     if (*descriptor >= 0) {
       if (::close(*descriptor) != 0) {
         remember("close");
@@ -481,7 +732,10 @@ Result<void> RobotIoClient::close() {
   }
   command_mapping_size_ = 0;
   feedback_mapping_size_ = 0;
+  servo_command_mapping_size_ = 0;
+  servo_feedback_mapping_size_ = 0;
   axis_count_ = 0;
+  servo_count_ = 0;
   generation_ = 0;
   return failed ? Result<void>::failure(std::move(first_error))
                 : Result<void>::success();
@@ -490,6 +744,8 @@ Result<void> RobotIoClient::close() {
 void RobotIoClient::release_noexcept() noexcept {
   command_writer_.reset();
   feedback_reader_.reset();
+  servo_command_writer_.reset();
+  servo_feedback_reader_.reset();
   if (command_mapping_ != nullptr) {
     (void)munmap(command_mapping_, command_mapping_size_);
     command_mapping_ = nullptr;
@@ -498,8 +754,17 @@ void RobotIoClient::release_noexcept() noexcept {
     (void)munmap(feedback_mapping_, feedback_mapping_size_);
     feedback_mapping_ = nullptr;
   }
+  if (servo_command_mapping_ != nullptr) {
+    (void)munmap(servo_command_mapping_, servo_command_mapping_size_);
+    servo_command_mapping_ = nullptr;
+  }
+  if (servo_feedback_mapping_ != nullptr) {
+    (void)munmap(servo_feedback_mapping_, servo_feedback_mapping_size_);
+    servo_feedback_mapping_ = nullptr;
+  }
   for (auto* descriptor :
-       {&command_writer_fd_, &feedback_reader_fd_, &socket_fd_}) {
+       {&command_writer_fd_, &feedback_reader_fd_,
+        &servo_command_writer_fd_, &servo_feedback_reader_fd_, &socket_fd_}) {
     if (*descriptor >= 0) {
       (void)::close(*descriptor);
       *descriptor = -1;
@@ -507,7 +772,10 @@ void RobotIoClient::release_noexcept() noexcept {
   }
   command_mapping_size_ = 0;
   feedback_mapping_size_ = 0;
+  servo_command_mapping_size_ = 0;
+  servo_feedback_mapping_size_ = 0;
   axis_count_ = 0;
+  servo_count_ = 0;
   generation_ = 0;
 }
 

@@ -101,8 +101,34 @@ TEST(ProfileLoaderTest, LoadsExistingRobotProfileAndStringifiesArgs) {
             "/tmp/rusty_robot_soarm101");
   EXPECT_EQ(profile.value().st3215_servos.at(0).serial.baud_rate,
             1'000'000U);
+  EXPECT_EQ(profile.value().st3215_servos.at(0).serial.read_timeout.count(),
+            0);
+  EXPECT_EQ(profile.value().st3215_servos.at(0).serial.write_timeout.count(),
+            0);
   EXPECT_EQ(profile.value().st3215_servos.at(0).device_id, 1U);
   EXPECT_EQ(profile.value().st3215_servos.at(5).device_id, 6U);
+}
+
+TEST(ProfileLoaderTest, PreservesPythonDefaultAndExplicitZeroSerialTimeouts) {
+  auto defaults = load_robot_profile(source_path(
+      "policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json"));
+  ASSERT_TRUE(defaults.has_value());
+  EXPECT_EQ(defaults.value().st3215_servos.at(0).serial.read_timeout.count(),
+            0);
+  EXPECT_EQ(defaults.value().st3215_servos.at(0).serial.write_timeout.count(),
+            0);
+
+  auto profile = read_json(
+      "policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json");
+  profile["sensors"][6]["args"]["timeout_s"] = 0;
+  profile["actuators"][1]["args"]["timeout_s"] = 0;
+  const TemporaryJsonFile file(profile);
+  auto explicit_zero = load_robot_profile(file.path());
+  ASSERT_TRUE(explicit_zero.has_value()) << explicit_zero.error().message;
+  EXPECT_EQ(explicit_zero.value().st3215_servos.at(0).serial.read_timeout.count(),
+            0);
+  EXPECT_EQ(explicit_zero.value().st3215_servos.at(0).serial.write_timeout.count(),
+            0);
 }
 
 TEST(ProfileLoaderTest, RejectsInconsistentOrUnsafeSt3215StaticConfiguration) {
@@ -125,6 +151,18 @@ TEST(ProfileLoaderTest, RejectsInconsistentOrUnsafeSt3215StaticConfiguration) {
   profile = read_json(
       "policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json");
   profile["sensors"][6]["args"]["feedback_timeout_ms"] = 0;
+  expect_robot_rejected(profile);
+
+  profile = read_json(
+      "policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json");
+  profile["sensors"][6]["args"]["command_timeout_ms"] = 1001;
+  profile["actuators"][1]["args"]["command_timeout_ms"] = 1001;
+  expect_robot_rejected(profile);
+
+  profile = read_json(
+      "policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json");
+  profile["sensors"][6]["args"]["maximum_command_future_ms"] = 1001;
+  profile["actuators"][1]["args"]["maximum_command_future_ms"] = 1001;
   expect_robot_rejected(profile);
 }
 

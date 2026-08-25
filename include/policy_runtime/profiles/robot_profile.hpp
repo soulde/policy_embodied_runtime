@@ -63,6 +63,8 @@ struct St3215ServoProfile {
   std::uint16_t time_units{};
   std::chrono::milliseconds feedback_timeout{250};
   std::string safety_group;
+  std::chrono::milliseconds command_timeout{250};
+  std::chrono::milliseconds maximum_command_future{50};
 };
 
 struct RobotProfile {

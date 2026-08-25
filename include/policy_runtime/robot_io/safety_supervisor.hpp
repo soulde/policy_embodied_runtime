@@ -52,6 +52,7 @@ struct SafetyBusState {
   bool all_slaves_operational{};
   bool process_data_valid{};
   std::uint16_t operational_axes_mask{};
+  std::uint16_t external_stop_axes_mask{};
   std::int64_t dc_deviation_ns{};
 };
 

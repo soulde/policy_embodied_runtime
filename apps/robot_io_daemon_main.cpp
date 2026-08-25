@@ -41,9 +41,17 @@ int main(int argc, char** argv) {
     std::cerr << profile.error().message << '\n';
     return 1;
   }
-  auto ipc = policy_runtime::RobotIoIpcServer::create(
-      socket_fd, static_cast<std::uint32_t>(profile.value().axes.size()),
-      static_cast<std::uint32_t>(generation_value));
+  const auto axis_count =
+      static_cast<std::uint32_t>(profile.value().axes.size());
+  const auto servo_count =
+      static_cast<std::uint32_t>(profile.value().st3215_servos.size());
+  auto ipc = servo_count == 0U
+                 ? policy_runtime::RobotIoIpcServer::create(
+                       socket_fd, axis_count,
+                       static_cast<std::uint32_t>(generation_value))
+                 : policy_runtime::RobotIoIpcServer::create(
+                       socket_fd, axis_count, servo_count,
+                       static_cast<std::uint32_t>(generation_value));
   if (!ipc.has_value()) {
     std::cerr << ipc.error().message << '\n';
     return 1;

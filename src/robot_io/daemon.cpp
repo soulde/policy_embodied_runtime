@@ -45,6 +45,7 @@ SafetyBusState safety_bus_state(const DomainHealth& domain,
       domain.all_slaves_operational,
       process_data_valid,
       domain.operational_axes_mask,
+      0U,
       domain.dc_deviation_ns};
 }
 
@@ -133,6 +134,18 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument, "robot I/O daemon supports at most 12 axes"});
   }
+  // Validate every independently stateful subsystem before mutating the
+  // daemon. This keeps a failed configure attempt retryable.
+  SafetySupervisor safety_preflight{};
+  if (auto checked = safety_preflight.configure(profile.axes);
+      !checked.has_value()) {
+    return checked;
+  }
+  St3215DeviceRegistry serial_preflight;
+  if (auto checked = serial_preflight.configure(profile.st3215_servos);
+      !checked.has_value()) {
+    return checked;
+  }
 
   std::array<std::optional<Cia402Axis>, kRobotIoMaximumAxes> configured_axes;
   try {
@@ -189,7 +202,8 @@ Result<void> RobotIoDaemon::attach_ethercat(EthercatMaster& master) {
 
 Result<void> RobotIoDaemon::attach_ipc(RobotIoIpcServer server) {
   if (!configured_ || running_.load(std::memory_order_acquire) || ipc_.has_value() ||
-      server.axis_count() != axis_count_) {
+      server.axis_count() != axis_count_ ||
+      server.servo_count() != serial_devices_.servo_count()) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument,
          "IPC endpoint must match the configured inactive daemon"});
@@ -400,13 +414,19 @@ void RobotIoDaemon::process_device_cycle_owned(
   }
   static_cast<void>(consume_staged_commands());
   const auto now = clock_->now_ns();
+  if (ipc_.has_value() && ipc_->servo_count() != 0U) {
+    auto commands = ipc_->read_servo_commands_realtime();
+    if (commands.has_value()) {
+      for (std::size_t index = 0; index < commands.value().axis_count; ++index) {
+        static_cast<void>(
+            serial_devices_.stage_command(index, commands.value().axes[index]));
+      }
+    }
+  }
   if (stop_requested_.load(std::memory_order_acquire)) {
     accepting_commands_.store(false, std::memory_order_release);
     safety_.request_shutdown(now);
   }
-  auto decisions =
-      safety_.evaluate(safety_bus_state(domain, process_data_valid), pdos, now);
-
   const auto serial_safety = serial_devices_.safety_snapshot(now);
   serial_servo_count_.store(serial_safety.servo_count,
                             std::memory_order_release);
@@ -420,14 +440,9 @@ void RobotIoDaemon::process_device_cycle_owned(
       serial_stop_mask |= serial_axis_stop_masks_[servo];
     }
   }
-  for (std::size_t axis = 0; axis < axis_count_; ++axis) {
-    if ((serial_stop_mask & (std::uint16_t{1U} << axis)) != 0U) {
-      decisions.requests[axis] = AxisRequest::quick_stop;
-      decisions.commands[axis].flags = kAxisCommandQuickStop;
-      decisions.feedback_flags[axis] |=
-          kAxisFeedbackSafetySerial | kAxisFeedbackSafetyGroup;
-    }
-  }
+  auto bus_state = safety_bus_state(domain, process_data_valid);
+  bus_state.external_stop_axes_mask = serial_stop_mask;
+  auto decisions = safety_.evaluate(bus_state, pdos, now);
 
   std::uint32_t safety_flags{};
   for (std::size_t axis = 0; axis < axis_count_; ++axis) {
@@ -467,6 +482,16 @@ void RobotIoDaemon::process_device_cycle_owned(
     static_cast<void>(ipc_->publish_feedback_realtime(
         std::span<const AxisFeedback>(cycle_feedback_.data(), axis_count_),
         safety_.last_command_sequence(), now));
+    if (ipc_->servo_count() != 0U) {
+      std::array<St3215ServoFeedback, kMaximumSt3215Servos> feedback{};
+      for (std::size_t index = 0; index < ipc_->servo_count(); ++index) {
+        feedback[index] = serial_devices_.feedback(index, now);
+      }
+      static_cast<void>(ipc_->publish_servo_feedback_realtime(
+          std::span<const St3215ServoFeedback>(feedback.data(),
+                                               ipc_->servo_count()),
+          sequence, now));
+    }
   }
 }
 

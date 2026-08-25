@@ -41,6 +41,7 @@ class SerialTransport final : public FrameTransport {
 
   Result<void> open() override;
   void close() noexcept override;
+  void request_stop() noexcept override;
   TransportHealth health() const noexcept override;
   SchedulingClass scheduling_class() const noexcept override;
   void cycle(const CycleContext& context) noexcept override;

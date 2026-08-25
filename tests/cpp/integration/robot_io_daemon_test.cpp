@@ -650,6 +650,52 @@ TEST(RobotIoDaemonTest, PropagatesDriveFaultAcrossItsSafetyGroup) {
   EXPECT_NE(harness.daemon.feedback(1).flags & kAxisFeedbackSafetyGroup, 0U);
 }
 
+TEST(RobotIoDaemonTest, ExternalSerialStopLatchesUntilAValidNewerCommand) {
+  SafetyOptions options{};
+  options.zero_velocity_confirmation_cycles = 1U;
+  policy_runtime::SafetySupervisor supervisor{options};
+  const std::array config{axis_config("axis", "arm", 1s)};
+  ASSERT_TRUE(supervisor.configure(config).has_value());
+  ASSERT_EQ(supervisor.accept_commands(commands(1, 1U, 100), 100),
+            CommandAcceptance::accepted);
+  auto pdos = enabled_pdos(1);
+  policy_runtime::SafetyBusState bus{1U, 1U, true, true, true,
+                                     true, true, 1U, 1U, 0};
+
+  auto stopped = supervisor.evaluate(bus, pdos, 101);
+  EXPECT_EQ(stopped.requests[0], AxisRequest::quick_stop);
+  EXPECT_NE(stopped.feedback_flags[0] &
+                policy_runtime::kAxisFeedbackSafetySerial,
+            0U);
+  stopped = supervisor.evaluate(bus, pdos, 102);
+  EXPECT_EQ(stopped.requests[0], AxisRequest::disable);
+
+  bus.external_stop_axes_mask = 0U;
+  auto cleared = supervisor.evaluate(bus, pdos, 103);
+  EXPECT_EQ(cleared.requests[0], AxisRequest::disable);
+  ASSERT_EQ(supervisor.accept_commands(commands(1, 2U, 104), 104),
+            CommandAcceptance::accepted);
+  auto recovered = supervisor.evaluate(bus, pdos, 105);
+  EXPECT_EQ(recovered.requests[0], AxisRequest::enable);
+}
+
+TEST(RobotIoDaemonTest, FailedConfigureDoesNotPoisonAValidRetry) {
+  auto invalid = profile_with_axes(1);
+  invalid.st3215_servos.push_back(policy_runtime::profiles::St3215ServoProfile{
+      "sensor", "actuator",
+      policy_runtime::profiles::SerialPortConfig{
+          "/tmp/not-opened-during-config", 1'000'000U, 64U, 259U,
+          0ms, 0ms, 1ms},
+      0xfeU, 1U, 4095U, 0U, 0U, 250ms, "arm"});
+  RobotIoDaemon daemon;
+  auto rejected = daemon.configure(invalid);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.error().code, policy_runtime::ErrorCode::invalid_argument);
+
+  auto valid = profile_with_axes(1);
+  EXPECT_TRUE(daemon.configure(valid).has_value());
+}
+
 TEST(RobotIoDaemonTest, EthercatOwnerAppliesWkcThresholdBeforeSending) {
   FakeClock clock;
   FakeRealtimeSystem realtime;

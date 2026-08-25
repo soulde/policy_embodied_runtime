@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -15,6 +16,7 @@
 
 #include "policy_runtime/common/result.hpp"
 #include "policy_runtime/profiles/robot_profile.hpp"
+#include "policy_runtime/robot_io/ipc_protocol.hpp"
 #include "policy_runtime/robot_io/local_snapshot.hpp"
 #include "policy_runtime/robot_io/transport_scheduler.hpp"
 #include "policy_runtime/transport/frame_transport.hpp"
@@ -37,28 +39,8 @@ struct St3215ServoConfig {
   std::uint16_t speed_units{};
   std::uint16_t time_units{};
   std::chrono::milliseconds feedback_timeout{250};
-};
-
-struct St3215ServoCommand {
-  std::uint64_t sequence{};
-  std::int64_t timestamp_ns{};
-  double target_position_rad{};
-  bool enabled{};
-  bool emergency_stop{};
-  std::array<std::byte, 6> reserved{};
-};
-
-struct St3215ServoFeedback {
-  std::uint64_t feedback_sequence{};
-  std::uint64_t command_sequence{};
-  std::int64_t timestamp_ns{};
-  double position_rad{};
-  std::uint32_t raw_position{};
-  std::uint32_t flags{kSt3215FeedbackStale};
-  std::uint32_t transport_health{};
-  std::uint32_t status_error{};
-  std::uint64_t timeout_count{};
-  std::uint64_t io_error_count{};
+  std::chrono::nanoseconds command_timeout{};
+  std::chrono::nanoseconds maximum_command_future{};
 };
 
 static_assert(std::is_trivially_copyable_v<St3215ServoCommand>);
@@ -152,6 +134,8 @@ class St3215Bus {
   mutable std::mutex lifecycle_mutex_;
   std::vector<ServoRuntime> servos_;
   std::jthread executor_;
+  std::condition_variable_any executor_wake_;
+  std::mutex executor_wait_mutex_;
   TransportScheduler* scheduler_{};
   std::atomic<bool> running_{};
   std::atomic<TransportHealth> health_{TransportHealth::failed};

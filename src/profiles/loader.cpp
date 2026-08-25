@@ -657,16 +657,16 @@ std::optional<std::chrono::milliseconds> milliseconds_from_seconds_arg(
     return default_value;
   }
   const auto seconds = parse_double(*text);
-  if (!seconds || *seconds <= 0.0 ||
+  if (!seconds || *seconds < 0.0 ||
       *seconds > static_cast<double>(std::numeric_limits<std::int64_t>::max()) /
                      1000.0) {
     error = config.name + ".args." + std::string(key) +
-            " must be a positive finite duration";
+            " must be a non-negative finite duration";
     return std::nullopt;
   }
   const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::duration<double>(*seconds));
-  if (milliseconds.count() <= 0) {
+  if (*seconds > 0.0 && milliseconds.count() <= 0) {
     error = config.name + ".args." + std::string(key) +
             " is below one millisecond";
     return std::nullopt;
@@ -716,6 +716,10 @@ std::optional<St3215ServoProfile> parse_st3215(
       unsigned_arg<std::uint16_t>(config, "time_units", 0U, error);
   const auto feedback_timeout = unsigned_arg<std::uint64_t>(
       config, "feedback_timeout_ms", 250U, error);
+  const auto command_timeout = unsigned_arg<std::uint64_t>(
+      config, "command_timeout_ms", 250U, error);
+  const auto maximum_command_future = unsigned_arg<std::uint64_t>(
+      config, "maximum_command_future_ms", 50U, error);
   const auto service_period = unsigned_arg<std::uint64_t>(
       config, "service_period_us", 1000U, error);
   const auto* timeout_key = optional_arg(config, "timeout_s") != nullptr
@@ -724,14 +728,15 @@ std::optional<St3215ServoProfile> parse_st3215(
                                        ? "timeout"
                                        : "timeout_s");
   const auto read_timeout = milliseconds_from_seconds_arg(
-      config, timeout_key, std::chrono::milliseconds{20}, error);
+      config, timeout_key, std::chrono::milliseconds{0}, error);
   auto write_timeout = read_timeout;
   if (optional_arg(config, "write_timeout_s") != nullptr) {
     write_timeout = milliseconds_from_seconds_arg(
-        config, "write_timeout_s", std::chrono::milliseconds{20}, error);
+        config, "write_timeout_s", std::chrono::milliseconds{0}, error);
   }
   if (!baud_rate || !read_buffer || !maximum_frame || !max_position ||
-      !speed || !time || !feedback_timeout || !service_period ||
+      !speed || !time || !feedback_timeout || !command_timeout ||
+      !maximum_command_future || !service_period ||
       !read_timeout || !write_timeout) {
     if (error.empty()) {
       error = config.name + ".args contains invalid ST3215 configuration";
@@ -741,12 +746,13 @@ std::optional<St3215ServoProfile> parse_st3215(
   if (*baud_rate == 0U || *device_id > 0xfdU || *max_position == 0U ||
       *read_buffer == 0U || *read_buffer > 4096U || *maximum_frame < 6U ||
       *maximum_frame > 259U || *feedback_timeout == 0U ||
+      *command_timeout == 0U || *command_timeout > 1'000U ||
+      *maximum_command_future > 1'000U ||
       *feedback_timeout >
           static_cast<std::uint64_t>(
               std::numeric_limits<std::int64_t>::max() / 1'000'000LL) ||
       *service_period == 0U ||
-      *service_period >
-          static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      *service_period > 1'000'000U) {
     error = config.name + ".args contains unsafe ST3215 limits";
     return std::nullopt;
   }
@@ -772,6 +778,10 @@ std::optional<St3215ServoProfile> parse_st3215(
   result.time_units = *time;
   result.feedback_timeout = std::chrono::milliseconds(
       static_cast<std::int64_t>(*feedback_timeout));
+  result.command_timeout = std::chrono::milliseconds(
+      static_cast<std::int64_t>(*command_timeout));
+  result.maximum_command_future = std::chrono::milliseconds(
+      static_cast<std::int64_t>(*maximum_command_future));
   const auto* safety_group = optional_arg(config, "safety_group");
   result.safety_group =
       safety_group == nullptr || is_blank(*safety_group)
@@ -797,6 +807,8 @@ bool same_st3215_physical_config(const St3215ServoProfile& left,
          left.servo_id == right.servo_id &&
          left.max_position_units == right.max_position_units &&
          left.feedback_timeout == right.feedback_timeout &&
+         left.command_timeout == right.command_timeout &&
+         left.maximum_command_future == right.maximum_command_future &&
          left.safety_group == right.safety_group;
 }
 

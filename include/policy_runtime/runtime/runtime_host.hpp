@@ -24,10 +24,15 @@ class RuntimeRobotIo {
  public:
   virtual ~RuntimeRobotIo() = default;
   virtual std::uint32_t axis_count() const noexcept = 0;
+  virtual std::uint32_t servo_count() const noexcept = 0;
   virtual Result<Snapshot<AxisFeedback>> read_feedback() = 0;
+  virtual Result<Snapshot<St3215ServoFeedback>> read_servo_feedback() = 0;
   virtual Result<void> publish_commands(std::span<const AxisCommand> commands,
                                         std::uint64_t sequence,
                                         std::int64_t timestamp_ns) = 0;
+  virtual Result<void> publish_servo_commands(
+      std::span<const St3215ServoCommand> commands, std::uint64_t sequence,
+      std::int64_t timestamp_ns) = 0;
   virtual void close() noexcept = 0;
 };
 

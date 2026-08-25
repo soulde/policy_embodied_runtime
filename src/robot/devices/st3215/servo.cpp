@@ -65,6 +65,13 @@ St3215CommandAcceptance St3215Servo::stage_command(
     release_gate();
     return St3215CommandAcceptance::rejected;
   }
+  const auto now_ns = steady_now_ns();
+  if (config_.command_timeout.count() > 0 &&
+      (command.timestamp_ns > now_ns + config_.maximum_command_future.count() ||
+       now_ns - command.timestamp_ns > config_.command_timeout.count())) {
+    release_gate();
+    return St3215CommandAcceptance::rejected;
+  }
   if (has_command_ &&
       (command.sequence < last_command_sequence_ ||
        command.timestamp_ns < last_command_timestamp_ns_)) {
@@ -156,7 +163,8 @@ Result<void> St3215Bus::add_servo(std::shared_ptr<St3215Servo> servo) {
 Result<void> St3215Bus::start(TransportScheduler& scheduler) {
   std::scoped_lock lock(lifecycle_mutex_);
   if (running_.load(std::memory_order_acquire) || transport_ == nullptr ||
-      servos_.empty() || options_.service_period.count() <= 0) {
+      servos_.empty() || options_.service_period.count() <= 0 ||
+      options_.service_period > std::chrono::seconds{1}) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument, "ST3215 bus is not startable"});
   }
@@ -215,6 +223,8 @@ void St3215Bus::stop() noexcept {
   }
   if (executor_.joinable()) {
     executor_.request_stop();
+    transport_->request_stop();
+    executor_wake_.notify_all();
     executor_.join();
   }
   std::scoped_lock lock(lifecycle_mutex_);
@@ -257,7 +267,10 @@ void St3215Bus::executor_main(std::stop_token stop_token) noexcept {
       health_.store(TransportHealth::failed, std::memory_order_release);
     }
     cursor = (cursor + 1U) % servos_.size();
-    std::this_thread::sleep_until(next_release);
+    std::unique_lock wait_lock(executor_wait_mutex_);
+    static_cast<void>(executor_wake_.wait_until(
+        wait_lock, stop_token, next_release,
+        [this] { return !running_.load(std::memory_order_acquire); }));
   }
 }
 
@@ -269,6 +282,14 @@ void St3215Bus::service_one(ServoRuntime& runtime,
     runtime.consumed_publication = staged.publication;
     runtime.command = staged.command;
     runtime.has_command = true;
+  }
+
+  if (runtime.has_command && runtime.servo->config().command_timeout.count() > 0 &&
+      (now_ns < runtime.command.timestamp_ns ||
+       now_ns - runtime.command.timestamp_ns >
+           runtime.servo->config().command_timeout.count())) {
+    runtime.has_command = false;
+    runtime.command.enabled = false;
   }
 
   if (runtime.has_command && runtime.command.enabled &&
@@ -345,8 +366,9 @@ Result<St3215ServoFeedback> St3215Bus::transact(
       transport_->cycle(context);
       continue;
     }
-    if ((position_response && status.value().parameters.size() < 2U) ||
-        (!position_response && !status.value().parameters.empty())) {
+    if (status.value().error == 0U &&
+        ((position_response && status.value().parameters.size() < 2U) ||
+         (!position_response && !status.value().parameters.empty()))) {
       last_error = {ErrorCode::protocol,
                     "ST3215 response shape does not match request"};
       transport_->cycle(context);
@@ -369,7 +391,7 @@ Result<St3215ServoFeedback> St3215Bus::transact(
       feedback.timeout_count = serial->timeout_count();
       feedback.io_error_count = serial->io_error_count();
     }
-    if (position_response) {
+    if (position_response && status.value().error == 0U) {
       auto raw = read_st3215_u16_le(status.value().parameters);
       if (!raw.has_value()) {
         return Result<St3215ServoFeedback>::failure(raw.error());
@@ -461,7 +483,9 @@ Result<void> St3215DeviceRegistry::configure(
         profile.max_position_units,
         profile.speed_units,
         profile.time_units,
-        profile.feedback_timeout});
+        profile.feedback_timeout,
+        profile.command_timeout,
+        profile.maximum_command_future});
     auto added = bus->bus->add_servo(servo);
     if (!added.has_value()) {
       return added;

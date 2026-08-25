@@ -27,33 +27,57 @@ class RobotIoClient {
                                 std::uint64_t sequence,
                                 std::int64_t timestamp_ns);
   Result<Snapshot<AxisFeedback>> read_feedback() const;
+  Result<void> publish_servo_commands(
+      std::span<const St3215ServoCommand> servos,
+      std::uint64_t sequence, std::int64_t timestamp_ns);
+  Result<Snapshot<St3215ServoFeedback>> read_servo_feedback() const;
   Result<void> check_peer() const;
   Result<void> close();
 
   std::uint32_t axis_count() const noexcept { return axis_count_; }
+  std::uint32_t servo_count() const noexcept { return servo_count_; }
   std::uint32_t generation() const noexcept { return generation_; }
 
  private:
   RobotIoClient(int socket_fd, int command_writer_fd, int feedback_reader_fd,
                 void* command_mapping, std::size_t command_mapping_size,
                 void* feedback_mapping, std::size_t feedback_mapping_size,
+                int servo_command_writer_fd, int servo_feedback_reader_fd,
+                void* servo_command_mapping,
+                std::size_t servo_command_mapping_size,
+                void* servo_feedback_mapping,
+                std::size_t servo_feedback_mapping_size,
                 std::uint32_t axis_count, std::uint32_t generation,
                 SnapshotWriter<AxisCommand> command_writer,
-                SnapshotReader<AxisFeedback> feedback_reader) noexcept;
+                SnapshotReader<AxisFeedback> feedback_reader,
+                std::uint32_t servo_count,
+                std::optional<SnapshotWriter<St3215ServoCommand>>
+                    servo_command_writer,
+                std::optional<SnapshotReader<St3215ServoFeedback>>
+                    servo_feedback_reader) noexcept;
 
   void release_noexcept() noexcept;
 
   int socket_fd_{-1};
   int command_writer_fd_{-1};
   int feedback_reader_fd_{-1};
+  int servo_command_writer_fd_{-1};
+  int servo_feedback_reader_fd_{-1};
   void* command_mapping_{};
   std::size_t command_mapping_size_{};
   void* feedback_mapping_{};
   std::size_t feedback_mapping_size_{};
+  void* servo_command_mapping_{};
+  std::size_t servo_command_mapping_size_{};
+  void* servo_feedback_mapping_{};
+  std::size_t servo_feedback_mapping_size_{};
   std::uint32_t axis_count_{};
+  std::uint32_t servo_count_{};
   std::uint32_t generation_{};
   std::optional<SnapshotWriter<AxisCommand>> command_writer_;
   std::optional<SnapshotReader<AxisFeedback>> feedback_reader_;
+  std::optional<SnapshotWriter<St3215ServoCommand>> servo_command_writer_;
+  std::optional<SnapshotReader<St3215ServoFeedback>> servo_feedback_reader_;
 };
 
 }  // namespace policy_runtime
