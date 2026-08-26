@@ -5,6 +5,8 @@ project(policy_runtime LANGUAGES CXX)
 option(POLICY_RUNTIME_BUILD_TESTS "Build policy runtime unit tests" ON)
 option(POLICY_RUNTIME_WITH_IGH "Build the IgH EtherCAT backend" OFF)
 option(POLICY_RUNTIME_WITH_ZMQ "Build the ZeroMQ policy RPC server when available" ON)
+set(POLICY_RUNTIME_SYSTEMD_UNIT_DIR "lib/systemd/system" CACHE PATH
+    "Install directory for systemd system units")
 
 include(cmake/ProjectOptions.cmake)
 include(FetchContent)
@@ -83,6 +85,7 @@ add_library(policy_runtime_core
     src/robot_io/ipc_server.cpp
     src/robot_io/realtime_loop.cpp
     src/robot_io/safety_supervisor.cpp
+    src/robot_io/service_listener.cpp
     src/runtime/runtime_host.cpp
     src/runtime/runtime_host_cli.cpp
     src/runtime/robot_io_client.cpp
@@ -131,7 +134,7 @@ install(TARGETS robot-io-daemon policy-runtime-host robot-io-health
 install(FILES configs/robot_profiles/elmo_gold_example.json
     DESTINATION "${CMAKE_INSTALL_DATADIR}/policy-runtime/robot_profiles")
 install(FILES packaging/systemd/robot-io-daemon.service
-    DESTINATION "${CMAKE_INSTALL_LIBDIR}/systemd/system")
+    DESTINATION "${POLICY_RUNTIME_SYSTEMD_UNIT_DIR}")
 install(FILES docs/robot-io-daemon.md
     DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/policy-runtime")
 
@@ -229,9 +232,12 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         PRIVATE policy_runtime_core GTest::gtest_main)
     target_compile_definitions(service_config_test
         PRIVATE POLICY_RUNTIME_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-                POLICY_RUNTIME_TOOL_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+                POLICY_RUNTIME_TOOL_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+                POLICY_RUNTIME_DAEMON_PATH="$<TARGET_FILE:robot-io-daemon>"
+                POLICY_RUNTIME_SYSTEMD_UNIT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/packaging/systemd/robot-io-daemon.service")
     policy_runtime_configure_target(service_config_test)
-    add_dependencies(service_config_test robot-io-health ethercat-cycle-stats)
+    add_dependencies(service_config_test robot-io-daemon robot-io-health
+                     ethercat-cycle-stats)
 
     add_executable(runtime_host_test
         tests/cpp/integration/runtime_host_test.cpp)
@@ -292,6 +298,12 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         TEST_PREFIX robot_io_daemon_test. DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(service_config_test
         TEST_PREFIX service_config_test. DISCOVERY_MODE PRE_TEST)
+    add_test(NAME service_install_layout_test
+        COMMAND "${CMAKE_COMMAND}"
+            "-DPOLICY_RUNTIME_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            "-DPOLICY_RUNTIME_INSTALL_LIBDIR=${CMAKE_INSTALL_LIBDIR}"
+            "-DPOLICY_RUNTIME_INSTALL_TEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/service-install-root"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/install_layout_test.cmake")
     gtest_discover_tests(runtime_host_test
         TEST_PREFIX runtime_host_test. DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(st3215_test

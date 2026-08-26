@@ -19,9 +19,10 @@ cmake --install build --prefix /tmp/policy-runtime-install
 The install places `robot-io-daemon`, `policy-runtime-host`,
 `robot-io-health`, and `ethercat-cycle-stats` in `bin/`; the example profile
 in `share/policy-runtime/robot_profiles/`; and the unit in
-`lib/systemd/system/`. Distribution packages should use `/usr` as the install
-prefix, or provide a systemd drop-in that changes `ROBOT_IO_PROFILE` and
-`ExecStart` for a nonstandard prefix.
+`lib/systemd/system/`, independently of the platform's multiarch library
+directory. Distribution packages should use `/usr` as the install prefix, or
+set `POLICY_RUNTIME_SYSTEMD_UNIT_DIR` and provide a systemd drop-in that
+changes `ROBOT_IO_PROFILE` and `ExecStart` for a nonstandard prefix.
 
 `elmo_gold_example.json` intentionally models three axes: CSP, CSV, and CST.
 It is a documented representative subset, not a 12-axis machine definition.
@@ -33,11 +34,20 @@ record before use.
 ## Service boundary and hardening
 
 Create a `robot-io` service account, then grant it access to `/dev/EtherCAT0`
-through a narrowly scoped udev rule. Install the packaged unit and configure a
-supervisor which supplies an already-connected Unix `SOCK_SEQPACKET` IPC file
-descriptor, its descriptor number, and a generation value. The daemon's IPC
-contract requires that connected descriptor; this unit deliberately does not
-create a listening socket or invoke a shell.
+through a narrowly scoped udev rule. The packaged unit starts the daemon's
+direct service mode. The daemon creates
+`/run/policy-runtime/robot-io.sock` as an owner-only Unix `SOCK_SEQPACKET`
+listener, publishes the current nonzero incarnation in the owner-only
+`robot-io.generation` file, accepts one connection, and authenticates its peer
+with `SO_PEERCRED`. The connecting runtime host or supervisor must therefore
+run as `robot-io`, read the generation file, connect the socket, and pass that
+generation to `RobotIoClient`. Every service restart publishes a fresh
+generation, so mappings from an earlier incarnation are rejected.
+
+The positional `ROBOT_PROFILE CONNECTED_SOCKET_FD GENERATION` daemon form
+remains available for supervisors that already create and pass a connected
+descriptor. The packaged unit uses the listener form directly and does not
+assume that an arbitrary descriptor such as FD 3 is connected.
 
 The supplied unit has `LimitRTPRIO=95`, `LimitMEMLOCK=infinity`,
 `Restart=on-failure`, and a private `/run/policy-runtime` directory. It keeps
@@ -53,9 +63,9 @@ sudo systemctl start robot-io-daemon
 sudo systemctl status robot-io-daemon
 ```
 
-The default unit values are packaging defaults, not proof that FD 3 is a valid
-connected IPC channel. Do not enable it at boot until the process supervisor
-and IPC handoff have been exercised on the target.
+Do not enable the unit at boot until socket ownership, generation discovery,
+the IPC handshake, and restart with a newly generated incarnation have been
+exercised on the target.
 
 `robot-io-health` and `ethercat-cycle-stats` currently have a deliberately
 safe failure mode: `--help` works, while a normal invocation reports
@@ -72,11 +82,16 @@ investigation; it is not an instruction to relax safety limits.
 
 1. Boot the intended PREEMPT_RT kernel and record `uname -a`. Reserve the
    cyclic CPU with kernel `isolcpus`, `nohz_full`, and `rcu_nocbs` parameters;
-   keep housekeeping and IRQ work off that CPU. Set the EtherCAT NIC governor
-   to `performance`, disable power-saving features that add latency, and pin
-   the NIC IRQs from `/proc/interrupts` to a non-cyclic CPU. Configure
-   `irqbalance` so it does not undo the affinity. Reboot and re-check the
-   effective CPU lists and IRQ affinities.
+   keep housekeeping and IRQ work off that CPU. Set the cyclic CPU's scaling
+   governor to `performance`. On the dedicated EtherCAT NIC, inspect and
+   disable Energy Efficient Ethernet (EEE) with `ethtool --show-eee` and
+   `ethtool --set-eee ... eee off`. Inspect interrupt coalescing with
+   `ethtool --show-coalesce`; disable adaptive and fixed coalescing settings
+   that defer frames, using only options supported by that NIC driver. Disable
+   other NIC power-saving features that add latency, and pin the NIC IRQs from
+   `/proc/interrupts` to a non-cyclic CPU. Configure `irqbalance` so it does
+   not undo the affinity. Reboot and re-check the CPU governor, EEE/coalescing
+   settings, effective CPU lists, and IRQ affinities.
 2. Before connecting motion hardware, run `cyclictest` with the intended
    1 kHz period, FIFO priority, memory lock, CPU affinity, and representative
    system load. Archive the full histogram and worst latency. Set an

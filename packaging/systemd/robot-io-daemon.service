@@ -9,12 +9,10 @@ ConditionPathExists=/dev/EtherCAT0
 Type=simple
 User=robot-io
 Group=robot-io
-# The daemon receives a connected SOCK_SEQPACKET IPC descriptor from its
-# supervisor; the unit deliberately does not create a network listener.
+# The daemon creates a one-client Unix SOCK_SEQPACKET rendezvous in the
+# service-owned runtime directory and authenticates the connecting uid.
 Environment=ROBOT_IO_PROFILE=/usr/share/policy-runtime/robot_profiles/elmo_gold_example.json
-Environment=ROBOT_IO_CONNECTED_SOCKET_FD=3
-Environment=ROBOT_IO_GENERATION=1
-ExecStart=/usr/bin/robot-io-daemon ${ROBOT_IO_PROFILE} ${ROBOT_IO_CONNECTED_SOCKET_FD} ${ROBOT_IO_GENERATION}
+ExecStart=/usr/bin/robot-io-daemon ${ROBOT_IO_PROFILE} --ipc-socket=/run/policy-runtime/robot-io.sock --generation-file=/run/policy-runtime/robot-io.generation
 Restart=on-failure
 RestartSec=1s
 TimeoutStopSec=10s
