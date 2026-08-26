@@ -100,6 +100,10 @@ Target installation, service setup, and the PREEMPT_RT/EtherCAT qualification
 procedure are in [docs/robot-io-daemon.md](docs/robot-io-daemon.md). Passing
 fake/PTY tests, packaging checks, or CLI help does not validate connected
 hardware; real IgH/Elmo and 12-axis HIL remain deployment qualification steps.
+Migration, parity-gate, and Python compatibility-layer details are in
+[docs/migration/cpp-runtime.md](docs/migration/cpp-runtime.md); the outstanding
+target matrix is tracked in
+[docs/qualification/cpp-runtime-final.md](docs/qualification/cpp-runtime-final.md).
 
 ## Quickstart
 
@@ -186,7 +190,10 @@ Policy RPC observations and actions use the canonical fields declared by the act
 
 Current implementation is staged:
 
-- Python policy/protocol/simulator compatibility layer remains available.
+- Python policy/protocol/runtime modules remain as a deliberate compatibility
+  layer because published wheel entry points and the parity oracle still use
+  them; new hardware deployments should select the CMake-installed native
+  `policy-runtime-host` explicitly.
 - C++ runtime host, versioned daemon IPC, CiA402/Elmo EtherCAT, and ST3215
   serial execution paths are implemented and covered by fake/PTY tests.
 - PREEMPT_RT scheduling, real IgH linkage, Elmo commissioning, and 12-axis HIL

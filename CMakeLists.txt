@@ -335,7 +335,7 @@ if(POLICY_RUNTIME_BUILD_TESTS)
     if(POLICY_RUNTIME_CONTRACT_PYTHON)
         add_test(NAME runtime_cross_language_test
             COMMAND "${POLICY_RUNTIME_CONTRACT_PYTHON}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/tests/compat/test_runtime_contract.py"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/compat/run_runtime_parity.py"
                 --driver $<TARGET_FILE:runtime_contract_driver>)
         set_tests_properties(runtime_cross_language_test PROPERTIES
             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" TIMEOUT 15)
