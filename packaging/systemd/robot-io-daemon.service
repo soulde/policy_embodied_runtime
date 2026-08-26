@@ -1,0 +1,49 @@
+[Unit]
+Description=Policy Runtime Robot I/O daemon
+Documentation=file:/usr/share/doc/policy-runtime/robot-io-daemon.md
+Wants=network-pre.target
+After=network-pre.target
+ConditionPathExists=/dev/EtherCAT0
+
+[Service]
+Type=simple
+User=robot-io
+Group=robot-io
+# The daemon receives a connected SOCK_SEQPACKET IPC descriptor from its
+# supervisor; the unit deliberately does not create a network listener.
+Environment=ROBOT_IO_PROFILE=/usr/share/policy-runtime/robot_profiles/elmo_gold_example.json
+Environment=ROBOT_IO_CONNECTED_SOCKET_FD=3
+Environment=ROBOT_IO_GENERATION=1
+ExecStart=/usr/bin/robot-io-daemon ${ROBOT_IO_PROFILE} ${ROBOT_IO_CONNECTED_SOCKET_FD} ${ROBOT_IO_GENERATION}
+Restart=on-failure
+RestartSec=1s
+TimeoutStopSec=10s
+RuntimeDirectory=policy-runtime
+RuntimeDirectoryMode=0750
+UMask=0077
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+CapabilityBoundingSet=CAP_IPC_LOCK CAP_SYS_NICE
+AmbientCapabilities=CAP_IPC_LOCK CAP_SYS_NICE
+NoNewPrivileges=true
+RestrictRealtime=no
+DevicePolicy=closed
+DeviceAllow=/dev/EtherCAT0 rw
+PrivateDevices=no
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectClock=true
+ReadWritePaths=/run/policy-runtime
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

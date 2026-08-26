@@ -8,6 +8,7 @@ option(POLICY_RUNTIME_WITH_ZMQ "Build the ZeroMQ policy RPC server when availabl
 
 include(cmake/ProjectOptions.cmake)
 include(FetchContent)
+include(GNUInstallDirs)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(PolicyRuntimeZmq)
 
@@ -116,6 +117,24 @@ if(POLICY_RUNTIME_HAS_ZMQ)
 endif()
 policy_runtime_configure_target(policy-runtime-host)
 
+add_executable(robot-io-health tools/robot_io_health.cpp)
+policy_runtime_configure_target(robot-io-health)
+
+add_executable(ethercat-cycle-stats tools/ethercat_cycle_stats.cpp)
+target_compile_definitions(ethercat-cycle-stats PRIVATE
+    POLICY_RUNTIME_WITH_IGH=$<BOOL:${POLICY_RUNTIME_WITH_IGH}>)
+policy_runtime_configure_target(ethercat-cycle-stats)
+
+install(TARGETS robot-io-daemon policy-runtime-host robot-io-health
+                ethercat-cycle-stats
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES configs/robot_profiles/elmo_gold_example.json
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/policy-runtime/robot_profiles")
+install(FILES packaging/systemd/robot-io-daemon.service
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/systemd/system")
+install(FILES docs/robot-io-daemon.md
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/policy-runtime")
+
 if(POLICY_RUNTIME_BUILD_TESTS)
     include(CTest)
     enable_testing()
@@ -204,6 +223,16 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         PRIVATE policy_runtime_core GTest::gtest_main)
     policy_runtime_configure_target(robot_io_daemon_test)
 
+    add_executable(service_config_test
+        tests/cpp/integration/service_config_test.cpp)
+    target_link_libraries(service_config_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    target_compile_definitions(service_config_test
+        PRIVATE POLICY_RUNTIME_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+                POLICY_RUNTIME_TOOL_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+    policy_runtime_configure_target(service_config_test)
+    add_dependencies(service_config_test robot-io-health ethercat-cycle-stats)
+
     add_executable(runtime_host_test
         tests/cpp/integration/runtime_host_test.cpp)
     target_link_libraries(runtime_host_test
@@ -261,6 +290,8 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         TEST_PREFIX igh_sdo_semantics_test. DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(robot_io_daemon_test
         TEST_PREFIX robot_io_daemon_test. DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(service_config_test
+        TEST_PREFIX service_config_test. DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(runtime_host_test
         TEST_PREFIX runtime_host_test. DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(st3215_test

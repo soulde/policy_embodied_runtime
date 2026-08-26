@@ -64,6 +64,15 @@ env UV_CACHE_DIR=/tmp/uv-cache uv pip install -e ".[dev]"
 pytest
 ```
 
+## C++ robot I/O daemon
+
+The optional C++ robot I/O daemon packages daemon/host binaries, safe
+diagnostic CLIs, an Elmo Gold static-mode example, and a hardened systemd unit.
+It builds without IgH EtherCAT or ZeroMQ; those integrations are opt-in at
+configure time. Target installation and the PREEMPT_RT/EtherCAT qualification
+procedure are in [docs/robot-io-daemon.md](docs/robot-io-daemon.md). The
+packaging checks and CLI help output do not validate connected hardware.
+
 ## Quickstart
 
 Validate schemas, runtime, transport, and robot I/O abstractions:
