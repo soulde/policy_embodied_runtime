@@ -1,5 +1,6 @@
 #include <array>
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -27,6 +28,7 @@
 #include "policy_runtime/robot_io/daemon.hpp"
 #include "policy_runtime/robot_io/service_listener.hpp"
 #include "policy_runtime/runtime/robot_io_client.hpp"
+#include "policy_runtime/runtime/robot_io_service.hpp"
 
 namespace {
 
@@ -174,6 +176,61 @@ int connect_seqpacket(const std::filesystem::path& socket_path) {
   return descriptor;
 }
 
+void write_empty_robot_profile(const std::filesystem::path& profile_path) {
+  std::ofstream profile(profile_path);
+  profile << R"({"sensors":[],"actuators":[]})";
+}
+
+ChildProcess start_service_daemon(
+    const std::filesystem::path& profile_path,
+    const std::filesystem::path& socket_path,
+    const std::filesystem::path& generation_path) {
+  const auto socket_option = "--ipc-socket=" + socket_path.string();
+  const auto generation_option =
+      "--generation-file=" + generation_path.string();
+  const auto child = fork();
+  if (child == 0) {
+    execl(POLICY_RUNTIME_DAEMON_PATH, "robot-io-daemon",
+          profile_path.c_str(), socket_option.c_str(), generation_option.c_str(),
+          static_cast<char*>(nullptr));
+    _exit(127);
+  }
+  return ChildProcess(child);
+}
+
+ChildProcess start_runtime_host(
+    const std::filesystem::path& robot_profile,
+    const std::filesystem::path& socket_path,
+    const std::filesystem::path& generation_path,
+    const std::filesystem::path& endpoint_path) {
+  const auto endpoint = "ipc://" + endpoint_path.string();
+  const auto child = fork();
+  if (child == 0) {
+    execl(POLICY_RUNTIME_HOST_PATH, "policy-runtime-host",
+          "--policy-profile", POLICY_RUNTIME_FAKE_POLICY_PATH,
+          "--robot-profile", robot_profile.c_str(), "--endpoint",
+          endpoint.c_str(), "--robot-io-socket", socket_path.c_str(),
+          "--robot-io-generation-file", generation_path.c_str(),
+          static_cast<char*>(nullptr));
+    _exit(127);
+  }
+  return ChildProcess(child);
+}
+
+#if POLICY_RUNTIME_HAS_ZMQ
+bool wait_for_path(const std::filesystem::path& path,
+                   std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (std::filesystem::exists(path)) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+  }
+  return false;
+}
+#endif
+
 std::uint32_t run_service_incarnation(const std::filesystem::path& directory) {
   const auto profile_path = directory / "empty-profile.json";
   const auto socket_path = directory / "robot-io.sock";
@@ -309,6 +366,176 @@ TEST(ServiceConfigTest,
   EXPECT_NE(first, 0U);
   EXPECT_NE(second, 0U);
   EXPECT_NE(first, second);
+}
+
+TEST(ServiceConfigTest,
+     ConcurrentListenerHandoffKeepsSuccessorGenerationPublished) {
+  TemporaryDirectory directory;
+  const auto socket_path = directory.path() / "robot-io.sock";
+  const auto generation_path = directory.path() / "robot-io.generation";
+
+  for (int iteration = 0; iteration < 100; ++iteration) {
+    auto created = policy_runtime::RobotIoServiceListener::create(
+        socket_path.string(), generation_path.string(), geteuid());
+    ASSERT_TRUE(created.has_value()) << created.error().message;
+    std::optional<policy_runtime::RobotIoServiceListener> first;
+    first.emplace(std::move(created.value()));
+
+    std::atomic_bool start{};
+    std::atomic_bool attempted{};
+    std::optional<policy_runtime::RobotIoServiceListener> successor;
+    std::string unexpected_error;
+    std::thread handoff([&] {
+      while (!start.load(std::memory_order_acquire)) {
+      }
+      for (;;) {
+        auto next = policy_runtime::RobotIoServiceListener::create(
+            socket_path.string(), generation_path.string(), geteuid());
+        attempted.store(true, std::memory_order_release);
+        if (next.has_value()) {
+          successor.emplace(std::move(next.value()));
+          return;
+        }
+        if (next.error().code != policy_runtime::ErrorCode::unavailable) {
+          unexpected_error = next.error().message;
+          return;
+        }
+        std::this_thread::yield();
+      }
+    });
+    start.store(true, std::memory_order_release);
+    while (!attempted.load(std::memory_order_acquire)) {
+    }
+    first.reset();
+    handoff.join();
+
+    ASSERT_TRUE(unexpected_error.empty()) << unexpected_error;
+    ASSERT_TRUE(successor.has_value());
+    std::ifstream published(generation_path);
+    std::uint64_t generation{};
+    ASSERT_TRUE(published >> generation);
+    EXPECT_EQ(generation, successor->generation());
+    successor.reset();
+    EXPECT_FALSE(std::filesystem::exists(socket_path));
+    EXPECT_FALSE(std::filesystem::exists(generation_path));
+  }
+}
+
+TEST(ServiceConfigTest, RuntimeHostRejectsUnsafeGenerationFilesBeforeConnect) {
+  TemporaryDirectory directory;
+  const auto socket_path = directory.path() / "robot-io.sock";
+  const auto generation_path = directory.path() / "robot-io.generation";
+  {
+    std::ofstream generation(generation_path);
+    generation << "not-a-generation\n";
+  }
+  ASSERT_EQ(chmod(generation_path.c_str(), 0600), 0);
+
+  auto malformed = policy_runtime::connect_robot_io_service(
+      socket_path.string(), generation_path.string(), 100);
+
+  ASSERT_FALSE(malformed.has_value());
+  EXPECT_EQ(malformed.error().code,
+            policy_runtime::ErrorCode::invalid_argument);
+
+  const auto link_path = directory.path() / "generation-link";
+  ASSERT_EQ(symlink(generation_path.c_str(), link_path.c_str()), 0);
+  auto linked = policy_runtime::connect_robot_io_service(
+      socket_path.string(), link_path.string(), 100);
+
+  ASSERT_FALSE(linked.has_value());
+  EXPECT_EQ(linked.error().code, policy_runtime::ErrorCode::invalid_argument);
+}
+
+TEST(ServiceConfigTest,
+     PackagedRuntimeHostRejectsMismatchAndConnectsAfterDaemonRestart) {
+#if !POLICY_RUNTIME_HAS_ZMQ
+  GTEST_SKIP() << "packaged runtime host requires ZeroMQ for its RPC loop";
+#endif
+  TemporaryDirectory directory;
+  const auto profile_path = directory.path() / "empty-profile.json";
+  const auto socket_path = directory.path() / "robot-io.sock";
+  const auto generation_path = directory.path() / "robot-io.generation";
+  write_empty_robot_profile(profile_path);
+
+  auto first_daemon =
+      start_service_daemon(profile_path, socket_path, generation_path);
+  ASSERT_GT(first_daemon.pid(), 0);
+  const auto first_generation =
+      wait_for_generation(generation_path, first_daemon);
+  ASSERT_TRUE(first_generation.has_value());
+  const auto mismatched_generation =
+      *first_generation == std::numeric_limits<std::uint32_t>::max()
+          ? *first_generation - 1U
+          : *first_generation + 1U;
+  {
+    std::ofstream generation(generation_path, std::ios::trunc);
+    generation << mismatched_generation << '\n';
+  }
+
+  auto stale_host = start_runtime_host(
+      profile_path, socket_path, generation_path,
+      directory.path() / "stale-host.sock");
+  ASSERT_GT(stale_host.pid(), 0);
+  int stale_host_status{};
+  ASSERT_TRUE(stale_host.exited_within(std::chrono::seconds{3},
+                                       stale_host_status));
+  EXPECT_TRUE(WIFEXITED(stale_host_status));
+  EXPECT_EQ(WEXITSTATUS(stale_host_status), 1);
+  const auto unexpected_second_client = connect_seqpacket(socket_path);
+  EXPECT_LT(unexpected_second_client, 0)
+      << "runtime host did not consume the daemon's one-client listener";
+  if (unexpected_second_client >= 0) {
+    close(unexpected_second_client);
+  }
+
+  ASSERT_EQ(kill(first_daemon.pid(), SIGTERM), 0);
+  int first_daemon_status{};
+  ASSERT_TRUE(first_daemon.exited_within(std::chrono::seconds{3},
+                                         first_daemon_status));
+  ASSERT_TRUE(WIFEXITED(first_daemon_status));
+  ASSERT_EQ(WEXITSTATUS(first_daemon_status), 0);
+  ASSERT_FALSE(std::filesystem::exists(generation_path));
+
+  auto second_daemon =
+      start_service_daemon(profile_path, socket_path, generation_path);
+  ASSERT_GT(second_daemon.pid(), 0);
+  const auto second_generation =
+      wait_for_generation(generation_path, second_daemon);
+  ASSERT_TRUE(second_generation.has_value());
+  ASSERT_NE(*second_generation, *first_generation);
+
+  const auto endpoint_path = directory.path() / "fresh-host.sock";
+  auto fresh_host = start_runtime_host(profile_path, socket_path,
+                                       generation_path, endpoint_path);
+  ASSERT_GT(fresh_host.pid(), 0);
+  int fresh_host_status{};
+#if POLICY_RUNTIME_HAS_ZMQ
+  ASSERT_TRUE(wait_for_path(endpoint_path, std::chrono::seconds{3}));
+  EXPECT_FALSE(fresh_host.poll_exit(fresh_host_status));
+  ASSERT_EQ(kill(fresh_host.pid(), SIGTERM), 0);
+  ASSERT_TRUE(fresh_host.exited_within(std::chrono::seconds{3},
+                                       fresh_host_status));
+  EXPECT_TRUE(WIFEXITED(fresh_host_status));
+  EXPECT_EQ(WEXITSTATUS(fresh_host_status), 0);
+#else
+  ASSERT_TRUE(fresh_host.exited_within(std::chrono::seconds{3},
+                                       fresh_host_status));
+  EXPECT_TRUE(WIFEXITED(fresh_host_status));
+  EXPECT_EQ(WEXITSTATUS(fresh_host_status), 1);
+#endif
+  const auto second_unexpected_client = connect_seqpacket(socket_path);
+  EXPECT_LT(second_unexpected_client, 0)
+      << "runtime host did not connect after daemon restart";
+  if (second_unexpected_client >= 0) {
+    close(second_unexpected_client);
+  }
+  ASSERT_EQ(kill(second_daemon.pid(), SIGTERM), 0);
+  int second_daemon_status{};
+  ASSERT_TRUE(second_daemon.exited_within(std::chrono::seconds{3},
+                                          second_daemon_status));
+  EXPECT_TRUE(WIFEXITED(second_daemon_status));
+  EXPECT_EQ(WEXITSTATUS(second_daemon_status), 0);
 }
 
 TEST(ServiceConfigTest, ServiceListenerRejectsDifferentEffectiveUser) {

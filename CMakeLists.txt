@@ -89,6 +89,7 @@ add_library(policy_runtime_core
     src/runtime/runtime_host.cpp
     src/runtime/runtime_host_cli.cpp
     src/runtime/robot_io_client.cpp
+    src/runtime/robot_io_service.cpp
     src/robot_io/transport_scheduler.cpp
     src/transport/ethercat/elmo_gold.cpp
     src/transport/ethercat/master.cpp
@@ -234,10 +235,13 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         PRIVATE POLICY_RUNTIME_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
                 POLICY_RUNTIME_TOOL_DIR="${CMAKE_CURRENT_BINARY_DIR}"
                 POLICY_RUNTIME_DAEMON_PATH="$<TARGET_FILE:robot-io-daemon>"
+                POLICY_RUNTIME_HOST_PATH="$<TARGET_FILE:policy-runtime-host>"
+                POLICY_RUNTIME_FAKE_POLICY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json"
+                POLICY_RUNTIME_HAS_ZMQ=$<BOOL:${POLICY_RUNTIME_HAS_ZMQ}>
                 POLICY_RUNTIME_SYSTEMD_UNIT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/packaging/systemd/robot-io-daemon.service")
     policy_runtime_configure_target(service_config_test)
-    add_dependencies(service_config_test robot-io-daemon robot-io-health
-                     ethercat-cycle-stats)
+    add_dependencies(service_config_test robot-io-daemon policy-runtime-host
+                     robot-io-health ethercat-cycle-stats)
 
     add_executable(runtime_host_test
         tests/cpp/integration/runtime_host_test.cpp)

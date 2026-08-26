@@ -570,6 +570,24 @@ TEST(RuntimeHostCliTest, AcceptsArgparseEqualsSyntaxForValueFlags) {
   EXPECT_EQ(parsed.value().robot_io_generation, 9U);
 }
 
+TEST(RuntimeHostCliTest, AcceptsRobotIoServicePaths) {
+  const std::vector<std::string_view> arguments{
+      "policy-runtime-host",
+      "--policy-profile=policy.json",
+      "--robot-io-socket=/run/policy-runtime/robot-io.sock",
+      "--robot-io-generation-file=/run/policy-runtime/robot-io.generation",
+  };
+  auto parsed = policy_runtime::parse_runtime_host_cli(arguments);
+
+  ASSERT_TRUE(parsed.has_value()) << parsed.error().message;
+  EXPECT_EQ(parsed.value().robot_io_socket,
+            "/run/policy-runtime/robot-io.sock");
+  EXPECT_EQ(parsed.value().robot_io_generation_file,
+            "/run/policy-runtime/robot-io.generation");
+  EXPECT_FALSE(parsed.value().robot_io_fd.has_value());
+  EXPECT_FALSE(parsed.value().robot_io_generation.has_value());
+}
+
 TEST(RuntimeHostCliTest, RejectsMissingValuesUnknownFlagsAndIncompleteRobotIo) {
   for (const auto& arguments : {
            std::vector<std::string_view>{"host"},
@@ -579,6 +597,16 @@ TEST(RuntimeHostCliTest, RejectsMissingValuesUnknownFlagsAndIncompleteRobotIo) {
            {"host", "--policy-profile", "p.json", "--robot-io-fd", "4"},
            {"host", "--policy-profile", "p.json", "--robot-io-generation",
             "2"},
+           {"host", "--policy-profile", "p.json", "--robot-io-socket",
+            "/run/robot-io.sock"},
+           {"host", "--policy-profile", "p.json",
+            "--robot-io-generation-file", "/run/robot-io.generation"},
+           {"host", "--policy-profile", "p.json", "--robot-io-fd", "4",
+            "--robot-io-generation", "2", "--robot-io-socket",
+            "/run/robot-io.sock", "--robot-io-generation-file",
+            "/run/robot-io.generation"},
+           {"host", "--policy-profile", "p.json", "--robot-io-socket=",
+            "--robot-io-generation-file=/run/robot-io.generation"},
        }) {
     EXPECT_FALSE(policy_runtime::parse_runtime_host_cli(arguments).has_value());
   }

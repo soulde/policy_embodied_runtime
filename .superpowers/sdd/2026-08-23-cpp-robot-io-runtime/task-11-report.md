@@ -18,6 +18,21 @@ generation, accepts one peer with bounded signal-aware polling, authenticates
 the peer with `SO_PEERCRED`, and cleans runtime files by inode on exit. The
 original positional connected-FD form remains supported.
 
+Fix round 2 keeps the generation-file flock held while the listener checks and
+unlinks both published inodes, and closes the generation descriptor only after
+the generation path is removed. A concurrent handoff regression repeatedly
+starts a successor while the old listener is being destroyed and verifies the
+successor's generation remains published.
+
+`policy-runtime-host` now accepts paired `--robot-io-socket` and
+`--robot-io-generation-file` options in addition to the existing paired FD and
+generation options. The service connector uses `O_NOFOLLOW`, strict generation
+parsing, owner/type/mode checks, `SO_PEERCRED`, a post-connect inode recheck,
+and the existing `RobotIoClient` generation handshake. The service integration
+coverage starts a no-hardware daemon and packaged host, rejects a deliberately
+mismatched generation, and exercises a fresh connection after daemon restart
+when the host is built with ZeroMQ.
+
 The systemd unit installs through the dedicated
 `POLICY_RUNTIME_SYSTEMD_UNIT_DIR` default `lib/systemd/system`, independently
 of GNUInstallDirs' multiarch library directory. The qualification guide now
@@ -59,6 +74,21 @@ arguments, and an actual `/usr` plus `DESTDIR` install.
   `/usr/bin/robot-io-daemon`; the unit's listener semantics are covered by the
   passing packaged-unit test and installed-artifact check.
 - `git diff --check`: clean.
+
+Fix-round-2 evidence before the controller-directed commit:
+
+- Pinned CMake 4.4.2 rebuilt `policy-runtime-host`, `service_config_test`, and
+  `runtime_host_test`: passed.
+- Runtime-host CLI selection: 4/4 passed.
+- Non-socket service/config selection, including unsafe generation-file
+  rejection: 5/5 passed.
+- Full service/config execution: 5 passed, 1 skipped because compatible
+  cppzmq was unavailable, and 4 listener tests reached only the managed
+  sandbox's `bind(AF_UNIX, SOCK_SEQPACKET)` `EPERM` boundary.
+- The requested unsandboxed listener run was canceled before producing test
+  output. Full build, install, Python, and sanitizer reruns were not performed
+  after that cancellation because the controller directed an immediate commit
+  with no more tests.
 
 Hardware, real systemd activation, unsandboxed socket execution, and target
 PREEMPT_RT/IgH/Elmo operation remain explicitly deferred to the documented

@@ -17,6 +17,7 @@
 #include <sys/time.h>
 
 #include "policy_runtime/runtime/robot_io_client.hpp"
+#include "policy_runtime/runtime/robot_io_service.hpp"
 #include "policy_runtime/runtime/runtime_host.hpp"
 #include "policy_runtime/runtime/runtime_host_cli.hpp"
 
@@ -146,6 +147,17 @@ int main(int argc, char** argv) {
     auto client = policy_runtime::RobotIoClient::connect(
         *options.value().robot_io_fd,
         *options.value().robot_io_generation);
+    if (!client.has_value()) {
+      std::cerr << client.error().message << '\n';
+      return 1;
+    }
+    robot_io = policy_runtime::make_runtime_robot_io(
+        std::move(client.value()));
+  } else if (options.value().robot_io_socket.has_value()) {
+    auto client = policy_runtime::connect_robot_io_service(
+        *options.value().robot_io_socket,
+        *options.value().robot_io_generation_file,
+        options.value().timeout_ms);
     if (!client.has_value()) {
       std::cerr << client.error().message << '\n';
       return 1;

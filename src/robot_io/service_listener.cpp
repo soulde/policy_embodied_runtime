@@ -337,11 +337,15 @@ void RobotIoServiceListener::release_noexcept() noexcept {
   if (listen_fd_ >= 0) {
     static_cast<void>(close(std::exchange(listen_fd_, -1)));
   }
+  // Keep the generation flock through both inode checks. A successor opens
+  // this same generation inode before taking the lock, so releasing it first
+  // would let the successor publish and then have this incarnation unlink its
+  // newly published path.
+  unlink_if_same(socket_path_, socket_device_, socket_inode_);
   if (generation_fd_ >= 0) {
+    unlink_if_same(generation_path_, generation_device_, generation_inode_);
     static_cast<void>(close(std::exchange(generation_fd_, -1)));
   }
-  unlink_if_same(socket_path_, socket_device_, socket_inode_);
-  unlink_if_same(generation_path_, generation_device_, generation_inode_);
   socket_device_ = 0U;
   socket_inode_ = 0U;
   generation_device_ = 0U;

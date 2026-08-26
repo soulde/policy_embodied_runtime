@@ -66,6 +66,20 @@ Result<RuntimeHostCliOptions> parse_runtime_host_cli(
              "--robot-io-generation requires a positive 32-bit integer"});
       }
       options.robot_io_generation = static_cast<std::uint32_t>(generation);
+    } else if (flag == "--robot-io-socket") {
+      if (value.empty()) {
+        return Result<RuntimeHostCliOptions>::failure(
+            {ErrorCode::invalid_argument,
+             "--robot-io-socket requires a nonempty path"});
+      }
+      options.robot_io_socket = std::string(value);
+    } else if (flag == "--robot-io-generation-file") {
+      if (value.empty()) {
+        return Result<RuntimeHostCliOptions>::failure(
+            {ErrorCode::invalid_argument,
+             "--robot-io-generation-file requires a nonempty path"});
+      }
+      options.robot_io_generation_file = std::string(value);
     } else {
       return Result<RuntimeHostCliOptions>::failure(
           {ErrorCode::invalid_argument, "unknown argument: " + std::string(flag)});
@@ -81,6 +95,19 @@ Result<RuntimeHostCliOptions> parse_runtime_host_cli(
         {ErrorCode::invalid_argument,
          "--robot-io-fd and --robot-io-generation must be provided together"});
   }
+  if (options.robot_io_socket.has_value() !=
+      options.robot_io_generation_file.has_value()) {
+    return Result<RuntimeHostCliOptions>::failure(
+        {ErrorCode::invalid_argument,
+         "--robot-io-socket and --robot-io-generation-file must be provided "
+         "together"});
+  }
+  if (options.robot_io_fd.has_value() &&
+      options.robot_io_socket.has_value()) {
+    return Result<RuntimeHostCliOptions>::failure(
+        {ErrorCode::invalid_argument,
+         "robot I/O descriptor and service-path modes are mutually exclusive"});
+  }
   return Result<RuntimeHostCliOptions>::success(std::move(options));
 }
 
@@ -94,8 +121,9 @@ std::string resolve_policy_endpoint(std::string_view endpoint) {
 std::string runtime_host_usage() {
   return "usage: policy-runtime-host [--endpoint ENDPOINT] "
          "[--timeout-ms TIMEOUT_MS] --policy-profile POLICY_PROFILE "
-         "[--robot-profile ROBOT_PROFILE] [--robot-io-fd FD "
-         "--robot-io-generation GENERATION]\n";
+         "[--robot-profile ROBOT_PROFILE] "
+         "[--robot-io-fd FD --robot-io-generation GENERATION | "
+         "--robot-io-socket PATH --robot-io-generation-file PATH]\n";
 }
 
 }  // namespace policy_runtime

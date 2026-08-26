@@ -17,6 +17,8 @@ struct RuntimeHostCliOptions {
   std::optional<std::string> robot_profile;
   std::optional<int> robot_io_fd;
   std::optional<std::uint32_t> robot_io_generation;
+  std::optional<std::string> robot_io_socket;
+  std::optional<std::string> robot_io_generation_file;
   bool show_help{};
 };
 
