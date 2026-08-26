@@ -102,3 +102,37 @@ above one second before any duration conversion can overflow.
   LeakSanitizer cannot run under the sandbox ptrace policy, so leak detection
   was disabled for that sanitizer run.
 - `git diff --check`: clean.
+
+## Fix Round 2
+
+Completed the follow-up safety and IPC compatibility pass. A missing ST3215
+goal-write acknowledgement is now treated as optional so the executor
+continues to the present-position read, while non-timeout acknowledgement
+errors still stop the transaction. A timed-out enabled servo command now
+publishes stale/timeout feedback, which the daemon feeds into its existing
+serial safety-group latch until a newer command sequence recovers the group.
+
+Mixed RuntimeHost outputs use one combined axis-and-servo client publication.
+The servo snapshot is written before the axis snapshot, and the daemon treats
+the matching axis sequence/timestamp as the commit barrier. The registry locks
+all affected servos, validates every snapshot record against the shared epoch,
+and only then stages the whole batch; a malformed or non-uniform batch leaves
+all previous servo commands intact.
+
+ABI-v2 setup validation now has raw-handshake coverage for a wrong advertised
+descriptor count, a wrong SCM_RIGHTS count, and read-only descriptors supplied
+for each writable role. The v1 receiver regression verifies that a v2 packet
+is explicitly truncated rather than accepted as a valid v1 prefix, closes any
+received descriptors, and leaves the server lifecycle clean.
+
+### Fix-round verification
+
+- Pinned CMake 4.4.2 all-target build: passed.
+- Full non-socket CTest selection: 160/160 passed; the remaining IPC,
+  virtual-serial, and cross-language socket entries are controller-runnable.
+- Python suite: 28/28 passed.
+- ASan/UBSan focused ST3215, RuntimeHost, IPC, and PTY coverage: passed with
+  `detect_leaks=1` and `halt_on_error=1`.
+- Focused ST3215 and RuntimeHost regressions: 25 consecutive repetitions each
+  passed.
+- `git diff --check`: clean.

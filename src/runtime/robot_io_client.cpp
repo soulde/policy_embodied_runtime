@@ -631,6 +631,19 @@ RobotIoClient::~RobotIoClient() { release_noexcept(); }
 Result<void> RobotIoClient::publish_commands(std::span<const AxisCommand> axes,
                                              std::uint64_t sequence,
                                              std::int64_t timestamp_ns) {
+  if (servo_count_ != 0U) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument,
+         "v2 IPC commands require one atomic axis and servo publication"});
+  }
+  return publish_commands(axes, std::span<const St3215ServoCommand>{},
+                          sequence, timestamp_ns);
+}
+
+Result<void> RobotIoClient::publish_commands(
+    std::span<const AxisCommand> axes,
+    std::span<const St3215ServoCommand> servos,
+    std::uint64_t sequence, std::int64_t timestamp_ns) {
   auto peer = check_peer();
   if (!peer.has_value()) {
     return peer;
@@ -638,6 +651,32 @@ Result<void> RobotIoClient::publish_commands(std::span<const AxisCommand> axes,
   if (!command_writer_.has_value()) {
     return Result<void>::failure(
         {ErrorCode::unavailable, "IPC command writer is closed"});
+  }
+  if (servos.size() != servo_count_ ||
+      (servo_count_ != 0U && !servo_command_writer_.has_value())) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument, "IPC servo command topology mismatch"});
+  }
+  auto axis_validation = command_writer_->validate(axes, sequence, timestamp_ns);
+  if (!axis_validation.has_value()) {
+    return axis_validation;
+  }
+  if (servo_count_ == 0U) {
+    return command_writer_->publish(axes, sequence, timestamp_ns);
+  }
+  auto servo_validation =
+      servo_command_writer_->validate(servos, sequence, timestamp_ns);
+  if (!servo_validation.has_value()) {
+    return servo_validation;
+  }
+  // The servo payload is staged first. The axis publication is the v2 commit
+  // barrier consumed by the daemon, so a failed servo publication can never
+  // expose a new axis epoch and a failed final commit leaves only an
+  // uncommitted servo payload.
+  auto servo_published =
+      servo_command_writer_->publish(servos, sequence, timestamp_ns);
+  if (!servo_published.has_value()) {
+    return servo_published;
   }
   return command_writer_->publish(axes, sequence, timestamp_ns);
 }

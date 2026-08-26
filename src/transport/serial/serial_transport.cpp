@@ -518,11 +518,13 @@ void SerialTransport::close() noexcept {
   impl_->request_stop();
   std::scoped_lock io_lock(impl_->io_mutex);
   if (impl_->fd >= 0) {
-    static_cast<void>(::ioctl(impl_->fd, TIOCNXCL));
     if (impl_->has_original_termios) {
       static_cast<void>(
           ::tcsetattr(impl_->fd, TCSANOW, &impl_->original_termios));
     }
+    // Keep the kernel exclusion claim through termios restoration so another
+    // opener cannot race with teardown and observe partially restored state.
+    static_cast<void>(::ioctl(impl_->fd, TIOCNXCL));
     static_cast<void>(::close(impl_->fd));
     impl_->fd = -1;
   }

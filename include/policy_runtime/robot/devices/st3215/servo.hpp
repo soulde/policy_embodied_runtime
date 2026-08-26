@@ -18,6 +18,7 @@
 #include "policy_runtime/profiles/robot_profile.hpp"
 #include "policy_runtime/robot_io/ipc_protocol.hpp"
 #include "policy_runtime/robot_io/local_snapshot.hpp"
+#include "policy_runtime/robot_io/snapshot.hpp"
 #include "policy_runtime/robot_io/transport_scheduler.hpp"
 #include "policy_runtime/transport/frame_transport.hpp"
 
@@ -73,6 +74,11 @@ class St3215Servo {
   bool read_staged(std::uint64_t consumed_publication,
                    StagedCommand& output) const noexcept;
   void publish_feedback(const St3215ServoFeedback& feedback) noexcept;
+  bool try_lock_command() noexcept;
+  void unlock_command() noexcept;
+  St3215CommandAcceptance inspect_command(
+      const St3215ServoCommand& command, std::int64_t now_ns) const noexcept;
+  void commit_command(const St3215ServoCommand& command) noexcept;
 
   St3215ServoConfig config_;
   LocalSnapshot<StagedCommand> commands_;
@@ -85,6 +91,7 @@ class St3215Servo {
   bool has_command_{};
 
   friend class St3215Bus;
+  friend class St3215DeviceRegistry;
 };
 
 struct St3215BusOptions {
@@ -117,6 +124,7 @@ class St3215Bus {
     std::uint64_t feedback_sequence{};
     St3215ServoCommand command{};
     bool has_command{};
+    bool command_timed_out{};
   };
 
   void executor_main(std::stop_token stop_token) noexcept;
@@ -169,6 +177,9 @@ class St3215DeviceRegistry {
   St3215CommandAcceptance stage_command(
       std::size_t servo_index,
       const St3215ServoCommand& command) noexcept;
+  St3215CommandAcceptance stage_commands(
+      const Snapshot<St3215ServoCommand>& snapshot,
+      std::int64_t now_ns) noexcept;
   St3215ServoFeedback feedback(std::size_t servo_index,
                                std::int64_t now_ns = 0) const noexcept;
   St3215RegistrySafetySnapshot safety_snapshot(

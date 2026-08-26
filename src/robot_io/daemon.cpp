@@ -386,6 +386,12 @@ CommandAcceptance RobotIoDaemon::refresh_commands_owned() noexcept {
   }
   const auto ipc_acceptance =
       safety_.accept_commands(snapshot.value(), clock_->now_ns());
+  if (ipc_acceptance != CommandAcceptance::rejected &&
+      ipc_->servo_count() != 0U) {
+    ipc_commit_sequence_ = snapshot.value().sequence;
+    ipc_commit_timestamp_ns_ = snapshot.value().timestamp_ns;
+    has_ipc_commit_ = true;
+  }
   if (ipc_acceptance == CommandAcceptance::accepted) {
     last_command_sequence_.store(snapshot.value().sequence,
                                  std::memory_order_release);
@@ -416,11 +422,10 @@ void RobotIoDaemon::process_device_cycle_owned(
   const auto now = clock_->now_ns();
   if (ipc_.has_value() && ipc_->servo_count() != 0U) {
     auto commands = ipc_->read_servo_commands_realtime();
-    if (commands.has_value()) {
-      for (std::size_t index = 0; index < commands.value().axis_count; ++index) {
-        static_cast<void>(
-            serial_devices_.stage_command(index, commands.value().axes[index]));
-      }
+    if (commands.has_value() && has_ipc_commit_ &&
+        commands.value().sequence == ipc_commit_sequence_ &&
+        commands.value().timestamp_ns == ipc_commit_timestamp_ns_) {
+      static_cast<void>(serial_devices_.stage_commands(commands.value(), now));
     }
   }
   if (stop_requested_.load(std::memory_order_acquire)) {

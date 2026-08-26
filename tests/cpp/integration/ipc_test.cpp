@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -15,9 +16,11 @@
 
 #include <gtest/gtest.h>
 
+#include <linux/memfd.h>
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -186,6 +189,77 @@ void send_raw_setup(int socket_fd, std::size_t payload_size,
   std::memcpy(CMSG_DATA(item), descriptors.data(), descriptors.size_bytes());
   ASSERT_EQ(sendmsg(socket_fd, &message, MSG_NOSIGNAL | MSG_EOR),
             static_cast<ssize_t>(payload_size));
+}
+
+policy_runtime::IpcSetupMessageV2 valid_v2_setup(std::uint32_t axis_count,
+                                                 std::uint32_t servo_count) {
+  policy_runtime::IpcSetupMessageV2 setup{};
+  setup.generation = kGeneration;
+  const auto axis_commands =
+      SnapshotRegion<AxisCommand>::mapping_size(axis_count).value();
+  const auto axis_feedback =
+      SnapshotRegion<AxisFeedback>::mapping_size(axis_count).value();
+  const auto servo_commands =
+      SnapshotRegion<St3215ServoCommand>::mapping_size(servo_count).value();
+  const auto servo_feedback =
+      SnapshotRegion<St3215ServoFeedback>::mapping_size(servo_count).value();
+  setup.mappings = {
+      policy_runtime::IpcMappingDescription{
+          static_cast<std::uint32_t>(IpcRegionKind::command), axis_count,
+          sizeof(AxisCommand), 0U, axis_commands},
+      policy_runtime::IpcMappingDescription{
+          static_cast<std::uint32_t>(IpcRegionKind::feedback), axis_count,
+          sizeof(AxisFeedback), 0U, axis_feedback},
+      policy_runtime::IpcMappingDescription{
+          static_cast<std::uint32_t>(IpcRegionKind::servo_command),
+          servo_count, sizeof(St3215ServoCommand), 0U, servo_commands},
+      policy_runtime::IpcMappingDescription{
+          static_cast<std::uint32_t>(IpcRegionKind::servo_feedback),
+          servo_count, sizeof(St3215ServoFeedback), 0U, servo_feedback}};
+  return setup;
+}
+
+void send_raw_v2_setup(int socket_fd,
+                       const policy_runtime::IpcSetupMessageV2& setup,
+                       std::span<const int> descriptors) {
+  alignas(cmsghdr)
+      std::array<std::byte, CMSG_SPACE(4 * sizeof(int))> control{};
+  ASSERT_LE(descriptors.size(), 4U);
+  iovec vector{const_cast<policy_runtime::IpcSetupMessageV2*>(&setup),
+               sizeof(setup)};
+  msghdr message{};
+  message.msg_iov = &vector;
+  message.msg_iovlen = 1;
+  message.msg_control = control.data();
+  message.msg_controllen = CMSG_SPACE(descriptors.size_bytes());
+  auto* item = CMSG_FIRSTHDR(&message);
+  ASSERT_NE(item, nullptr);
+  item->cmsg_level = SOL_SOCKET;
+  item->cmsg_type = SCM_RIGHTS;
+  item->cmsg_len = CMSG_LEN(descriptors.size_bytes());
+  std::memcpy(CMSG_DATA(item), descriptors.data(), descriptors.size_bytes());
+  ASSERT_EQ(sendmsg(socket_fd, &message, MSG_NOSIGNAL | MSG_EOR),
+            static_cast<ssize_t>(sizeof(setup)));
+}
+
+int sealed_memfd(std::size_t size, int access_mode) {
+  const int owner = static_cast<int>(
+      syscall(SYS_memfd_create, "ipc-test", MFD_CLOEXEC | MFD_ALLOW_SEALING));
+  if (owner < 0 || ftruncate(owner, static_cast<off_t>(size)) != 0 ||
+      fcntl(owner, F_ADD_SEALS,
+            F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
+    if (owner >= 0) {
+      close(owner);
+    }
+    return -1;
+  }
+  if (access_mode == O_RDWR) {
+    return owner;
+  }
+  const std::string path = "/proc/self/fd/" + std::to_string(owner);
+  const int exposed = open(path.c_str(), access_mode | O_CLOEXEC);
+  close(owner);
+  return exposed;
 }
 
 TEST(IpcTest, PublishesOnlyCompleteSnapshots) {
@@ -463,6 +537,137 @@ TEST(IpcTest, VersionTwoTransfersSelfDescribingServoMappingsBothDirections) {
   ASSERT_TRUE(host_feedback.has_value());
   EXPECT_EQ(host_feedback.value().axis_count, 2U);
   EXPECT_DOUBLE_EQ(host_feedback.value().axes[0].position_rad, 1.5);
+}
+
+TEST(IpcTest, VersionTwoAtomicPublicationWritesBothCommandRegions) {
+  auto sockets = make_socket_pair();
+  auto server_result = RobotIoIpcServer::create(sockets[0], 1U, 1U, kGeneration);
+  ASSERT_TRUE(server_result.has_value()) << server_result.error().message;
+  auto server = std::move(server_result.value());
+  ASSERT_TRUE(server.send_setup().has_value());
+  auto client_result = RobotIoClient::connect(sockets[1], kGeneration);
+  ASSERT_TRUE(client_result.has_value()) << client_result.error().message;
+  auto client = std::move(client_result.value());
+
+  const std::array axis_commands{command(1.25, 9U)};
+  const std::array servo_commands{
+      St3215ServoCommand{9U, 90, -0.75, true, false}};
+  ASSERT_TRUE(client.publish_commands(axis_commands, servo_commands, 9U, 90)
+                  .has_value());
+
+  auto observed_axes = server.read_commands();
+  ASSERT_TRUE(observed_axes.has_value());
+  EXPECT_DOUBLE_EQ(observed_axes.value().axes[0].target, 1.25);
+  auto observed_servos = server.read_servo_commands();
+  ASSERT_TRUE(observed_servos.has_value());
+  EXPECT_DOUBLE_EQ(observed_servos.value().axes[0].target_position_rad, -0.75);
+}
+
+TEST(IpcTest, RejectsMalformedVersionTwoTopologyAndDescriptorCount) {
+  for (unsigned scenario = 0; scenario < 3U; ++scenario) {
+    auto sockets = make_socket_pair();
+    auto setup = valid_v2_setup(1U, 1U);
+    std::array<int, 4> descriptors{
+        open("/dev/null", O_RDONLY | O_CLOEXEC),
+        open("/dev/null", O_RDONLY | O_CLOEXEC),
+        open("/dev/null", O_RDONLY | O_CLOEXEC),
+        open("/dev/null", O_RDONLY | O_CLOEXEC)};
+    ASSERT_TRUE(std::all_of(descriptors.begin(), descriptors.end(),
+                            [](int descriptor) { return descriptor >= 0; }));
+    std::size_t sent_count = descriptors.size();
+    if (scenario == 0U) {
+      setup.descriptor_count = 3U;
+    } else if (scenario == 1U) {
+      setup.mappings[3].item_count = 2U;
+    } else {
+      sent_count = 3U;
+    }
+    send_raw_v2_setup(
+        sockets[0], setup,
+        std::span<const int>(descriptors).first(sent_count));
+
+    auto client = RobotIoClient::connect(sockets[1], kGeneration);
+
+    ASSERT_FALSE(client.has_value());
+    EXPECT_EQ(client.error().code, ErrorCode::protocol);
+    EXPECT_EQ(close(sockets[0]), 0);
+    for (const auto descriptor : descriptors) {
+      EXPECT_EQ(close(descriptor), 0);
+    }
+  }
+}
+
+TEST(IpcTest, RejectsVersionTwoDescriptorWithWrongWriteCapability) {
+  // Changing either writable descriptor to O_RDONLY must fail before the
+  // client maps any region.  In particular, the servo-command descriptor is
+  // not protected merely because the axis command descriptor was checked.
+  for (const auto writable_index : {std::size_t{0}, std::size_t{2}}) {
+    auto sockets = make_socket_pair();
+    const auto setup = valid_v2_setup(1U, 1U);
+    std::array<int, 4> descriptors{
+        sealed_memfd(setup.mappings[0].mapping_size,
+                     writable_index == 0U ? O_RDONLY : O_RDWR),
+        sealed_memfd(setup.mappings[1].mapping_size, O_RDONLY),
+        sealed_memfd(setup.mappings[2].mapping_size,
+                     writable_index == 2U ? O_RDONLY : O_RDWR),
+        sealed_memfd(setup.mappings[3].mapping_size, O_RDONLY)};
+    ASSERT_TRUE(std::all_of(descriptors.begin(), descriptors.end(),
+                            [](int descriptor) { return descriptor >= 0; }));
+    send_raw_v2_setup(sockets[0], setup, descriptors);
+
+    auto client = RobotIoClient::connect(sockets[1], kGeneration);
+
+    ASSERT_FALSE(client.has_value());
+    EXPECT_EQ(client.error().code, ErrorCode::protocol);
+    EXPECT_EQ(client.error().message,
+              "received descriptor has incorrect access mode");
+    EXPECT_EQ(close(sockets[0]), 0);
+    for (const auto descriptor : descriptors) {
+      EXPECT_EQ(close(descriptor), 0);
+    }
+  }
+}
+
+TEST(IpcTest, VersionTwoSetupIsUnambiguouslyRejectedByAVersionOneReceiver) {
+  const auto initial_descriptor_count = open_descriptor_count();
+  auto sockets = make_socket_pair();
+  auto server_result = RobotIoIpcServer::create(sockets[0], 1U, 1U,
+                                                 kGeneration);
+  ASSERT_TRUE(server_result.has_value()) << server_result.error().message;
+  auto server = std::move(server_result.value());
+  ASSERT_TRUE(server.send_setup().has_value());
+
+  policy_runtime::IpcSetupMessage v1_storage{};
+  alignas(cmsghdr)
+      std::array<std::byte, CMSG_SPACE(2 * sizeof(int))> control{};
+  iovec vector{&v1_storage, sizeof(v1_storage)};
+  msghdr message{};
+  message.msg_iov = &vector;
+  message.msg_iovlen = 1;
+  message.msg_control = control.data();
+  message.msg_controllen = control.size();
+  const auto received = recvmsg(sockets[1], &message, MSG_CMSG_CLOEXEC);
+  ASSERT_GE(received, 0);
+  EXPECT_NE(message.msg_flags & (MSG_TRUNC | MSG_CTRUNC), 0);
+  EXPECT_TRUE(static_cast<std::size_t>(received) != sizeof(v1_storage) ||
+              (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0)
+      << "a v1 receiver must have an explicit truncation signal, not accept "
+         "the v2 setup prefix as a v1 setup packet";
+
+  for (auto* item = CMSG_FIRSTHDR(&message); item != nullptr;
+       item = CMSG_NXTHDR(&message, item)) {
+    if (item->cmsg_level != SOL_SOCKET || item->cmsg_type != SCM_RIGHTS) {
+      continue;
+    }
+    const auto count = (item->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+    const auto* descriptors = reinterpret_cast<const int*>(CMSG_DATA(item));
+    for (std::size_t index = 0; index < count; ++index) {
+      EXPECT_EQ(close(descriptors[index]), 0);
+    }
+  }
+  EXPECT_EQ(close(sockets[1]), 0);
+  ASSERT_TRUE(server.close().has_value());
+  EXPECT_EQ(open_descriptor_count(), initial_descriptor_count);
 }
 
 TEST(IpcTest, TransfersSealedCloexecMemfdsAndSnapshotsBothDirections) {

@@ -350,6 +350,10 @@ TEST(St3215Test, RejectsStaleAndFutureCommandsAndStopsResendingExpiredEnable) {
   EXPECT_EQ(goals_after, goals_before);
   EXPECT_NE(servo->feedback().flags & policy_runtime::kSt3215FeedbackDisabled,
             0U);
+  EXPECT_NE(servo->feedback().flags & policy_runtime::kSt3215FeedbackTimeout,
+            0U);
+  EXPECT_NE(servo->feedback().flags & policy_runtime::kSt3215FeedbackStale,
+            0U);
   bus.stop(scheduler);
 }
 
@@ -401,6 +405,63 @@ TEST(St3215Test, RegistryFreezesMultipleServosOntoOneConfiguredPort) {
   auto duplicate_configure = registry.configure(profiles);
   ASSERT_FALSE(duplicate_configure.has_value());
   EXPECT_EQ(duplicate_configure.error().code, ErrorCode::invalid_argument);
+}
+
+TEST(St3215Test, RegistryRejectsAWholeSnapshotBeforeStagingAnyServo) {
+  const policy_runtime::profiles::SerialPortConfig serial{
+      "/dev/null", 1'000'000U, 64U, 259U, 10ms, 10ms, 1ms};
+  const std::array<policy_runtime::profiles::St3215ServoProfile, 2> profiles{
+      policy_runtime::profiles::St3215ServoProfile{
+          "first_position", "first_target", serial, 1, 1, 4095,
+          0, 0, 250ms, "arm", 250ms, 5ms},
+      policy_runtime::profiles::St3215ServoProfile{
+          "second_position", "second_target", serial, 2, 2, 4095,
+          0, 0, 250ms, "arm", 250ms, 5ms}};
+  policy_runtime::St3215DeviceRegistry registry;
+  ASSERT_TRUE(registry.configure(profiles).has_value());
+
+  const auto now_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  policy_runtime::Snapshot<St3215ServoCommand> initial{};
+  initial.sequence = 1U;
+  initial.timestamp_ns = now_ns;
+  initial.axis_count = 2U;
+  initial.axes[0] = St3215ServoCommand{1U, now_ns, 0.25, true, false};
+  initial.axes[1] = St3215ServoCommand{1U, now_ns, 0.5, true, false};
+  ASSERT_EQ(registry.stage_commands(initial, now_ns),
+            St3215CommandAcceptance::accepted);
+
+  ASSERT_EQ(registry.stage_command(
+                1U, St3215ServoCommand{3U, now_ns + 1, 0.75, true, false}),
+            St3215CommandAcceptance::accepted);
+  auto partially_stale = initial;
+  partially_stale.sequence = 2U;
+  partially_stale.timestamp_ns = now_ns + 1;
+  partially_stale.axes[0] =
+      St3215ServoCommand{2U, now_ns + 1, 1.0, true, false};
+  partially_stale.axes[1] =
+      St3215ServoCommand{2U, now_ns + 1, 1.25, true, false};
+
+  EXPECT_EQ(registry.stage_commands(partially_stale, now_ns + 1),
+            St3215CommandAcceptance::rejected);
+  EXPECT_EQ(registry.stage_command(0U, partially_stale.axes[0]),
+            St3215CommandAcceptance::accepted)
+      << "a rejected batch must not leave its acceptable prefix staged";
+
+  auto malformed_outer = initial;
+  malformed_outer.sequence = 4U;
+  malformed_outer.timestamp_ns = now_ns + 2;
+  malformed_outer.axes[0] =
+      St3215ServoCommand{4U, now_ns + 2, 1.5, true, false};
+  malformed_outer.axes[1] =
+      St3215ServoCommand{4U, now_ns + 3, 1.75, true, false};
+  EXPECT_EQ(registry.stage_commands(malformed_outer, now_ns + 3),
+            St3215CommandAcceptance::rejected);
+  EXPECT_EQ(registry.stage_command(0U, malformed_outer.axes[0]),
+            St3215CommandAcceptance::accepted)
+      << "record timestamps must match the outer snapshot before any commit";
 }
 
 TEST(St3215Test, ExecutorContainsTransportExceptionsAndPublishesFailure) {

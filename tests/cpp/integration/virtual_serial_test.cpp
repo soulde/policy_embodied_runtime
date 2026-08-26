@@ -217,6 +217,73 @@ TEST(VirtualSerialTest, StopCancelsAnInFlightSerialReceive) {
   EXPECT_LT(std::chrono::steady_clock::now() - started, 50ms);
 }
 
+TEST(VirtualSerialTest,
+     MissingGoalWriteAckDoesNotPreventPresentPositionFeedback) {
+  PtyEndpoint endpoint;
+  auto config = config_for(endpoint);
+  config.read_timeout = 10ms;
+  auto transport = std::make_shared<SerialTransport>(config);
+  auto servo = std::make_shared<policy_runtime::St3215Servo>(
+      policy_runtime::St3215ServoConfig{
+          "optional-write-ack", 1, 1, 4095, 0, 0, 250ms, 250ms, 5ms});
+  policy_runtime::St3215Bus bus{
+      transport, policy_runtime::St3215BusOptions{1ms}};
+  policy_runtime::TransportScheduler scheduler;
+  ASSERT_TRUE(bus.add_servo(servo).has_value());
+
+  const auto timestamp_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  ASSERT_EQ(servo->stage_command(policy_runtime::St3215ServoCommand{
+                17U, timestamp_ns, 1.0, true, false}),
+            policy_runtime::St3215CommandAcceptance::accepted);
+
+  std::atomic<bool> saw_goal{};
+  std::atomic<bool> saw_position_read{};
+  std::jthread device([&](std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      const auto request = endpoint.read_frame(50ms);
+      if (request.empty()) {
+        continue;
+      }
+      auto decoded = St3215Protocol::decode_packet(request);
+      if (!decoded.has_value()) {
+        continue;
+      }
+      if (decoded.value().instruction_or_status == 0x03U) {
+        saw_goal.store(true, std::memory_order_release);
+        // A write status packet is optional on deployed ST3215 devices.
+        continue;
+      }
+      if (decoded.value().instruction_or_status == 0x02U) {
+        saw_position_read.store(true, std::memory_order_release);
+        endpoint.write_chunks(St3215Protocol::status_packet(
+            1, 0,
+            std::array<std::byte, 2>{std::byte{0x34}, std::byte{0x02}}));
+      }
+    }
+  });
+
+  ASSERT_TRUE(bus.start(scheduler).has_value());
+  const auto deadline = std::chrono::steady_clock::now() + 500ms;
+  while (std::chrono::steady_clock::now() < deadline &&
+         (servo->feedback().command_sequence != 17U ||
+          (servo->feedback().flags & policy_runtime::kSt3215FeedbackValid) ==
+              0U)) {
+    std::this_thread::yield();
+  }
+
+  EXPECT_TRUE(saw_goal.load(std::memory_order_acquire));
+  EXPECT_TRUE(saw_position_read.load(std::memory_order_acquire));
+  EXPECT_EQ(servo->feedback().command_sequence, 17U);
+  EXPECT_EQ(servo->feedback().raw_position, 0x0234U);
+  EXPECT_NE(servo->feedback().flags & policy_runtime::kSt3215FeedbackValid,
+            0U);
+  bus.stop(scheduler);
+  device.request_stop();
+}
+
 TEST(VirtualSerialTest, ExclusiveClaimRejectsASeparateProcess) {
   PtyEndpoint endpoint;
   SerialTransport owner{config_for(endpoint)};
@@ -396,6 +463,137 @@ TEST(VirtualSerialTest, SerialTimeoutFeedsSafetyWithoutBlockingDaemonCycles) {
   ASSERT_TRUE(daemon.request_stop().has_value());
 }
 
+TEST(VirtualSerialTest,
+     ServoHeartbeatTimeoutLatchesSafetyUntilANewerCommandSequence) {
+  PtyEndpoint endpoint;
+  policy_runtime::profiles::RobotProfile profile;
+  profile.axes.push_back(policy_runtime::profiles::AxisConfig{
+      "axis", 0, 0, 0x9a, 0x00030924, 0x00010420,
+      policy_runtime::profiles::Cia402Mode::csp, 1000.0, -10.0, 10.0,
+      2s, "arm", 1.0, 10.0});
+  profile.st3215_servos.push_back(
+      policy_runtime::profiles::St3215ServoProfile{
+          "servo_position", "servo_target",
+          policy_runtime::profiles::SerialPortConfig{
+              endpoint.path(), 1'000'000U, 64U, 259U, 10ms, 10ms, 1ms},
+          1, 1, 4095, 0, 0, 250ms, "arm", 30ms, 5ms});
+
+  policy_runtime::RobotIoDaemon daemon;
+  ASSERT_TRUE(daemon.configure(profile).has_value());
+  std::jthread device([&](std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      const auto request = endpoint.read_frame(20ms);
+      if (request.empty()) {
+        continue;
+      }
+      auto decoded = St3215Protocol::decode_packet(request);
+      if (!decoded.has_value()) {
+        continue;
+      }
+      if (decoded.value().instruction_or_status == 0x03U) {
+        endpoint.write_chunks(St3215Protocol::status_packet(1, 0, {}));
+      } else if (decoded.value().instruction_or_status == 0x02U) {
+        endpoint.write_chunks(St3215Protocol::status_packet(
+            1, 0,
+            std::array<std::byte, 2>{std::byte{0x00}, std::byte{0x08}}));
+      }
+    }
+  });
+  ASSERT_TRUE(daemon.start().has_value());
+
+  const auto initial_deadline = std::chrono::steady_clock::now() + 500ms;
+  while (std::chrono::steady_clock::now() < initial_deadline &&
+         (daemon.serial_safety_snapshot().fault_count != 0U ||
+          (daemon.servo_feedback(0).flags &
+           policy_runtime::kSt3215FeedbackValid) == 0U)) {
+    daemon.cycle();
+    std::this_thread::sleep_for(1ms);
+  }
+  ASSERT_EQ(daemon.serial_safety_snapshot().fault_count, 0U);
+
+  const auto first_timestamp_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  policy_runtime::Snapshot<policy_runtime::AxisCommand> axes{};
+  axes.sequence = 1U;
+  axes.timestamp_ns = first_timestamp_ns;
+  axes.axis_count = 1U;
+  axes.axes[0] = policy_runtime::AxisCommand{
+      1U, first_timestamp_ns, 0.25, policy_runtime::kAxisCommandEnable, 0U};
+  const policy_runtime::St3215ServoCommand first_servo{
+      1U, first_timestamp_ns, 0.5, true, false};
+  ASSERT_EQ(daemon.stage_commands(axes),
+            policy_runtime::CommandAcceptance::accepted);
+  ASSERT_EQ(daemon.stage_servo_command(0, first_servo),
+            policy_runtime::St3215CommandAcceptance::accepted);
+
+  const auto enabled_deadline = std::chrono::steady_clock::now() + 500ms;
+  while (std::chrono::steady_clock::now() < enabled_deadline &&
+         (daemon.axis_request(0) != policy_runtime::AxisRequest::enable ||
+          daemon.servo_feedback(0).command_sequence != 1U ||
+          (daemon.servo_feedback(0).flags &
+           policy_runtime::kSt3215FeedbackValid) == 0U)) {
+    daemon.cycle();
+    std::this_thread::sleep_for(1ms);
+  }
+  ASSERT_EQ(daemon.axis_request(0), policy_runtime::AxisRequest::enable);
+
+  const auto timeout_deadline = std::chrono::steady_clock::now() + 500ms;
+  while (std::chrono::steady_clock::now() < timeout_deadline &&
+         (daemon.servo_feedback(0).flags &
+          policy_runtime::kSt3215FeedbackTimeout) == 0U) {
+    daemon.cycle();
+    std::this_thread::sleep_for(1ms);
+  }
+  ASSERT_NE(daemon.servo_feedback(0).flags &
+                policy_runtime::kSt3215FeedbackTimeout,
+            0U);
+
+  daemon.cycle();
+  EXPECT_EQ(daemon.axis_request(0), policy_runtime::AxisRequest::quick_stop);
+  EXPECT_NE(daemon.feedback(0).flags &
+                policy_runtime::kAxisFeedbackSafetySerial,
+            0U);
+  daemon.cycle();
+  EXPECT_EQ(daemon.axis_request(0), policy_runtime::AxisRequest::disable);
+  EXPECT_EQ(daemon.serial_safety_snapshot().fault_count, 1U);
+
+  EXPECT_NE(daemon.stage_servo_command(0, first_servo),
+            policy_runtime::St3215CommandAcceptance::accepted);
+  daemon.cycle();
+  EXPECT_EQ(daemon.axis_request(0), policy_runtime::AxisRequest::disable);
+
+  const auto second_timestamp_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  axes.sequence = 2U;
+  axes.timestamp_ns = second_timestamp_ns;
+  axes.axes[0].sequence = 2U;
+  axes.axes[0].timestamp_ns = second_timestamp_ns;
+  ASSERT_EQ(daemon.stage_commands(axes),
+            policy_runtime::CommandAcceptance::accepted);
+  ASSERT_EQ(daemon.stage_servo_command(
+                0, policy_runtime::St3215ServoCommand{
+                       2U, second_timestamp_ns, 0.75, true, false}),
+            policy_runtime::St3215CommandAcceptance::accepted);
+
+  const auto recovered_deadline = std::chrono::steady_clock::now() + 500ms;
+  while (std::chrono::steady_clock::now() < recovered_deadline &&
+         (daemon.axis_request(0) != policy_runtime::AxisRequest::enable ||
+          daemon.servo_feedback(0).command_sequence != 2U ||
+          daemon.serial_safety_snapshot().fault_count != 0U)) {
+    daemon.cycle();
+    std::this_thread::sleep_for(1ms);
+  }
+  EXPECT_EQ(daemon.servo_feedback(0).command_sequence, 2U);
+  EXPECT_EQ(daemon.serial_safety_snapshot().fault_count, 0U);
+  EXPECT_EQ(daemon.axis_request(0), policy_runtime::AxisRequest::enable);
+  ASSERT_TRUE(daemon.request_stop().has_value());
+  device.request_stop();
+}
+
 TEST(VirtualSerialTest, St3215OnlyDaemonRelaysV2IpcCommandsAndFeedback) {
   PtyEndpoint endpoint;
   std::array<int, 2> sockets{-1, -1};
@@ -447,6 +645,19 @@ TEST(VirtualSerialTest, St3215OnlyDaemonRelaysV2IpcCommandsAndFeedback) {
   const std::array command{policy_runtime::St3215ServoCommand{
       7U, timestamp_ns, std::numbers::pi, true, false}};
   ASSERT_TRUE(client.value().publish_servo_commands(command, 7U, timestamp_ns)
+                  .has_value());
+
+  const auto uncommitted_deadline = std::chrono::steady_clock::now() + 100ms;
+  while (std::chrono::steady_clock::now() < uncommitted_deadline) {
+    daemon.cycle();
+    std::this_thread::sleep_for(1ms);
+  }
+  EXPECT_NE(daemon.servo_feedback(0).command_sequence, 7U)
+      << "a servo payload is not committed until its matching axis epoch";
+
+  const std::array<policy_runtime::AxisCommand, 0> no_axes{};
+  ASSERT_TRUE(client.value()
+                  .publish_commands(no_axes, command, 7U, timestamp_ns)
                   .has_value());
 
   policy_runtime::St3215ServoFeedback observed{};

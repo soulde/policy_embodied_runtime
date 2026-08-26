@@ -165,6 +165,9 @@ class RobotIoDaemon {
   std::uint64_t command_publication_{};
   std::uint64_t consumed_command_publication_{};
   std::uint64_t acknowledged_rejection_publication_{};
+  std::uint64_t ipc_commit_sequence_{};
+  std::int64_t ipc_commit_timestamp_ns_{};
+  bool has_ipc_commit_{};
   std::atomic<std::uint64_t> rejected_command_publication_{};
 
   std::atomic<bool> running_{};

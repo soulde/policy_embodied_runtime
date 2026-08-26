@@ -262,14 +262,9 @@ class SnapshotRegion {
 
   Result<void> publish(std::span<const T> axes, std::uint64_t sequence,
                        std::int64_t timestamp_ns) noexcept {
-    const auto topology = validate_topology();
-    if (!topology.has_value()) {
-      return topology;
-    }
-    if (axes.size() != axis_count_ || timestamp_ns < 0) {
-      // An empty diagnostic keeps the post-mapping real-time path free of
-      // dynamic string storage even when the caller supplies the wrong span.
-      return Result<void>::failure({ErrorCode::invalid_argument, {}});
+    const auto validation = validate_publication(axes, sequence, timestamp_ns);
+    if (!validation.has_value()) {
+      return validation;
     }
 
     // This is a single-writer protocol. The inactive slot is marked odd, every
@@ -279,18 +274,6 @@ class SnapshotRegion {
     // the old even guard from observing payload stores ordered after the new odd
     // guard. This avoids both torn payloads and C++ data races without a mutex.
     const auto active = publication_->active_index.load(std::memory_order_seq_cst);
-    // The active index distinguishes the uninitialized state, so a first
-    // publication may use sequence zero with any nonnegative monotonic timestamp.
-    // Once active, later publications are independently nondecreasing in both.
-    if (active < 2) {
-      const auto current_sequence =
-          publication_->published_sequence.load(std::memory_order_seq_cst);
-      const auto current_timestamp =
-          publication_->published_timestamp_ns.load(std::memory_order_seq_cst);
-      if (sequence < current_sequence || timestamp_ns < current_timestamp) {
-        return Result<void>::failure({ErrorCode::invalid_argument, {}});
-      }
-    }
     const std::uint32_t target = active < 2 ? 1U - active : 0U;
     auto* target_slot = slot(target);
     const auto epoch = publication_->publish_epoch.fetch_add(2, std::memory_order_seq_cst) + 2;
@@ -317,6 +300,35 @@ class SnapshotRegion {
     publication_->published_timestamp_ns.store(timestamp_ns,
                                                 std::memory_order_seq_cst);
     publication_->active_index.store(target, std::memory_order_seq_cst);
+    return Result<void>::success();
+  }
+
+  Result<void> validate_publication(std::span<const T> axes,
+                                    std::uint64_t sequence,
+                                    std::int64_t timestamp_ns) const noexcept {
+    const auto topology = validate_topology();
+    if (!topology.has_value()) {
+      return topology;
+    }
+    if (axes.size() != axis_count_ || timestamp_ns < 0) {
+      // An empty diagnostic keeps the post-mapping real-time path free of
+      // dynamic string storage even when the caller supplies the wrong span.
+      return Result<void>::failure({ErrorCode::invalid_argument, {}});
+    }
+    // The active index distinguishes the uninitialized state, so a first
+    // publication may use sequence zero with any nonnegative monotonic timestamp.
+    // Once active, later publications are independently nondecreasing in both.
+    const auto active =
+        publication_->active_index.load(std::memory_order_seq_cst);
+    if (active < 2) {
+      const auto current_sequence =
+          publication_->published_sequence.load(std::memory_order_seq_cst);
+      const auto current_timestamp =
+          publication_->published_timestamp_ns.load(std::memory_order_seq_cst);
+      if (sequence < current_sequence || timestamp_ns < current_timestamp) {
+        return Result<void>::failure({ErrorCode::invalid_argument, {}});
+      }
+    }
     return Result<void>::success();
   }
 
@@ -505,6 +517,10 @@ class SnapshotWriter {
   Result<void> publish(std::span<const T> axes, std::uint64_t sequence,
                        std::int64_t timestamp_ns) noexcept {
     return region_.publish(axes, sequence, timestamp_ns);
+  }
+  Result<void> validate(std::span<const T> axes, std::uint64_t sequence,
+                        std::int64_t timestamp_ns) const noexcept {
+    return region_.validate_publication(axes, sequence, timestamp_ns);
   }
   SnapshotMappingAccess mapping_access() const noexcept {
     return SnapshotMappingAccess::read_write;

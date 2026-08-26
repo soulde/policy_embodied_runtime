@@ -34,15 +34,12 @@ class RobotIoClientAdapter final : public RuntimeRobotIo {
     return client_.read_servo_feedback();
   }
 
-  Result<void> publish_commands(std::span<const AxisCommand> commands,
-                                std::uint64_t sequence,
-                                std::int64_t timestamp_ns) override {
-    return client_.publish_commands(commands, sequence, timestamp_ns);
-  }
-  Result<void> publish_servo_commands(
-      std::span<const St3215ServoCommand> commands, std::uint64_t sequence,
-      std::int64_t timestamp_ns) override {
-    return client_.publish_servo_commands(commands, sequence, timestamp_ns);
+  Result<void> publish_commands(
+      std::span<const AxisCommand> axis_commands,
+      std::span<const St3215ServoCommand> servo_commands,
+      std::uint64_t sequence, std::int64_t timestamp_ns) override {
+    return client_.publish_commands(axis_commands, servo_commands, sequence,
+                                    timestamp_ns);
   }
 
   void close() noexcept override { static_cast<void>(client_.close()); }
@@ -494,7 +491,7 @@ Result<rpc::MessageEnvelope> RuntimeHost::handle(
       if (timestamp_ns <= last_command_timestamp_ns_) {
         timestamp_ns = last_command_timestamp_ns_ + 1;
       }
-      std::vector<AxisCommand> commands(robot_profile_.axes.size());
+      std::array<AxisCommand, kRobotIoMaximumAxes> commands{};
       for (std::size_t axis = 0; axis < robot_profile_.axes.size(); ++axis) {
         const auto& actuator_name = axis_actuator_names_[axis];
         std::string action_field = actuator_name;
@@ -520,18 +517,7 @@ Result<rpc::MessageEnvelope> RuntimeHost::handle(
         commands[axis].target = *target;
         commands[axis].flags = kAxisCommandEnable;
       }
-      if (!commands.empty()) {
-        auto published =
-            robot_io_->publish_commands(commands, sequence, timestamp_ns);
-        if (!published.has_value()) {
-          return Result<rpc::MessageEnvelope>::success(error_envelope(
-              request, "runtime_error", published.error().message.empty()
-                                                    ? "robot command publication failed"
-                                                    : published.error().message));
-        }
-      }
-      std::vector<St3215ServoCommand> servo_commands(
-          robot_profile_.st3215_servos.size());
+      std::array<St3215ServoCommand, kRobotIoMaximumServos> servo_commands{};
       for (std::size_t index = 0; index < robot_profile_.st3215_servos.size();
            ++index) {
         const auto& servo = robot_profile_.st3215_servos[index];
@@ -571,16 +557,17 @@ Result<rpc::MessageEnvelope> RuntimeHost::handle(
         command.target_position_rad = *target;
         command.enabled = true;
       }
-      if (!servo_commands.empty()) {
-        auto servo_published = robot_io_->publish_servo_commands(
-            servo_commands, sequence, timestamp_ns);
-        if (!servo_published.has_value()) {
-          return Result<rpc::MessageEnvelope>::success(error_envelope(
-              request, "runtime_error",
-              servo_published.error().message.empty()
-                  ? "robot servo command publication failed"
-                  : servo_published.error().message));
-        }
+      const auto axis_span = std::span<const AxisCommand>(
+          commands.data(), robot_profile_.axes.size());
+      const auto servo_span = std::span<const St3215ServoCommand>(
+          servo_commands.data(), robot_profile_.st3215_servos.size());
+      auto published = robot_io_->publish_commands(
+          axis_span, servo_span, sequence, timestamp_ns);
+      if (!published.has_value()) {
+        return Result<rpc::MessageEnvelope>::success(error_envelope(
+            request, "runtime_error", published.error().message.empty()
+                                          ? "robot command publication failed"
+                                          : published.error().message));
       }
       command_sequence_ = sequence;
       last_command_timestamp_ns_ = timestamp_ns;

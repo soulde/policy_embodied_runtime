@@ -76,21 +76,21 @@ class FakeRobotIoChannel final : public policy_runtime::RuntimeRobotIo {
 
   policy_runtime::Result<void> publish_commands(
       std::span<const policy_runtime::AxisCommand> commands,
+      std::span<const policy_runtime::St3215ServoCommand> servo_commands,
       std::uint64_t sequence, std::int64_t timestamp_ns) override {
     if (fail_publish) {
       return policy_runtime::Result<void>::failure(
           {policy_runtime::ErrorCode::io, "daemon command publish failed"});
     }
+    if (fail_servo_publish) {
+      return policy_runtime::Result<void>::failure(
+          {policy_runtime::ErrorCode::io,
+           "daemon servo command publish failed"});
+    }
     published.assign(commands.begin(), commands.end());
-    published_sequence = sequence;
-    published_timestamp_ns = timestamp_ns;
-    return policy_runtime::Result<void>::success();
-  }
-
-  policy_runtime::Result<void> publish_servo_commands(
-      std::span<const policy_runtime::St3215ServoCommand> commands,
-      std::uint64_t sequence, std::int64_t timestamp_ns) override {
-    published_servos.assign(commands.begin(), commands.end());
+    published_servos.assign(servo_commands.begin(), servo_commands.end());
+    axis_publications += commands.empty() ? 0U : 1U;
+    servo_publications += servo_commands.empty() ? 0U : 1U;
     published_sequence = sequence;
     published_timestamp_ns = timestamp_ns;
     return policy_runtime::Result<void>::success();
@@ -106,8 +106,11 @@ class FakeRobotIoChannel final : public policy_runtime::RuntimeRobotIo {
   std::vector<policy_runtime::St3215ServoCommand> published_servos;
   std::uint64_t published_sequence{};
   std::int64_t published_timestamp_ns{};
+  unsigned axis_publications{};
+  unsigned servo_publications{};
   bool fail_feedback{};
   bool fail_publish{};
+  bool fail_servo_publish{};
   bool closed{};
 };
 
@@ -473,6 +476,49 @@ TEST(RuntimeHostTest, BindsAndPublishesSt3215OnlyProfileInFrozenProfileOrder) {
   EXPECT_EQ(view->published_servos[0].target_position_rad, 1.25);
   EXPECT_TRUE(view->published_servos[0].enabled);
   EXPECT_EQ(view->published.size(), 0U);
+}
+
+TEST(RuntimeHostTest,
+     MixedPublicationFailureDoesNotCommitAxesAndRetryReusesSequence) {
+  auto channel = std::make_unique<FakeRobotIoChannel>();
+  auto* view = channel.get();
+  channel->configured_axis_count = 1U;
+  channel->configured_servo_count = 1U;
+  channel->feedback.axis_count = 1U;
+  channel->feedback.axes[0].position = 0.25;
+  channel->servo_feedback.axis_count = 1U;
+  channel->servo_feedback.axes[0].position_rad = 0.75;
+  channel->fail_servo_publish = true;
+  auto host = policy_runtime::RuntimeHost::from_profiles(
+      source_path("tests/golden/mixed_robot_io_policy_profile.json"),
+      source_path("tests/golden/mixed_robot_io_robot_profile.json"),
+      std::move(channel));
+  ASSERT_TRUE(host.has_value()) << host.error().message;
+  ASSERT_TRUE(host.value().open().has_value());
+
+  const auto observation =
+      request("observation_request", {{"observation", nlohmann::json::object()}});
+  auto failed = host.value().handle(observation);
+  ASSERT_TRUE(failed.has_value()) << failed.error().message;
+  EXPECT_EQ(failed.value().type, "observation_request_error");
+  EXPECT_EQ(view->axis_publications, 0U);
+  EXPECT_EQ(view->servo_publications, 0U);
+  EXPECT_TRUE(view->published.empty());
+  EXPECT_TRUE(view->published_servos.empty());
+
+  view->fail_servo_publish = false;
+  auto retried = host.value().handle(observation);
+  ASSERT_TRUE(retried.has_value()) << retried.error().message;
+  EXPECT_EQ(retried.value().type, "action_response");
+  ASSERT_EQ(view->axis_publications, 1U);
+  ASSERT_EQ(view->servo_publications, 1U);
+  ASSERT_EQ(view->published.size(), 1U);
+  ASSERT_EQ(view->published_servos.size(), 1U);
+  EXPECT_EQ(view->published_sequence, 1U);
+  EXPECT_EQ(view->published[0].sequence, 1U);
+  EXPECT_EQ(view->published_servos[0].sequence, 1U);
+  EXPECT_EQ(view->published[0].timestamp_ns,
+            view->published_servos[0].timestamp_ns);
 }
 
 TEST(RuntimeHostCliTest, PreservesCurrentFlagsDefaultsAndEndpointResolution) {

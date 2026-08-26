@@ -26,6 +26,10 @@ class RobotIoClient {
   Result<void> publish_commands(std::span<const AxisCommand> axes,
                                 std::uint64_t sequence,
                                 std::int64_t timestamp_ns);
+  Result<void> publish_commands(
+      std::span<const AxisCommand> axes,
+      std::span<const St3215ServoCommand> servos,
+      std::uint64_t sequence, std::int64_t timestamp_ns);
   Result<Snapshot<AxisFeedback>> read_feedback() const;
   Result<void> publish_servo_commands(
       std::span<const St3215ServoCommand> servos,

@@ -110,6 +110,12 @@ Task 9: minor (deferred): Pi0 container metadata repr differs from Python for un
 Task 10: started from `7cecfec` — Serial/ST3215 C++ transport/device and independent daemon executor integration.
 Task 10: fix round 1/5 started from reviewer head `cb09c68` — versioned servo IPC/host mapping, command heartbeat, supervisor-latched serial faults, late-response isolation, device-error precedence, bounded cancellable stop, cross-process tty exclusion, and timeout_s=0 compatibility open.
 Task 10: minor adjacent fixes requested: queue health/error fidelity, transactional configure retry, and complete rounding boundary vectors.
+Task 10: fix round 1/5 (v2 IPC/heartbeat/serial safety/late-frame/stop/TIOCEXCL/parity implemented; 4 Important remain; commit `cb09c68..802773a`).
+Task 10: fix round 2/5 started from reviewer head `802773a` — optional goal ACK/read continuation, heartbeat safety fault, atomic mixed command commit, servo snapshot epoch/record validation, and v1/v2 malformed compatibility tests open.
+Task 10: fix round 2/5 completed — optional write-ACK continuation,
+heartbeat safety latching, atomic mixed host publication, all-or-nothing servo
+snapshot staging, raw v2 descriptor capability/count rejection, and v1
+truncation/FD lifecycle coverage verified; commit pending.
 Task 10: implementation complete in `cb09c68` — serial/ST3215 port sharing, PTY recovery, daemon safety snapshots, full non-socket regression, sanitizer coverage, and 25x focused repeats passed; review pending.
 Task 10: fix round 1 completed — ABI-v2 ST3215 IPC/RuntimeHost coverage,
 dedicated ST-only E2E, direct forked TIOCEXCL verification, timeout-zero

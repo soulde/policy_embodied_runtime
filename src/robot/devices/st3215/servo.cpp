@@ -53,45 +53,57 @@ St3215Servo::St3215Servo(St3215ServoConfig config)
 
 St3215CommandAcceptance St3215Servo::stage_command(
     const St3215ServoCommand& command) noexcept {
-  if (command_gate_.test_and_set(std::memory_order_acquire)) {
+  if (!try_lock_command()) {
     return St3215CommandAcceptance::rejected;
   }
-  const auto release_gate = [this] {
-    command_gate_.clear(std::memory_order_release);
-  };
+  const auto acceptance = inspect_command(command, steady_now_ns());
+  if (acceptance == St3215CommandAcceptance::accepted) {
+    commit_command(command);
+  }
+  unlock_command();
+  return acceptance;
+}
+
+bool St3215Servo::try_lock_command() noexcept {
+  return !command_gate_.test_and_set(std::memory_order_acquire);
+}
+
+void St3215Servo::unlock_command() noexcept {
+  command_gate_.clear(std::memory_order_release);
+}
+
+St3215CommandAcceptance St3215Servo::inspect_command(
+    const St3215ServoCommand& command, std::int64_t now_ns) const noexcept {
   if (command.timestamp_ns < 0 || !std::isfinite(command.target_position_rad) ||
       std::any_of(command.reserved.begin(), command.reserved.end(),
                   [](std::byte value) { return value != std::byte{}; })) {
-    release_gate();
     return St3215CommandAcceptance::rejected;
   }
-  const auto now_ns = steady_now_ns();
   if (config_.command_timeout.count() > 0 &&
       (command.timestamp_ns > now_ns + config_.maximum_command_future.count() ||
        now_ns - command.timestamp_ns > config_.command_timeout.count())) {
-    release_gate();
     return St3215CommandAcceptance::rejected;
   }
   if (has_command_ &&
       (command.sequence < last_command_sequence_ ||
        command.timestamp_ns < last_command_timestamp_ns_)) {
-    release_gate();
     return St3215CommandAcceptance::rejected;
   }
   if (has_command_ && command.sequence == last_command_sequence_) {
-    const auto result = same_command(command, last_command_)
-                            ? St3215CommandAcceptance::duplicate
-                            : St3215CommandAcceptance::rejected;
-    release_gate();
-    return result;
+    return same_command(command, last_command_)
+               ? St3215CommandAcceptance::duplicate
+               : St3215CommandAcceptance::rejected;
   }
+  return St3215CommandAcceptance::accepted;
+}
+
+void St3215Servo::commit_command(
+    const St3215ServoCommand& command) noexcept {
   last_command_ = command;
   last_command_sequence_ = command.sequence;
   last_command_timestamp_ns_ = command.timestamp_ns;
   has_command_ = true;
   commands_.publish(StagedCommand{++next_publication_, command});
-  release_gate();
-  return St3215CommandAcceptance::accepted;
 }
 
 St3215ServoFeedback St3215Servo::feedback(std::int64_t now_ns) const noexcept {
@@ -282,6 +294,7 @@ void St3215Bus::service_one(ServoRuntime& runtime,
     runtime.consumed_publication = staged.publication;
     runtime.command = staged.command;
     runtime.has_command = true;
+    runtime.command_timed_out = false;
   }
 
   if (runtime.has_command && runtime.servo->config().command_timeout.count() > 0 &&
@@ -290,6 +303,7 @@ void St3215Bus::service_one(ServoRuntime& runtime,
            runtime.servo->config().command_timeout.count())) {
     runtime.has_command = false;
     runtime.command.enabled = false;
+    runtime.command_timed_out = true;
   }
 
   if (runtime.has_command && runtime.command.enabled &&
@@ -308,11 +322,14 @@ void St3215Bus::service_one(ServoRuntime& runtime,
         runtime.servo->config().speed_units);
     auto acknowledged = transact(runtime, goal, false, context);
     if (!acknowledged.has_value()) {
-      runtime.servo->publish_feedback(failed_feedback(
-          runtime, error_flag(acknowledged.error().code), now_ns));
-      return;
+      if (acknowledged.error().code != ErrorCode::timeout) {
+        runtime.servo->publish_feedback(failed_feedback(
+            runtime, error_flag(acknowledged.error().code), now_ns));
+        return;
+      }
     }
-    if ((acknowledged.value().flags & kSt3215FeedbackDeviceError) != 0U) {
+    if (acknowledged.has_value() &&
+        (acknowledged.value().flags & kSt3215FeedbackDeviceError) != 0U) {
       runtime.servo->publish_feedback(acknowledged.value());
       return;
     }
@@ -329,6 +346,11 @@ void St3215Bus::service_one(ServoRuntime& runtime,
     return;
   }
   auto feedback = present.value();
+  if (runtime.command_timed_out) {
+    feedback.command_sequence = runtime.command.sequence;
+    feedback.flags &= ~kSt3215FeedbackValid;
+    feedback.flags |= kSt3215FeedbackStale | kSt3215FeedbackTimeout;
+  }
   if (!runtime.has_command || !runtime.command.enabled ||
       runtime.command.emergency_stop) {
     feedback.flags |= kSt3215FeedbackDisabled;
@@ -549,6 +571,49 @@ St3215CommandAcceptance St3215DeviceRegistry::stage_command(
     return St3215CommandAcceptance::rejected;
   }
   return servos_[servo_index]->stage_command(command);
+}
+
+St3215CommandAcceptance St3215DeviceRegistry::stage_commands(
+    const Snapshot<St3215ServoCommand>& snapshot,
+    std::int64_t now_ns) noexcept {
+  if (snapshot.axis_count != servos_.size() || servos_.empty() ||
+      snapshot.timestamp_ns < 0 || snapshot.timestamp_ns > now_ns) {
+    return St3215CommandAcceptance::rejected;
+  }
+  for (std::size_t index = 0; index < servos_.size(); ++index) {
+    const auto& command = snapshot.axes[index];
+    if (command.sequence != snapshot.sequence ||
+        command.timestamp_ns != snapshot.timestamp_ns) {
+      return St3215CommandAcceptance::rejected;
+    }
+  }
+
+  std::size_t locked{};
+  for (; locked < servos_.size(); ++locked) {
+    if (!servos_[locked]->try_lock_command()) {
+      for (std::size_t index = 0; index < locked; ++index) {
+        servos_[index]->unlock_command();
+      }
+      return St3215CommandAcceptance::rejected;
+    }
+  }
+
+  const auto first = servos_[0]->inspect_command(snapshot.axes[0], now_ns);
+  bool uniform = first != St3215CommandAcceptance::rejected;
+  for (std::size_t index = 1; index < servos_.size(); ++index) {
+    uniform = uniform &&
+              servos_[index]->inspect_command(snapshot.axes[index], now_ns) ==
+                  first;
+  }
+  if (uniform && first == St3215CommandAcceptance::accepted) {
+    for (std::size_t index = 0; index < servos_.size(); ++index) {
+      servos_[index]->commit_command(snapshot.axes[index]);
+    }
+  }
+  for (const auto& servo : servos_) {
+    servo->unlock_command();
+  }
+  return uniform ? first : St3215CommandAcceptance::rejected;
 }
 
 St3215ServoFeedback St3215DeviceRegistry::feedback(
