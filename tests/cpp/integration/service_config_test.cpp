@@ -30,6 +30,7 @@
 #include "policy_runtime/robot_io/service_listener.hpp"
 #include "policy_runtime/runtime/robot_io_client.hpp"
 #include "policy_runtime/runtime/robot_io_service.hpp"
+#include "policy_runtime/runtime/robot_io_service_detail.hpp"
 
 namespace {
 
@@ -175,6 +176,11 @@ int connect_seqpacket(const std::filesystem::path& socket_path) {
   static_cast<void>(setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout,
                               sizeof(timeout)));
   return descriptor;
+}
+
+int always_interrupted_connect(int, const sockaddr*, socklen_t) {
+  errno = EINTR;
+  return -1;
 }
 
 void write_empty_robot_profile(const std::filesystem::path& profile_path) {
@@ -471,6 +477,23 @@ TEST(ServiceConfigTest, RuntimeHostRejectsGenerationFifoWithoutBlocking) {
       << "opening a generation FIFO blocked the runtime host";
   ASSERT_TRUE(WIFEXITED(status));
   EXPECT_EQ(WEXITSTATUS(status), 0);
+}
+
+TEST(ServiceConfigTest, ConnectInterruptedUntilDeadlineReturnsTimeout) {
+  std::array<int, 2> descriptors{-1, -1};
+  ASSERT_EQ(pipe2(descriptors.data(), O_CLOEXEC), 0);
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+
+  const auto connected =
+      policy_runtime::robot_io_service_detail::connect_with_deadline(
+          descriptors[0], reinterpret_cast<const sockaddr*>(&address),
+          sizeof(address), 1, &always_interrupted_connect);
+
+  ASSERT_EQ(close(descriptors[0]), 0);
+  ASSERT_EQ(close(descriptors[1]), 0);
+  ASSERT_FALSE(connected.has_value());
+  EXPECT_EQ(connected.error().code, policy_runtime::ErrorCode::timeout);
 }
 
 TEST(ServiceConfigTest, RuntimeHostConnectDeadlineCoversAFullListenerBacklog) {

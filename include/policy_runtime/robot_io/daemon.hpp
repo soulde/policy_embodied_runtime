@@ -57,6 +57,7 @@ struct DaemonHealth {
   std::uint32_t serial_servo_count{};
   std::uint32_t serial_fault_count{};
   std::uint32_t serial_safety_flags{};
+  std::uint64_t control_monitor_thread_token{};
 };
 
 struct DaemonAxisSnapshot {
@@ -101,7 +102,6 @@ class RobotIoDaemon {
   Result<void> run();
   void cycle() noexcept;
   Result<void> request_stop();
-  Result<void> poll_control();
 
   CommandAcceptance stage_commands(
       const Snapshot<AxisCommand>& snapshot) noexcept;
@@ -133,6 +133,7 @@ class RobotIoDaemon {
                                   bool process_data_valid) noexcept;
   bool owns_cycle() const noexcept;
   CommandAcceptance consume_staged_commands() noexcept;
+  Result<void> poll_control();
   void stop_transports() noexcept;
   bool health_atomics_are_lock_free() const noexcept;
 
@@ -188,6 +189,8 @@ class RobotIoDaemon {
   std::atomic<std::uint32_t> serial_fault_count_{};
   std::atomic<std::uint32_t> serial_safety_flags_{};
   std::atomic<std::uint64_t> cycle_owner_token_{};
+  std::atomic<std::uint64_t> control_monitor_thread_token_{};
+  std::atomic<std::uint8_t> control_fault_code_{};
 };
 
 }  // namespace policy_runtime

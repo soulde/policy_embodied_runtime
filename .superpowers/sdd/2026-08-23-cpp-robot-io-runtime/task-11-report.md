@@ -35,16 +35,29 @@ cannot wait for a writer, while a saturated-listener regression requires the
 connector to return the specific timeout result within a bounded parent
 deadline.
 
-The daemon run loop now checks the accepted sole host on its non-realtime
-control path. A closed peer or unexpected post-setup packet requests the normal
-safe shutdown, leaves cyclic processing active until shutdown completes,
-stops transports, and then returns the peer error to `robot-io-daemon`'s main
-function. The process exits with failure so `Restart=on-failure` can start a
-new listener with a fresh generation. Regression coverage checks the daemon's
+The daemon checks the accepted sole host on a dedicated non-real-time monitor
+started before real-time preparation. A closed peer or unexpected post-setup
+packet publishes a fixed atomic fault code and requests the normal safe
+shutdown. The cyclic owner consumes only stop state, remains active through
+QuickStop and the final Disable frame, then releases real-time setup, joins the
+monitor, stops transports, and returns the peer error to `robot-io-daemon`'s
+main function. The process exits with failure so `Restart=on-failure` can start
+a new listener with a fresh generation. Regression coverage checks the
+monitor/owner thread separation, final Disable/deactivation order, daemon
 shutdown health, packaged-host generation mismatch, accepted-host crash,
 runtime-file cleanup, successor startup, and fresh-generation connection. The
 packaged-host lifecycle test also waits for daemon failure after the fresh host
 closes instead of racing that failure with an expected successful SIGTERM.
+
+Fix round 4 removes the remaining Unix control-socket system calls from the
+1 kHz owner. The monitor's zero-timeout `poll()` and nonblocking `recvmsg()` no
+longer retry `EINTR` indefinitely; the next bounded monitor iteration retries
+instead, so stop notification followed by join cannot deadlock behind an
+unbounded retry loop. Monitor exceptions and thread-start failures publish a
+fixed internal fault and take the same safe-stop path. The initial nonblocking
+service `connect()` now returns the specified timeout when `EINTR` persists to
+the deadline. The README also corrects the input/output layer arrows and states
+the actual CMake 3.24 minimum.
 
 `policy-runtime-host` now accepts paired `--robot-io-socket` and
 `--robot-io-generation-file` options in addition to the existing paired FD and
@@ -135,6 +148,31 @@ Fix-round-3 evidence:
 - Full Python execution: 26 passed and the two ZeroMQ transport tests failed at
   sandbox-forbidden `socket(AF_INET, SOCK_STREAM)` with `EPERM`. The explicit
   non-socket Python selection passed 26/26.
+- `git diff --check`: clean.
+
+Fix-round-4 evidence:
+
+- The monitor-thread regression first failed to compile because the durable
+  control-monitor thread token was absent; the EINTR regression likewise first
+  failed because the injectable deadline helper was absent. Both compile after
+  the implementation, and the non-socket EINTR case passes in 1 ms.
+- Pinned CMake 4.4.2 `/usr`-prefix, IgH-off, ZeroMQ-off configuration and the
+  full all-target build passed.
+- Full CTest reached the same sandbox boundary as round 3: 188 passed, 24
+  AF_UNIX-dependent tests failed only at `SO_DOMAIN`/`bind` `EPERM`, and four
+  tests skipped (including the compiled monitor-thread/Disable-order test at
+  that boundary). The exact non-socket selection passed 188/188.
+- An ASan+UBSan all-target build and exact non-socket execution passed 188/188
+  with no sanitizer finding. LeakSanitizer discovery is unavailable under the
+  managed ptrace environment, so this run used `detect_leaks=0`.
+- The 34-test non-socket daemon selection passed 100 consecutive repetitions;
+  the EINTR-until-deadline regression also passed 100 repetitions.
+- Full Python execution passed 26 tests and failed only the two ZeroMQ tests at
+  sandbox-forbidden `socket(AF_INET, SOCK_STREAM)` `EPERM`; the explicit
+  non-socket selection passed 26/26.
+- A temporary `/usr` plus `DESTDIR` install succeeded. All four installed help
+  paths exited zero, and the service unit was present under
+  `/usr/lib/systemd/system`.
 - `git diff --check`: clean.
 
 Hardware, real systemd activation, unsandboxed socket execution, and target

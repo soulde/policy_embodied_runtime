@@ -108,12 +108,10 @@ Result<void> check_peer_fd(int socket_fd) {
   }
   pollfd descriptor{socket_fd, static_cast<short>(POLLIN | POLLRDHUP), 0};
   int polled{};
-  for (;;) {
-    polled = poll(&descriptor, 1, 0);
-    if (polled < 0 && errno == EINTR) {
-      continue;
-    }
-    break;
+  polled = poll(&descriptor, 1, 0);
+  if (polled < 0 && errno == EINTR) {
+    // The non-real-time monitor will retry on its next bounded iteration.
+    return Result<void>::success();
   }
   if (polled < 0) {
     return Result<void>::failure(system_error(ErrorCode::io, "poll(IPC peer)"));
@@ -128,12 +126,13 @@ Result<void> check_peer_fd(int socket_fd) {
     msghdr message{};
     message.msg_iov = &vector;
     message.msg_iovlen = 1;
-    ssize_t received{};
-    do {
-      // MSG_TRUNC returns the original packet length while SOCK_SEQPACKET
-      // atomically consumes the whole packet, even when it exceeds discarded.
-      received = recvmsg(socket_fd, &message, MSG_DONTWAIT | MSG_TRUNC);
-    } while (received < 0 && errno == EINTR);
+    // MSG_TRUNC returns the original packet length while SOCK_SEQPACKET
+    // atomically consumes the whole packet, even when it exceeds discarded.
+    const ssize_t received =
+        recvmsg(socket_fd, &message, MSG_DONTWAIT | MSG_TRUNC);
+    if (received < 0 && errno == EINTR) {
+      return Result<void>::success();
+    }
     if (received > 0 ||
         (received == 0 &&
          (descriptor.revents & (POLLHUP | POLLRDHUP)) == 0)) {

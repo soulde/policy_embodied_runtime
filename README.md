@@ -19,8 +19,8 @@ integration concerns rather than hidden runtime dependencies.
 
 ## Current Architecture
 
-The runtime follows `Sensor -> Protocol/Device -> Transport` on input and
-`Transport -> Protocol/Device -> Actuator` on output. A transport performs
+The runtime follows `Transport -> Protocol/Device -> Sensor` on input and
+`Actuator -> Protocol/Device -> Transport` on output. A transport performs
 physical I/O; a protocol translates fields in a process image or frame; a
 device exposes typed sensor/actuator values.
 
@@ -87,7 +87,7 @@ pytest
 The C++ implementation packages `robot-io-daemon`, `policy-runtime-host`, safe
 diagnostic CLIs, an Elmo Gold static-mode example, and a hardened systemd
 listener. IgH EtherCAT and ZeroMQ are optional at configure time, while the
-fake backends and PTY tests keep development hardware-free. Use CMake 4.4+
+fake backends and PTY tests keep development hardware-free. Use CMake >=3.24
 from the documented `uv` environment, for example:
 
 ```bash

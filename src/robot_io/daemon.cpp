@@ -1,9 +1,13 @@
 #include "policy_runtime/robot_io/daemon.hpp"
 
 #include <cerrno>
+#include <chrono>
+#include <condition_variable>
 #include <exception>
+#include <mutex>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #include <sys/syscall.h>
@@ -51,6 +55,17 @@ SafetyBusState safety_bus_state(const DomainHealth& domain,
 
 std::uint64_t current_thread_token() noexcept {
   return static_cast<std::uint64_t>(::syscall(SYS_gettid));
+}
+
+constexpr std::uint8_t encode_control_fault(ErrorCode code) noexcept {
+  return static_cast<std::uint8_t>(code) + 1U;
+}
+
+Error control_fault_error(std::uint8_t encoded) {
+  const auto code = static_cast<ErrorCode>(encoded - 1U);
+  return {code, code == ErrorCode::internal
+                    ? "IPC peer monitor terminated unexpectedly"
+                    : "IPC peer monitor detected a connection failure"};
 }
 
 class CycleOwnerGuard {
@@ -231,6 +246,8 @@ bool RobotIoDaemon::health_atomics_are_lock_free() const noexcept {
          serial_fault_count_.is_lock_free() &&
          serial_safety_flags_.is_lock_free() &&
          cycle_owner_token_.is_lock_free() &&
+         control_monitor_thread_token_.is_lock_free() &&
+         control_fault_code_.is_lock_free() &&
          rejected_command_publication_.is_lock_free() &&
          loop_.atomics_are_lock_free() &&
          command_handoff_.atomics_are_lock_free() &&
@@ -557,6 +574,42 @@ Result<void> RobotIoDaemon::run() {
   if (!owner || !running_.load(std::memory_order_acquire)) {
     return Result<void>::success();
   }
+
+  std::mutex control_monitor_mutex;
+  std::condition_variable control_monitor_wake;
+  std::jthread control_monitor;
+  if (ipc_.has_value()) {
+    try {
+      control_monitor = std::jthread([this, &control_monitor_mutex,
+                                      &control_monitor_wake](
+                                         std::stop_token stop_token) {
+        try {
+          while (!stop_token.stop_requested() &&
+                 !stop_requested_.load(std::memory_order_acquire)) {
+            auto controlled = poll_control();
+            if (!controlled.has_value()) {
+              return;
+            }
+            std::unique_lock lock(control_monitor_mutex);
+            control_monitor_wake.wait_for(
+                lock, std::chrono::milliseconds{1}, [&] {
+                  return stop_token.stop_requested() ||
+                         stop_requested_.load(std::memory_order_acquire);
+                });
+          }
+        } catch (...) {
+          control_fault_code_.store(encode_control_fault(ErrorCode::internal),
+                                    std::memory_order_release);
+          static_cast<void>(request_stop());
+        }
+      });
+    } catch (...) {
+      control_fault_code_.store(encode_control_fault(ErrorCode::internal),
+                                std::memory_order_release);
+      static_cast<void>(request_stop());
+    }
+  }
+
   auto realtime = loop_.prepare();
   if (!realtime.has_value()) {
     realtime_guarantee_.store(false, std::memory_order_release);
@@ -567,19 +620,11 @@ Result<void> RobotIoDaemon::run() {
                               std::memory_order_release);
   }
   bool sleep_failed = !realtime.has_value();
-  std::optional<Error> control_failure;
   while (running_.load(std::memory_order_acquire) &&
          !shutdown_complete_.load(std::memory_order_acquire)) {
     if (signal_stop_requested != 0) {
       stop_requested_.store(true, std::memory_order_release);
       accepting_commands_.store(false, std::memory_order_release);
-    }
-    if (!stop_requested_.load(std::memory_order_acquire) &&
-        !control_failure.has_value()) {
-      auto controlled = poll_control();
-      if (!controlled.has_value()) {
-        control_failure.emplace(controlled.error());
-      }
     }
     if (!sleep_failed) {
       const auto release = loop_.wait_next();
@@ -600,9 +645,16 @@ Result<void> RobotIoDaemon::run() {
         loop_.config().period});
   }
   loop_.release();
+  if (control_monitor.joinable()) {
+    control_monitor.request_stop();
+    control_monitor_wake.notify_all();
+    control_monitor.join();
+  }
   stop_transports();
-  if (control_failure.has_value()) {
-    return Result<void>::failure(std::move(*control_failure));
+  const auto control_fault =
+      control_fault_code_.load(std::memory_order_acquire);
+  if (control_fault != 0U) {
+    return Result<void>::failure(control_fault_error(control_fault));
   }
   return Result<void>::success();
 }
@@ -618,11 +670,15 @@ Result<void> RobotIoDaemon::request_stop() {
 }
 
 Result<void> RobotIoDaemon::poll_control() {
+  control_monitor_thread_token_.store(current_thread_token(),
+                                      std::memory_order_release);
   if (!ipc_.has_value()) {
     return Result<void>::success();
   }
   auto peer = ipc_->check_peer();
   if (!peer.has_value()) {
+    control_fault_code_.store(encode_control_fault(peer.error().code),
+                              std::memory_order_release);
     static_cast<void>(request_stop());
   }
   return peer;
@@ -676,7 +732,8 @@ DaemonHealth RobotIoDaemon::health() const noexcept {
       sleep_error_.load(std::memory_order_acquire),
       serial_servo_count_.load(std::memory_order_acquire),
       serial_fault_count_.load(std::memory_order_acquire),
-      serial_safety_flags_.load(std::memory_order_acquire)};
+      serial_safety_flags_.load(std::memory_order_acquire),
+      control_monitor_thread_token_.load(std::memory_order_acquire)};
 }
 
 DaemonAxisSnapshot RobotIoDaemon::axis_snapshot() const noexcept {

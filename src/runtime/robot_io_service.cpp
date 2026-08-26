@@ -1,5 +1,7 @@
 #include "policy_runtime/runtime/robot_io_service.hpp"
 
+#include "policy_runtime/runtime/robot_io_service_detail.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -108,10 +110,13 @@ Result<void> validate_runtime_file(const struct stat& status,
   return Result<void>::success();
 }
 
-Result<void> connect_with_deadline(int descriptor,
-                                   const sockaddr_un& address,
-                                   socklen_t address_size,
-                                   int timeout_ms) {
+}  // namespace
+
+namespace robot_io_service_detail {
+
+Result<void> connect_with_deadline(int descriptor, const sockaddr* address,
+                                   socklen_t address_size, int timeout_ms,
+                                   ConnectOperation connect_operation) {
   const int original_flags = fcntl(descriptor, F_GETFL);
   if (original_flags < 0 ||
       fcntl(descriptor, F_SETFL, original_flags | O_NONBLOCK) != 0) {
@@ -123,11 +128,14 @@ Result<void> connect_with_deadline(int descriptor,
                         std::chrono::milliseconds(timeout_ms);
   int connected_result{};
   do {
-    connected_result =
-        connect(descriptor, reinterpret_cast<const sockaddr*>(&address),
-                address_size);
+    connected_result = connect_operation(descriptor, address, address_size);
   } while (connected_result != 0 && errno == EINTR &&
            std::chrono::steady_clock::now() < deadline);
+
+  if (connected_result != 0 && errno == EINTR) {
+    return Result<void>::failure(
+        {ErrorCode::timeout, "connect(robot I/O service) timed out"});
+  }
 
   if (connected_result != 0 && errno != EINPROGRESS && errno != EALREADY &&
       errno != EAGAIN && errno != EWOULDBLOCK && errno != EISCONN) {
@@ -179,7 +187,7 @@ Result<void> connect_with_deadline(int descriptor,
   return Result<void>::success();
 }
 
-}  // namespace
+}  // namespace robot_io_service_detail
 
 Result<RobotIoClient> connect_robot_io_service(
     std::string_view socket_path, std::string_view generation_path,
@@ -251,11 +259,11 @@ Result<RobotIoClient> connect_robot_io_service(
   sockaddr_un address{};
   address.sun_family = AF_UNIX;
   std::memcpy(address.sun_path, socket_name.c_str(), socket_name.size() + 1U);
-  auto connected_service = connect_with_deadline(
-      connected.get(), address,
+  auto connected_service = robot_io_service_detail::connect_with_deadline(
+      connected.get(), reinterpret_cast<const sockaddr*>(&address),
       static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) +
                              socket_name.size() + 1U),
-      setup_timeout_ms);
+      setup_timeout_ms, &::connect);
   if (!connected_service.has_value()) {
     return Result<RobotIoClient>::failure(connected_service.error());
   }

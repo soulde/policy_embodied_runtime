@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include "policy_runtime/profiles/robot_profile.hpp"
@@ -1220,12 +1221,13 @@ TEST(RobotIoDaemonTest, StartsWithoutRealtimeGuaranteeWhenSetupDegrades) {
   EXPECT_EQ(realtime.unlock_calls, 1U);
 }
 
-TEST(RobotIoDaemonTest, RunReturnsPeerFailureAndCompletesSafeStop) {
+TEST(RobotIoDaemonTest,
+     PeerMonitorRunsOutsideRealtimeAndDisablesBeforeDeactivation) {
   std::array<int, 2> sockets{-1, -1};
   ASSERT_EQ(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0,
                        sockets.data()),
             0);
-  auto server = RobotIoIpcServer::create(sockets[0], 0U, 73U);
+  auto server = RobotIoIpcServer::create(sockets[0], 1U, 73U);
   if (!server.has_value() &&
       server.error().message.find("Operation not permitted") !=
           std::string::npos) {
@@ -1236,13 +1238,31 @@ TEST(RobotIoDaemonTest, RunReturnsPeerFailureAndCompletesSafeStop) {
 
   FakeClock clock;
   FakeRealtimeSystem realtime;
+  auto profile = profile_with_axes(1);
+  profile.axes[0].command_timeout = 10s;
+  profile.axes[0].following_error_limit = 10.0;
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{
+      backend, {EthercatAxisConfiguration{profile.axes[0], {}}}};
   RobotIoDaemon daemon{clock, realtime};
-  ASSERT_TRUE(daemon.configure(profile_with_axes(0)).has_value());
+  ASSERT_TRUE(daemon.configure(profile).has_value());
+  ASSERT_TRUE(daemon.attach_ethercat(master).has_value());
   ASSERT_TRUE(daemon.attach_ipc(std::move(server.value())).has_value());
   auto client = RobotIoClient::connect(sockets[1], 73U);
   ASSERT_TRUE(client.has_value()) << client.error().message;
   ASSERT_TRUE(daemon.start().has_value());
+  const auto& handles = master.pdo_handles()[0];
+  ASSERT_TRUE(handles.status_word.write(backend->image(), 0x0027U));
+  ASSERT_TRUE(handles.mode_display.write(backend->image(), 8));
+  ASSERT_TRUE(handles.actual_position.write(backend->image(), 0));
+  ASSERT_TRUE(handles.actual_velocity.write(backend->image(), 0));
+  ASSERT_TRUE(handles.actual_torque.write(backend->image(), 0));
+  backend->observe_control_word(handles.control_word.location().byte_offset);
+  ASSERT_EQ(daemon.stage_commands(commands(1, 1U, 0)),
+            CommandAcceptance::accepted);
   ASSERT_TRUE(client.value().close().has_value());
+  const auto run_thread_token =
+      static_cast<std::uint64_t>(::syscall(SYS_gettid));
 
   const auto ran = daemon.run();
 
@@ -1253,6 +1273,12 @@ TEST(RobotIoDaemonTest, RunReturnsPeerFailureAndCompletesSafeStop) {
   EXPECT_TRUE(health.shutdown_complete);
   EXPECT_FALSE(health.accepting_commands);
   EXPECT_FALSE(health.running);
+  ASSERT_NE(health.control_monitor_thread_token, 0U);
+  EXPECT_NE(health.control_monitor_thread_token, run_thread_token);
+  EXPECT_EQ(backend->last_sent_control_word(), 0U);
+  ASSERT_GT(backend->final_disable_send_order(), 0);
+  ASSERT_GT(backend->deactivate_order(), 0);
+  EXPECT_LT(backend->final_disable_send_order(), backend->deactivate_order());
 }
 
 TEST(RobotIoDaemonTest, AppliesAndRestoresRealtimeSetupOnTheRunThread) {
