@@ -17,6 +17,7 @@
 
 #include <gtest/gtest.h>
 
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -447,6 +448,100 @@ TEST(ServiceConfigTest, RuntimeHostRejectsUnsafeGenerationFilesBeforeConnect) {
   EXPECT_EQ(linked.error().code, policy_runtime::ErrorCode::invalid_argument);
 }
 
+TEST(ServiceConfigTest, RuntimeHostRejectsGenerationFifoWithoutBlocking) {
+  TemporaryDirectory directory;
+  const auto socket_path = directory.path() / "robot-io.sock";
+  const auto generation_path = directory.path() / "robot-io.generation";
+  ASSERT_EQ(mkfifo(generation_path.c_str(), 0600), 0);
+
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    const auto connected = policy_runtime::connect_robot_io_service(
+        socket_path.string(), generation_path.string(), 100);
+    _exit(!connected.has_value() &&
+                  connected.error().code ==
+                      policy_runtime::ErrorCode::invalid_argument
+              ? 0
+              : 1);
+  }
+  ChildProcess process(child);
+  int status{};
+  ASSERT_TRUE(process.exited_within(std::chrono::seconds{1}, status))
+      << "opening a generation FIFO blocked the runtime host";
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 0);
+}
+
+TEST(ServiceConfigTest, RuntimeHostConnectDeadlineCoversAFullListenerBacklog) {
+  TemporaryDirectory directory;
+  const auto socket_path = directory.path() / "robot-io.sock";
+  const auto generation_path = directory.path() / "robot-io.generation";
+  {
+    std::ofstream generation(generation_path);
+    generation << "17\n";
+  }
+  ASSERT_EQ(chmod(generation_path.c_str(), 0600), 0);
+
+  const int listener =
+      socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+  if (listener < 0 && (errno == EPERM || errno == EACCES)) {
+    GTEST_SKIP() << "sandbox does not permit AF_UNIX SOCK_SEQPACKET";
+  }
+  ASSERT_GE(listener, 0);
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  const auto path = socket_path.string();
+  ASSERT_LT(path.size(), sizeof(address.sun_path));
+  std::copy(path.begin(), path.end(), address.sun_path);
+  if (bind(listener, reinterpret_cast<const sockaddr*>(&address),
+           sizeof(address)) != 0 &&
+      (errno == EPERM || errno == EACCES)) {
+    close(listener);
+    GTEST_SKIP() << "sandbox does not permit AF_UNIX SOCK_SEQPACKET bind";
+  }
+  ASSERT_EQ(chmod(socket_path.c_str(), 0600), 0);
+  ASSERT_EQ(listen(listener, 0), 0);
+
+  std::vector<int> queued_clients;
+  bool backlog_full{};
+  for (int attempt = 0; attempt < 16 && !backlog_full; ++attempt) {
+    const int client =
+        socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    ASSERT_GE(client, 0);
+    if (connect(client, reinterpret_cast<const sockaddr*>(&address),
+                sizeof(address)) == 0) {
+      queued_clients.push_back(client);
+      continue;
+    }
+    backlog_full = errno == EAGAIN || errno == EINPROGRESS;
+    close(client);
+  }
+  ASSERT_TRUE(backlog_full) << "could not saturate the listener backlog";
+
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    const auto connected = policy_runtime::connect_robot_io_service(
+        socket_path.string(), generation_path.string(), 100);
+    _exit(!connected.has_value() &&
+                  connected.error().code == policy_runtime::ErrorCode::timeout
+              ? 0
+              : 1);
+  }
+  ChildProcess process(child);
+  int status{};
+  ASSERT_TRUE(process.exited_within(std::chrono::seconds{1}, status))
+      << "connect exceeded the configured service deadline";
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 0);
+
+  for (const int client : queued_clients) {
+    close(client);
+  }
+  close(listener);
+}
+
 TEST(ServiceConfigTest,
      PackagedRuntimeHostRejectsMismatchAndConnectsAfterDaemonRestart) {
 #if !POLICY_RUNTIME_HAS_ZMQ
@@ -489,12 +584,11 @@ TEST(ServiceConfigTest,
     close(unexpected_second_client);
   }
 
-  ASSERT_EQ(kill(first_daemon.pid(), SIGTERM), 0);
   int first_daemon_status{};
   ASSERT_TRUE(first_daemon.exited_within(std::chrono::seconds{3},
                                          first_daemon_status));
   ASSERT_TRUE(WIFEXITED(first_daemon_status));
-  ASSERT_EQ(WEXITSTATUS(first_daemon_status), 0);
+  ASSERT_EQ(WEXITSTATUS(first_daemon_status), 1);
   ASSERT_FALSE(std::filesystem::exists(generation_path));
 
   auto second_daemon =
@@ -530,11 +624,83 @@ TEST(ServiceConfigTest,
   if (second_unexpected_client >= 0) {
     close(second_unexpected_client);
   }
+  int second_daemon_status{};
+  ASSERT_TRUE(second_daemon.exited_within(std::chrono::seconds{3},
+                                          second_daemon_status));
+  ASSERT_TRUE(WIFEXITED(second_daemon_status));
+  EXPECT_EQ(WEXITSTATUS(second_daemon_status), 1);
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+  EXPECT_FALSE(std::filesystem::exists(generation_path));
+}
+
+TEST(ServiceConfigTest,
+     AcceptedHostCrashTerminatesDaemonBeforeFreshHostConnects) {
+  TemporaryDirectory directory;
+  const auto profile_path = directory.path() / "empty-profile.json";
+  const auto socket_path = directory.path() / "robot-io.sock";
+  const auto generation_path = directory.path() / "robot-io.generation";
+  const auto probe_path = directory.path() / "permission-probe.sock";
+  write_empty_robot_profile(profile_path);
+
+  const int probe = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+  if (probe < 0 && (errno == EPERM || errno == EACCES)) {
+    GTEST_SKIP() << "sandbox does not permit AF_UNIX SOCK_SEQPACKET";
+  }
+  ASSERT_GE(probe, 0);
+  sockaddr_un probe_address{};
+  probe_address.sun_family = AF_UNIX;
+  const auto probe_name = probe_path.string();
+  ASSERT_LT(probe_name.size(), sizeof(probe_address.sun_path));
+  std::copy(probe_name.begin(), probe_name.end(), probe_address.sun_path);
+  if (bind(probe, reinterpret_cast<const sockaddr*>(&probe_address),
+           sizeof(probe_address)) != 0 &&
+      (errno == EPERM || errno == EACCES)) {
+    close(probe);
+    GTEST_SKIP() << "sandbox does not permit AF_UNIX SOCK_SEQPACKET bind";
+  }
+  ASSERT_EQ(close(probe), 0);
+  ASSERT_EQ(unlink(probe_path.c_str()), 0);
+
+  auto first_daemon =
+      start_service_daemon(profile_path, socket_path, generation_path);
+  ASSERT_GT(first_daemon.pid(), 0);
+  const auto first_generation =
+      wait_for_generation(generation_path, first_daemon);
+  ASSERT_TRUE(first_generation.has_value());
+  const int first_socket = connect_seqpacket(socket_path);
+  ASSERT_GE(first_socket, 0);
+  {
+    auto first_host =
+        policy_runtime::RobotIoClient::connect(first_socket, *first_generation);
+    ASSERT_TRUE(first_host.has_value()) << first_host.error().message;
+  }
+
+  int first_daemon_status{};
+  ASSERT_TRUE(first_daemon.exited_within(std::chrono::seconds{3},
+                                         first_daemon_status));
+  ASSERT_TRUE(WIFEXITED(first_daemon_status));
+  EXPECT_EQ(WEXITSTATUS(first_daemon_status), 1);
+  EXPECT_FALSE(std::filesystem::exists(socket_path));
+  EXPECT_FALSE(std::filesystem::exists(generation_path));
+
+  auto second_daemon =
+      start_service_daemon(profile_path, socket_path, generation_path);
+  ASSERT_GT(second_daemon.pid(), 0);
+  const auto second_generation =
+      wait_for_generation(generation_path, second_daemon);
+  ASSERT_TRUE(second_generation.has_value());
+  ASSERT_NE(*second_generation, *first_generation);
+  const int second_socket = connect_seqpacket(socket_path);
+  ASSERT_GE(second_socket, 0);
+  auto fresh_host =
+      policy_runtime::RobotIoClient::connect(second_socket, *second_generation);
+  ASSERT_TRUE(fresh_host.has_value()) << fresh_host.error().message;
+
   ASSERT_EQ(kill(second_daemon.pid(), SIGTERM), 0);
   int second_daemon_status{};
   ASSERT_TRUE(second_daemon.exited_within(std::chrono::seconds{3},
                                           second_daemon_status));
-  EXPECT_TRUE(WIFEXITED(second_daemon_status));
+  ASSERT_TRUE(WIFEXITED(second_daemon_status));
   EXPECT_EQ(WEXITSTATUS(second_daemon_status), 0);
 }
 

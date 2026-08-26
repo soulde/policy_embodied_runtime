@@ -98,7 +98,7 @@ class RobotIoDaemon {
   Result<void> attach_ethercat(EthercatMaster& master);
   Result<void> attach_ipc(RobotIoIpcServer server);
   Result<void> start();
-  void run() noexcept;
+  Result<void> run();
   void cycle() noexcept;
   Result<void> request_stop();
   Result<void> poll_control();

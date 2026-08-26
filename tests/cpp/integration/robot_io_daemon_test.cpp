@@ -1220,6 +1220,41 @@ TEST(RobotIoDaemonTest, StartsWithoutRealtimeGuaranteeWhenSetupDegrades) {
   EXPECT_EQ(realtime.unlock_calls, 1U);
 }
 
+TEST(RobotIoDaemonTest, RunReturnsPeerFailureAndCompletesSafeStop) {
+  std::array<int, 2> sockets{-1, -1};
+  ASSERT_EQ(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0,
+                       sockets.data()),
+            0);
+  auto server = RobotIoIpcServer::create(sockets[0], 0U, 73U);
+  if (!server.has_value() &&
+      server.error().message.find("Operation not permitted") !=
+          std::string::npos) {
+    close(sockets[1]);
+    GTEST_SKIP() << "sandbox does not permit AF_UNIX socket inspection";
+  }
+  ASSERT_TRUE(server.has_value()) << server.error().message;
+
+  FakeClock clock;
+  FakeRealtimeSystem realtime;
+  RobotIoDaemon daemon{clock, realtime};
+  ASSERT_TRUE(daemon.configure(profile_with_axes(0)).has_value());
+  ASSERT_TRUE(daemon.attach_ipc(std::move(server.value())).has_value());
+  auto client = RobotIoClient::connect(sockets[1], 73U);
+  ASSERT_TRUE(client.has_value()) << client.error().message;
+  ASSERT_TRUE(daemon.start().has_value());
+  ASSERT_TRUE(client.value().close().has_value());
+
+  const auto ran = daemon.run();
+
+  ASSERT_FALSE(ran.has_value());
+  EXPECT_EQ(ran.error().code, policy_runtime::ErrorCode::unavailable);
+  const auto health = daemon.health();
+  EXPECT_TRUE(health.shutdown_requested);
+  EXPECT_TRUE(health.shutdown_complete);
+  EXPECT_FALSE(health.accepting_commands);
+  EXPECT_FALSE(health.running);
+}
+
 TEST(RobotIoDaemonTest, AppliesAndRestoresRealtimeSetupOnTheRunThread) {
   FakeClock clock;
   FakeRealtimeSystem realtime;

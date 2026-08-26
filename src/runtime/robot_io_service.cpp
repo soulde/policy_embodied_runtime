@@ -1,8 +1,10 @@
 #include "policy_runtime/runtime/robot_io_service.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -12,6 +14,7 @@
 #include <system_error>
 #include <utility>
 
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -20,6 +23,8 @@
 
 namespace policy_runtime {
 namespace {
+
+constexpr off_t kMaximumGenerationFileSize = 11;
 
 Error system_error(ErrorCode code, const char* operation,
                    int error_number = errno) {
@@ -47,7 +52,7 @@ class ScopedFd {
 };
 
 Result<std::uint32_t> read_generation(int descriptor) {
-  std::array<char, 32> bytes{};
+  std::array<char, kMaximumGenerationFileSize + 1U> bytes{};
   std::size_t size{};
   while (size < bytes.size()) {
     const auto count = pread(descriptor, bytes.data() + size,
@@ -103,6 +108,77 @@ Result<void> validate_runtime_file(const struct stat& status,
   return Result<void>::success();
 }
 
+Result<void> connect_with_deadline(int descriptor,
+                                   const sockaddr_un& address,
+                                   socklen_t address_size,
+                                   int timeout_ms) {
+  const int original_flags = fcntl(descriptor, F_GETFL);
+  if (original_flags < 0 ||
+      fcntl(descriptor, F_SETFL, original_flags | O_NONBLOCK) != 0) {
+    return Result<void>::failure(
+        system_error(ErrorCode::io, "fcntl(nonblocking service socket)"));
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(timeout_ms);
+  int connected_result{};
+  do {
+    connected_result =
+        connect(descriptor, reinterpret_cast<const sockaddr*>(&address),
+                address_size);
+  } while (connected_result != 0 && errno == EINTR &&
+           std::chrono::steady_clock::now() < deadline);
+
+  if (connected_result != 0 && errno != EINPROGRESS && errno != EALREADY &&
+      errno != EAGAIN && errno != EWOULDBLOCK && errno != EISCONN) {
+    return Result<void>::failure(
+        system_error(ErrorCode::unavailable, "connect(robot I/O service)"));
+  }
+  bool connected = connected_result == 0 || errno == EISCONN;
+  while (!connected) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      return Result<void>::failure(
+          {ErrorCode::timeout, "connect(robot I/O service) timed out"});
+    }
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    const int poll_timeout =
+        static_cast<int>(std::max<std::int64_t>(1, remaining.count()));
+    pollfd pending{descriptor, POLLOUT, 0};
+    const int polled = poll(&pending, 1, poll_timeout);
+    if (polled < 0 && errno == EINTR) {
+      continue;
+    }
+    if (polled < 0) {
+      return Result<void>::failure(
+          system_error(ErrorCode::io, "poll(robot I/O service connect)"));
+    }
+    if (polled == 0) {
+      continue;
+    }
+    int socket_error{};
+    socklen_t socket_error_size = sizeof(socket_error);
+    if (getsockopt(descriptor, SOL_SOCKET, SO_ERROR, &socket_error,
+                   &socket_error_size) != 0 ||
+        socket_error_size != sizeof(socket_error)) {
+      return Result<void>::failure(
+          system_error(ErrorCode::io, "getsockopt(service connect error)"));
+    }
+    if (socket_error != 0) {
+      return Result<void>::failure(system_error(
+          ErrorCode::unavailable, "connect(robot I/O service)", socket_error));
+    }
+    connected = true;
+  }
+
+  if (fcntl(descriptor, F_SETFL, original_flags) != 0) {
+    return Result<void>::failure(
+        system_error(ErrorCode::io, "fcntl(restore service socket flags)"));
+  }
+  return Result<void>::success();
+}
+
 }  // namespace
 
 Result<RobotIoClient> connect_robot_io_service(
@@ -120,7 +196,7 @@ Result<RobotIoClient> connect_robot_io_service(
 
   const std::string generation_name(generation_path);
   ScopedFd generation_fd(open(generation_name.c_str(),
-                              O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+                              O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW));
   if (generation_fd.get() < 0) {
     const auto code = errno == ELOOP ? ErrorCode::invalid_argument
                                     : ErrorCode::unavailable;
@@ -136,6 +212,12 @@ Result<RobotIoClient> connect_robot_io_service(
       validate_runtime_file(generation_status, S_IFREG, "generation file");
   if (!valid_generation_file.has_value()) {
     return Result<RobotIoClient>::failure(valid_generation_file.error());
+  }
+  if (generation_status.st_size <= 0 ||
+      generation_status.st_size > kMaximumGenerationFileSize) {
+    return Result<RobotIoClient>::failure(
+        {ErrorCode::invalid_argument,
+         "generation file size is outside the accepted bound"});
   }
   auto generation = read_generation(generation_fd.get());
   if (!generation.has_value()) {
@@ -169,16 +251,13 @@ Result<RobotIoClient> connect_robot_io_service(
   sockaddr_un address{};
   address.sun_family = AF_UNIX;
   std::memcpy(address.sun_path, socket_name.c_str(), socket_name.size() + 1U);
-  int connected_result{};
-  do {
-    connected_result =
-        connect(connected.get(), reinterpret_cast<const sockaddr*>(&address),
-                static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) +
-                                       socket_name.size() + 1U));
-  } while (connected_result != 0 && errno == EINTR);
-  if (connected_result != 0) {
-    return Result<RobotIoClient>::failure(
-        system_error(ErrorCode::unavailable, "connect(robot I/O service)"));
+  auto connected_service = connect_with_deadline(
+      connected.get(), address,
+      static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) +
+                             socket_name.size() + 1U),
+      setup_timeout_ms);
+  if (!connected_service.has_value()) {
+    return Result<RobotIoClient>::failure(connected_service.error());
   }
 
   ucred peer{};

@@ -549,13 +549,13 @@ void RobotIoDaemon::cycle() noexcept {
       loop_.config().period});
 }
 
-void RobotIoDaemon::run() noexcept {
+Result<void> RobotIoDaemon::run() {
   if (!running_.load(std::memory_order_acquire)) {
-    return;
+    return Result<void>::success();
   }
   CycleOwnerGuard owner{cycle_owner_token_};
   if (!owner || !running_.load(std::memory_order_acquire)) {
-    return;
+    return Result<void>::success();
   }
   auto realtime = loop_.prepare();
   if (!realtime.has_value()) {
@@ -567,11 +567,19 @@ void RobotIoDaemon::run() noexcept {
                               std::memory_order_release);
   }
   bool sleep_failed = !realtime.has_value();
+  std::optional<Error> control_failure;
   while (running_.load(std::memory_order_acquire) &&
          !shutdown_complete_.load(std::memory_order_acquire)) {
     if (signal_stop_requested != 0) {
       stop_requested_.store(true, std::memory_order_release);
       accepting_commands_.store(false, std::memory_order_release);
+    }
+    if (!stop_requested_.load(std::memory_order_acquire) &&
+        !control_failure.has_value()) {
+      auto controlled = poll_control();
+      if (!controlled.has_value()) {
+        control_failure.emplace(controlled.error());
+      }
     }
     if (!sleep_failed) {
       const auto release = loop_.wait_next();
@@ -593,6 +601,10 @@ void RobotIoDaemon::run() noexcept {
   }
   loop_.release();
   stop_transports();
+  if (control_failure.has_value()) {
+    return Result<void>::failure(std::move(*control_failure));
+  }
+  return Result<void>::success();
 }
 
 Result<void> RobotIoDaemon::request_stop() {

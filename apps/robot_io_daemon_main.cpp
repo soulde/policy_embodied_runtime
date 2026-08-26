@@ -229,6 +229,10 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  daemon.run();
+  auto ran = daemon.run();
+  if (!ran.has_value()) {
+    std::cerr << ran.error().message << '\n';
+    return 1;
+  }
   return 0;
 }

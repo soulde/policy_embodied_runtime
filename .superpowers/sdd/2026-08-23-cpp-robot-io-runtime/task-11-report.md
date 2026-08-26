@@ -24,6 +24,28 @@ the generation path is removed. A concurrent handoff regression repeatedly
 starts a successor while the old listener is being destroyed and verifies the
 successor's generation remains published.
 
+Fix round 3 bounds the remaining runtime-host handoff operations. The host
+opens the generation path with `O_NONBLOCK`, rejects anything except a
+nonempty regular file no larger than the 11-byte maximum 32-bit generation
+representation, and performs the service-socket connect in nonblocking mode
+against the configured steady-clock deadline. Completion is checked with
+`poll()` and `SO_ERROR`, and the original descriptor flags are restored before
+the existing setup handshake. A FIFO regression proves generation-path open
+cannot wait for a writer, while a saturated-listener regression requires the
+connector to return the specific timeout result within a bounded parent
+deadline.
+
+The daemon run loop now checks the accepted sole host on its non-realtime
+control path. A closed peer or unexpected post-setup packet requests the normal
+safe shutdown, leaves cyclic processing active until shutdown completes,
+stops transports, and then returns the peer error to `robot-io-daemon`'s main
+function. The process exits with failure so `Restart=on-failure` can start a
+new listener with a fresh generation. Regression coverage checks the daemon's
+shutdown health, packaged-host generation mismatch, accepted-host crash,
+runtime-file cleanup, successor startup, and fresh-generation connection. The
+packaged-host lifecycle test also waits for daemon failure after the fresh host
+closes instead of racing that failure with an expected successful SIGTERM.
+
 `policy-runtime-host` now accepts paired `--robot-io-socket` and
 `--robot-io-generation-file` options in addition to the existing paired FD and
 generation options. The service connector uses `O_NOFOLLOW`, strict generation
@@ -89,6 +111,31 @@ Fix-round-2 evidence before the controller-directed commit:
   output. Full build, install, Python, and sanitizer reruns were not performed
   after that cancellation because the controller directed an immediate commit
   with no more tests.
+
+Fix-round-3 evidence:
+
+- Cached pinned CMake 4.4.2 configured the `/usr`-prefix, IgH-off, ZeroMQ-off
+  build and completed the full all-target build: passed. The `uv --with`
+  resolver itself could not reach PyPI because outbound networking is blocked,
+  so the already-cached verified 4.4.2 executable was invoked directly.
+- Exact non-socket CTest selection: 187/187 passed.
+- Full CTest: 187 passed, 24 socket-dependent tests failed only at the managed
+  sandbox's `getsockopt(SO_DOMAIN)` or `bind(AF_UNIX, SOCK_SEQPACKET)` `EPERM`
+  boundary, and four tests were explicitly skipped (three at the same AF_UNIX
+  boundary and the packaged-host mismatch case because ZeroMQ was unavailable).
+- Focused service coverage: the generation FIFO test passed in 10 ms; the
+  full-backlog timeout and accepted-host crash/restart cases skipped at AF_UNIX
+  bind `EPERM`; the packaged mismatch/restart case skipped because this build
+  has no compatible ZeroMQ. The focused daemon peer-close safety test skipped
+  at sandbox-forbidden `SO_DOMAIN` inspection.
+- A `/usr` plus temporary `DESTDIR` install passed. The four installed
+  `robot-io-daemon`, `policy-runtime-host`, `robot-io-health`, and
+  `ethercat-cycle-stats` help paths all exited zero, and the unit installed at
+  `/usr/lib/systemd/system/robot-io-daemon.service`.
+- Full Python execution: 26 passed and the two ZeroMQ transport tests failed at
+  sandbox-forbidden `socket(AF_INET, SOCK_STREAM)` with `EPERM`. The explicit
+  non-socket Python selection passed 26/26.
+- `git diff --check`: clean.
 
 Hardware, real systemd activation, unsandboxed socket execution, and target
 PREEMPT_RT/IgH/Elmo operation remain explicitly deferred to the documented
