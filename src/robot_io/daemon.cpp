@@ -384,14 +384,30 @@ CommandAcceptance RobotIoDaemon::refresh_commands_owned() noexcept {
     }
     return acceptance;
   }
-  const auto ipc_acceptance =
-      safety_.accept_commands(snapshot.value(), clock_->now_ns());
-  if (ipc_acceptance != CommandAcceptance::rejected &&
-      ipc_->servo_count() != 0U) {
-    ipc_commit_sequence_ = snapshot.value().sequence;
-    ipc_commit_timestamp_ns_ = snapshot.value().timestamp_ns;
-    has_ipc_commit_ = true;
+
+  const auto now = clock_->now_ns();
+  SafetySupervisor preview = safety_;
+  const auto ipc_acceptance = preview.accept_commands(snapshot.value(), now);
+  if (ipc_acceptance == CommandAcceptance::rejected) {
+    static_cast<void>(safety_.accept_commands(snapshot.value(), now));
+    return ipc_acceptance;
   }
+  if (ipc_->servo_count() != 0U) {
+    auto servo_snapshot = ipc_->read_servo_commands_realtime();
+    const bool matching_epoch =
+        servo_snapshot.has_value() &&
+        servo_snapshot.value().sequence == snapshot.value().sequence &&
+        servo_snapshot.value().timestamp_ns == snapshot.value().timestamp_ns;
+    if (!matching_epoch ||
+        serial_devices_.stage_commands(servo_snapshot.value(), now) ==
+            St3215CommandAcceptance::rejected) {
+      Snapshot<AxisCommand> invalid{};
+      invalid.axis_count = kRobotIoMaximumAxes + 1U;
+      static_cast<void>(safety_.accept_commands(invalid, now));
+      return CommandAcceptance::rejected;
+    }
+  }
+  safety_ = preview;
   if (ipc_acceptance == CommandAcceptance::accepted) {
     last_command_sequence_.store(snapshot.value().sequence,
                                  std::memory_order_release);
@@ -420,14 +436,6 @@ void RobotIoDaemon::process_device_cycle_owned(
   }
   static_cast<void>(consume_staged_commands());
   const auto now = clock_->now_ns();
-  if (ipc_.has_value() && ipc_->servo_count() != 0U) {
-    auto commands = ipc_->read_servo_commands_realtime();
-    if (commands.has_value() && has_ipc_commit_ &&
-        commands.value().sequence == ipc_commit_sequence_ &&
-        commands.value().timestamp_ns == ipc_commit_timestamp_ns_) {
-      static_cast<void>(serial_devices_.stage_commands(commands.value(), now));
-    }
-  }
   if (stop_requested_.load(std::memory_order_acquire)) {
     accepting_commands_.store(false, std::memory_order_release);
     safety_.request_shutdown(now);

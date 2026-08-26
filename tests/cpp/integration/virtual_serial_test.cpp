@@ -594,6 +594,105 @@ TEST(VirtualSerialTest,
   device.request_stop();
 }
 
+TEST(VirtualSerialTest,
+     MixedIpcCommandRejectsStaleServoBatchWithoutPartialCommitAndRecovers) {
+  PtyEndpoint endpoint;
+  std::array<int, 2> sockets{-1, -1};
+  ASSERT_EQ(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0,
+                       sockets.data()),
+            0);
+  auto server = policy_runtime::RobotIoIpcServer::create(
+      sockets[0], 1U, 2U, 94U);
+  ASSERT_TRUE(server.has_value()) << server.error().message;
+
+  policy_runtime::profiles::RobotProfile profile;
+  profile.axes.push_back(policy_runtime::profiles::AxisConfig{
+      "axis", 0, 0, 0x9a, 0x00030924, 0x00010420,
+      policy_runtime::profiles::Cia402Mode::csp, 1000.0, -10.0, 10.0,
+      2s, "arm", 1.0, 10.0});
+  const policy_runtime::profiles::SerialPortConfig serial{
+      endpoint.path(), 1'000'000U, 64U, 259U, 20ms, 20ms, 1ms};
+  profile.st3215_servos.push_back(
+      policy_runtime::profiles::St3215ServoProfile{
+          "first_position", "first_target", serial, 1, 1, 4095,
+          0, 0, 250ms, "arm"});
+  profile.st3215_servos.push_back(
+      policy_runtime::profiles::St3215ServoProfile{
+          "second_position", "second_target", serial, 2, 2, 4095,
+          0, 0, 250ms, "arm"});
+
+  policy_runtime::RobotIoDaemon daemon;
+  ASSERT_TRUE(daemon.configure(profile).has_value());
+  ASSERT_TRUE(daemon.attach_ipc(std::move(server.value())).has_value());
+  auto client = policy_runtime::RobotIoClient::connect(sockets[1], 94U);
+  ASSERT_TRUE(client.has_value()) << client.error().message;
+  ASSERT_TRUE(daemon.start().has_value());
+
+  const auto timestamp_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  ASSERT_EQ(daemon.stage_servo_command(
+                1U, policy_runtime::St3215ServoCommand{
+                        2U, timestamp_ns, 0.75, true, false}),
+            policy_runtime::St3215CommandAcceptance::accepted);
+
+  const std::array axes{policy_runtime::AxisCommand{
+      1U, timestamp_ns, 0.25, policy_runtime::kAxisCommandEnable, 0U}};
+  const std::array stale_servos{
+      policy_runtime::St3215ServoCommand{
+          1U, timestamp_ns, 0.5, true, false},
+      policy_runtime::St3215ServoCommand{
+          1U, timestamp_ns, 1.0, true, false}};
+  ASSERT_TRUE(client.value()
+                  .publish_commands(axes, stale_servos, 1U, timestamp_ns)
+                  .has_value());
+
+  EXPECT_EQ(daemon.refresh_commands(),
+            policy_runtime::CommandAcceptance::rejected);
+  EXPECT_EQ(daemon.health().last_command_sequence, 0U)
+      << "the axis epoch must not commit when its servo batch is rejected";
+  EXPECT_EQ(daemon.stage_servo_command(0U, stale_servos[0]),
+            policy_runtime::St3215CommandAcceptance::accepted)
+      << "the acceptable servo prefix must not commit from a rejected batch";
+  daemon.cycle();
+  auto rejected_feedback = client.value().read_feedback();
+  ASSERT_TRUE(rejected_feedback.has_value())
+      << rejected_feedback.error().message;
+  EXPECT_EQ(rejected_feedback.value().sequence, 0U);
+  EXPECT_NE(rejected_feedback.value().axes[0].flags &
+                policy_runtime::kAxisFeedbackSafetyInvalidCommand,
+            0U);
+
+  const auto recovery_timestamp_ns = timestamp_ns + 1;
+  const std::array recovery_axes{policy_runtime::AxisCommand{
+      3U, recovery_timestamp_ns, 0.5,
+      policy_runtime::kAxisCommandEnable, 0U}};
+  const std::array recovery_servos{
+      policy_runtime::St3215ServoCommand{
+          3U, recovery_timestamp_ns, 1.25, true, false},
+      policy_runtime::St3215ServoCommand{
+          3U, recovery_timestamp_ns, 1.5, true, false}};
+  ASSERT_TRUE(client.value()
+                  .publish_commands(recovery_axes, recovery_servos, 3U,
+                                    recovery_timestamp_ns)
+                  .has_value());
+
+  EXPECT_EQ(daemon.refresh_commands(),
+            policy_runtime::CommandAcceptance::accepted);
+  EXPECT_EQ(daemon.health().last_command_sequence, 3U);
+  EXPECT_EQ(daemon.stage_servo_command(0U, recovery_servos[0]),
+            policy_runtime::St3215CommandAcceptance::duplicate);
+  EXPECT_EQ(daemon.stage_servo_command(1U, recovery_servos[1]),
+            policy_runtime::St3215CommandAcceptance::duplicate);
+  daemon.cycle();
+  auto recovered_feedback = client.value().read_feedback();
+  ASSERT_TRUE(recovered_feedback.has_value())
+      << recovered_feedback.error().message;
+  EXPECT_EQ(recovered_feedback.value().sequence, 3U);
+  ASSERT_TRUE(daemon.request_stop().has_value());
+}
+
 TEST(VirtualSerialTest, St3215OnlyDaemonRelaysV2IpcCommandsAndFeedback) {
   PtyEndpoint endpoint;
   std::array<int, 2> sockets{-1, -1};
