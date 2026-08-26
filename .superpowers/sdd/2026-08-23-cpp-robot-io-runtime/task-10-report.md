@@ -60,6 +60,25 @@ recovery without frame interleaving, and bounds shutdown.
   source because outbound downloads are blocked.
 - `git diff --check`: clean.
 
+## Fix Round 3
+
+Closed the remaining mixed-command partial-commit window. The daemon now reads
+and validates axis and servo snapshots in one owner cycle, previews axis safety
+on a stack copy, stages the complete servo batch, and commits the axis state,
+heartbeat, and servo batch only after every validation succeeds. A malformed or
+stale servo record leaves both sides uncommitted and enters the invalid-command
+safety path; a newer epoch recovers atomically on the following cycle. The old
+delayed servo commit in the process cycle was removed.
+
+### Fix-round verification
+
+- Full pinned CMake/CTest: 199/199 passed.
+- Python: 28/28 passed.
+- ASan/UBSan focused suite: 86/86 passed.
+- Mixed transaction, heartbeat, and ST-only IPC regressions: 25 repetitions
+  passed.
+- Final review: no Critical, Important, or Minor findings.
+
 ## Carry-Forward
 
 Real USB serial adapters, mixed EtherCAT/ST3215 hardware, disconnect/reconnect

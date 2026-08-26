@@ -112,6 +112,8 @@ Task 10: fix round 1/5 started from reviewer head `cb09c68` — versioned servo 
 Task 10: minor adjacent fixes requested: queue health/error fidelity, transactional configure retry, and complete rounding boundary vectors.
 Task 10: fix round 1/5 (v2 IPC/heartbeat/serial safety/late-frame/stop/TIOCEXCL/parity implemented; 4 Important remain; commit `cb09c68..802773a`).
 Task 10: fix round 2/5 started from reviewer head `802773a` — optional goal ACK/read continuation, heartbeat safety fault, atomic mixed command commit, servo snapshot epoch/record validation, and v1/v2 malformed compatibility tests open.
+Task 10: fix round 2/5 (4 original addressed, 1 new Important; commits `802773a..d27c0d9`) — daemon owner-cycle axis/servo commit barrier remains ordered incorrectly and stage rejection is ignored.
+Task 10: fix round 3/5 started from reviewer head `d27c0d9` — all-or-nothing daemon mixed axis/servo transaction open.
 Task 10: fix round 2/5 completed — optional write-ACK continuation,
 heartbeat safety latching, atomic mixed host publication, all-or-nothing servo
 snapshot staging, raw v2 descriptor capability/count rejection, and v1
