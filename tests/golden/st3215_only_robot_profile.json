@@ -1,0 +1,12 @@
+{
+  "sensors": [{
+    "name": "joint_position",
+    "device": {"type": "st3215", "path": "/tmp/st3215-only-test"},
+    "args": {"baud_rate": 1000000, "device_id": 1, "servo_id": 7}
+  }],
+  "actuators": [{
+    "name": "joint_target",
+    "device": {"type": "st3215", "path": "/tmp/st3215-only-test"},
+    "args": {"baud_rate": 1000000, "device_id": 1, "servo_id": 7}
+  }]
+}

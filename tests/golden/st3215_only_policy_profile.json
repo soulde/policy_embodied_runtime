@@ -1,0 +1,14 @@
+{
+  "id": "st3215-only-test",
+  "version": "0.1.0",
+  "policy": "dummy",
+  "model": {},
+  "inputs": [{"name": "position", "robot_data": "joint_position", "canonical_field": "position"}],
+  "outputs": [{"name": "target", "robot_data": "joint_target", "canonical_field": "target"}],
+  "canonical_observation_schema": [{"name": "position", "semantic_type": "servo_feedback", "kind": "object"}],
+  "canonical_action_schema": [{"name": "target", "semantic_type": "servo_target", "kind": "object"}],
+  "temporal": {"mode": "single_step", "action_horizon": 1, "observation_history": 1},
+  "preprocess": [],
+  "postprocess": [],
+  "safety": {}
+}

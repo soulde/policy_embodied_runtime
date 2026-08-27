@@ -1,0 +1,78 @@
+{
+  "sensors": [
+    {
+      "name": "joint_1_position",
+      "device": {"type": "cia402", "path": "/dev/EtherCAT0"},
+      "args": {
+        "alias": 0, "position": 0, "vendor_id": "0x0000009a",
+        "product_code": "0x00030924", "revision": "0x00010420",
+        "mode": "csp", "scale": 1000000, "minimum": -3.14159,
+        "maximum": 3.14159, "slew_limit": 0.05,
+        "following_error_limit": 0.2, "command_timeout_ms": 100,
+        "safety_group": "arm"
+      }
+    },
+    {
+      "name": "joint_2_velocity",
+      "device": {"type": "cia402", "path": "/dev/EtherCAT0"},
+      "args": {
+        "alias": 0, "position": 1, "vendor_id": "0x0000009a",
+        "product_code": "0x00030924", "revision": "0x00010420",
+        "mode": "csv", "scale": 1000, "minimum": -2.5,
+        "maximum": 2.5, "slew_limit": 0.1,
+        "following_error_limit": 0.3, "command_timeout_ms": 75,
+        "safety_group": "arm"
+      }
+    },
+    {
+      "name": "joint_3_torque",
+      "device": {"type": "cia402", "path": "/dev/EtherCAT0"},
+      "args": {
+        "alias": 0, "position": 2, "vendor_id": "0x0000009a",
+        "product_code": "0x00030924", "revision": "0x00010420",
+        "mode": "cst", "scale": 1000, "minimum": -4.0,
+        "maximum": 4.0, "slew_limit": 0.2,
+        "following_error_limit": 0.5, "command_timeout_ms": 50,
+        "safety_group": "arm"
+      }
+    }
+  ],
+  "actuators": [
+    {
+      "name": "joint_1_target",
+      "device": {"type": "cia402", "path": "/dev/EtherCAT0"},
+      "args": {
+        "alias": 0, "position": 0, "vendor_id": "0x0000009a",
+        "product_code": "0x00030924", "revision": "0x00010420",
+        "mode": "csp", "scale": 1000000, "minimum": -3.14159,
+        "maximum": 3.14159, "slew_limit": 0.05,
+        "following_error_limit": 0.2, "command_timeout_ms": 100,
+        "safety_group": "arm"
+      }
+    },
+    {
+      "name": "joint_2_target",
+      "device": {"type": "cia402", "path": "/dev/EtherCAT0"},
+      "args": {
+        "alias": 0, "position": 1, "vendor_id": "0x0000009a",
+        "product_code": "0x00030924", "revision": "0x00010420",
+        "mode": "csv", "scale": 1000, "minimum": -2.5,
+        "maximum": 2.5, "slew_limit": 0.1,
+        "following_error_limit": 0.3, "command_timeout_ms": 75,
+        "safety_group": "arm"
+      }
+    },
+    {
+      "name": "joint_3_target",
+      "device": {"type": "cia402", "path": "/dev/EtherCAT0"},
+      "args": {
+        "alias": 0, "position": 2, "vendor_id": "0x0000009a",
+        "product_code": "0x00030924", "revision": "0x00010420",
+        "mode": "cst", "scale": 1000, "minimum": -4.0,
+        "maximum": 4.0, "slew_limit": 0.2,
+        "following_error_limit": 0.5, "command_timeout_ms": 50,
+        "safety_group": "arm"
+      }
+    }
+  ]
+}

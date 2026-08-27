@@ -1,0 +1,26 @@
+{
+  "id": "mixed-robot-io-test",
+  "version": "0.1.0",
+  "policy": "dummy",
+  "model": {},
+  "inputs": [
+    {"name": "axis_feedback", "robot_data": "axis_position", "canonical_field": "axis_position"},
+    {"name": "servo_feedback", "robot_data": "servo_position", "canonical_field": "servo_position"}
+  ],
+  "outputs": [
+    {"name": "axis_target", "robot_data": "axis_target", "canonical_field": "axis_target"},
+    {"name": "servo_target", "robot_data": "servo_target", "canonical_field": "servo_target"}
+  ],
+  "canonical_observation_schema": [
+    {"name": "axis_position", "semantic_type": "joint_position", "kind": "scalar", "unit": "rad"},
+    {"name": "servo_position", "semantic_type": "servo_feedback", "kind": "object"}
+  ],
+  "canonical_action_schema": [
+    {"name": "axis_target", "semantic_type": "joint_position_target", "kind": "scalar", "unit": "rad"},
+    {"name": "servo_target", "semantic_type": "servo_target", "kind": "object"}
+  ],
+  "temporal": {"mode": "single_step", "action_horizon": 1, "observation_history": 1},
+  "preprocess": [],
+  "postprocess": [],
+  "safety": {}
+}

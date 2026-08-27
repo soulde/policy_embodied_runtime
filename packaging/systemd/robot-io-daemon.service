@@ -1,0 +1,49 @@
+[Unit]
+Description=Policy Runtime Robot I/O daemon
+Documentation=file:/usr/share/doc/policy-runtime/robot-io-daemon.md
+Wants=network-pre.target
+After=network-pre.target
+ConditionPathExists=/dev/EtherCAT0
+
+[Service]
+Type=simple
+User=robot-io
+Group=robot-io
+# The daemon creates a one-client Unix SOCK_SEQPACKET rendezvous in the
+# service-owned runtime directory and authenticates the connecting uid.
+# A separately supervised host must use --robot-io-socket and
+# --robot-io-generation-file with these same /run paths.
+Environment=ROBOT_IO_PROFILE=/usr/share/policy-runtime/robot_profiles/elmo_gold_example.json
+ExecStart=/usr/bin/robot-io-daemon ${ROBOT_IO_PROFILE} --ipc-socket=/run/policy-runtime/robot-io.sock --generation-file=/run/policy-runtime/robot-io.generation
+Restart=on-failure
+RestartSec=1s
+TimeoutStopSec=10s
+RuntimeDirectory=policy-runtime
+RuntimeDirectoryMode=0750
+UMask=0077
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+CapabilityBoundingSet=CAP_IPC_LOCK CAP_SYS_NICE
+AmbientCapabilities=CAP_IPC_LOCK CAP_SYS_NICE
+NoNewPrivileges=true
+RestrictRealtime=no
+DevicePolicy=closed
+DeviceAllow=/dev/EtherCAT0 rw
+PrivateDevices=no
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectClock=true
+ReadWritePaths=/run/policy-runtime
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

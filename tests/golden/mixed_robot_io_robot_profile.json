@@ -1,0 +1,54 @@
+{
+  "sensors": [
+    {
+      "name": "axis_position",
+      "device": {"type": "cia402", "path": "/dev/EtherCAT0"},
+      "args": {
+        "alias": 0,
+        "position": 0,
+        "vendor_id": "0x9a",
+        "product_code": "0x30924",
+        "revision": "0x10420",
+        "mode": "csp",
+        "scale": 1000,
+        "minimum": -3.0,
+        "maximum": 3.0,
+        "slew_limit": 0.1,
+        "following_error_limit": 0.5,
+        "command_timeout_ms": 250,
+        "safety_group": "arm"
+      }
+    },
+    {
+      "name": "servo_position",
+      "device": {"type": "st3215", "path": "/tmp/mixed-st3215"},
+      "args": {"baud_rate": 1000000, "device_id": 1, "servo_id": 7, "safety_group": "arm"}
+    }
+  ],
+  "actuators": [
+    {
+      "name": "axis_target",
+      "device": {"type": "cia402", "path": "/dev/EtherCAT0"},
+      "args": {
+        "alias": 0,
+        "position": 0,
+        "vendor_id": "0x9a",
+        "product_code": "0x30924",
+        "revision": "0x10420",
+        "mode": "csp",
+        "scale": 1000,
+        "minimum": -3.0,
+        "maximum": 3.0,
+        "slew_limit": 0.1,
+        "following_error_limit": 0.5,
+        "command_timeout_ms": 250,
+        "safety_group": "arm"
+      }
+    },
+    {
+      "name": "servo_target",
+      "device": {"type": "st3215", "path": "/tmp/mixed-st3215"},
+      "args": {"baud_rate": 1000000, "device_id": 1, "servo_id": 7, "safety_group": "arm"}
+    }
+  ]
+}

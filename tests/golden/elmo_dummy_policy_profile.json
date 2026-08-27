@@ -1,0 +1,66 @@
+{
+  "id": "elmo-dummy-policy",
+  "version": "0.1.0",
+  "policy": "dummy",
+  "model": {},
+  "inputs": [
+    {
+      "name": "shoulder_feedback_input",
+      "robot_data": "shoulder_position",
+      "canonical_field": "shoulder_position"
+    },
+    {
+      "name": "elbow_feedback_input",
+      "robot_data": "elbow_velocity",
+      "canonical_field": "elbow_velocity"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "shoulder_target_output",
+      "robot_data": "shoulder_target",
+      "canonical_field": "shoulder_target"
+    },
+    {
+      "name": "elbow_target_output",
+      "robot_data": "elbow_target",
+      "canonical_field": "elbow_target"
+    }
+  ],
+  "canonical_observation_schema": [
+    {
+      "name": "shoulder_position",
+      "semantic_type": "joint_position",
+      "kind": "scalar",
+      "unit": "rad"
+    },
+    {
+      "name": "elbow_velocity",
+      "semantic_type": "joint_velocity",
+      "kind": "scalar",
+      "unit": "rad/s"
+    }
+  ],
+  "canonical_action_schema": [
+    {
+      "name": "shoulder_target",
+      "semantic_type": "joint_position_target",
+      "kind": "scalar",
+      "unit": "rad"
+    },
+    {
+      "name": "elbow_target",
+      "semantic_type": "joint_velocity_target",
+      "kind": "scalar",
+      "unit": "rad/s"
+    }
+  ],
+  "temporal": {
+    "mode": "single_step",
+    "action_horizon": 1,
+    "observation_history": 1
+  },
+  "preprocess": [{"name": "noop", "params": {}}],
+  "postprocess": [{"name": "noop", "params": {}}],
+  "safety": {}
+}

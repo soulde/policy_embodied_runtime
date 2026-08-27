@@ -4,54 +4,72 @@
 
 ## Scope Boundary
 
-This project does:
+The repository now contains two cooperating C++ processes as well as the
+Python-compatible policy and simulator layers:
 
-- robot-owned policy runtime and session lifecycle
-- policy implementations
-- policy profile validation
-- ZMQ transport for policy RPC
-- preprocess, postprocess, and validation placeholders
-- robot `Sensor` and `Actuator` interfaces
-- SO-ARM101 MuJoCo simulator
+- `policy-runtime-host` owns policy inference, canonical observation/action
+  binding, session state, and the optional ZeroMQ JSON interface.
+- `robot-io-daemon` owns every physical transport, protocol, device registry,
+  scheduling decision, watchdog, and safety transition.
+- Python policy, profile, protocol, and SO-ARM101 simulator packages remain
+  supported for compatibility and deterministic regression tests.
 
-This project does not do:
+ROS2 control, camera drivers, real IgH hardware qualification, and HIL are
+integration concerns rather than hidden runtime dependencies.
 
-- robot drivers
-- ROS2 control
-- realtime servo loops
-- camera drivers
+## Current Architecture
 
-## Architecture
-
-- `robot/`: robot layer inspired by `soulde/rustyRobot`; owns `RobotData`, `Sensor`, `Actuator`, `Policy`, session state, registry, and policy runtime orchestration
-- `transport/`: low-level communication implementations in the `rustyRobot` sense; examples include ZMQ, serial, CAN, USB2CAN, and virtual serial
-- `protocol/`: JSON policy RPC envelope and payload contracts plus protocol codec/errors
-- `apps/`: runnable entrypoints such as the ZMQ policy RPC robot host
-- `models/`: policy implementations consumed by the robot layer
-- `sim/`: simulators, including the migrated SO-ARM101 MuJoCo + virtual ST3215 serial simulator
-- `integrations/`: external usage examples only; ROS2 remains optional
-
-The project uses the same layer vocabulary as `rustyRobot`:
+The runtime follows `Transport -> Protocol/Device -> Sensor` on input and
+`Actuator -> Protocol/Device -> Transport` on output. A transport performs
+physical I/O; a protocol translates fields in a process image or frame; a
+device exposes typed sensor/actuator values.
 
 ```text
-Robot Layer -> Sensor input, Actuator output, RobotData, policy runtime
-Protocol    -> schema-validated policy RPC envelopes and payloads
-Transport   -> low-level communication channel implementation
+policy-runtime-host (non-RT)                 robot-io-daemon
+┌──────────────────────────────┐       ┌──────────────────────────────┐
+│ ZMQ/JSON RPC (optional)      │       │ 1 kHz EtherCAT owner          │
+│ profile + policy pipeline    │       │ IgH backend / Elmo Gold PDO  │
+│ canonical bindings           │       │ CiA402 Axis (CSP/CSV/CST)    │
+└──────────────┬───────────────┘       └──────────────┬───────────────┘
+               │ Unix SOCK_SEQPACKET + memfd snapshots │
+               └───────────────────────────────────────┘
+                                           ┌───────────┴───────────┐
+                                           │ non-RT serial executor│
+                                           │ ST3215 shared bus     │
+                                           └───────────────────────┘
 ```
 
-Anything that enters the robot is a `Sensor`, including physical sensors, remote controls, network links, simulator state, and policy RPC requests. Anything the robot outputs is an `Actuator`, including motors, grippers, serial/CAN commands, telemetry, logs, simulator commands, and policy RPC responses. `transport` is only the bottom communication mechanism used inside a sensor or actuator; for policy RPC the transport implementation is ZMQ.
+EtherCAT is the transport layer. Its PDO and mailbox endpoints share one
+backend, but the cyclic master is the sole ecrt owner: each cycle performs
+bounded PDO exchange and at most one mailbox/SDO step, without waiting for a
+lower-priority thread. CiA402 is the protocol layer; `Cia402Axis` is both a
+typed `Sensor` and `Actuator`. CSP/CSV/CST (8/9/10) are static profile choices
+and cannot be switched at runtime.
 
-Server flow in MVP:
+Serial/ST3215 uses a separate non-real-time executor. `St3215Servo` only
+stages commands and consumes lock-free snapshots; one shared serial bus owns
+termios, framing, retries, timeout handling, and all blocking I/O. Serial
+faults enter the daemon's latched safety supervisor and cannot interfere with
+the EtherCAT cycle.
 
-1. Decode and validate request envelope.
-2. Validate policy input.
-3. Map incoming observation into canonical observation.
-4. Run preprocess pipeline.
-5. Call policy inference.
-6. Run postprocess pipeline such as action clipping.
-7. Validate and package the response.
-8. Return policy action.
-9. Encode response envelope.
+The daemon/host IPC is versioned. Axis-only profiles use the compact v1
+layout; profiles containing ST3215 devices use v2 with independent bounded
+axis and servo snapshots. Setup transfers role-checked file descriptors and a
+fresh generation. Commands carry sequence/timestamp metadata, stale or future
+records are rejected, and mixed axis+servo publications commit only after all
+records validate. A failed command or transport health event follows
+QuickStop -> zero-speed confirmation -> Disable; recovery requires a newer
+command sequence.
+
+## Policy request flow
+
+1. Decode and validate the JSON envelope (including correlated runtime errors).
+2. Normalize nullable and numeric fields using the Python-compatible schema.
+3. Bind observations from daemon snapshots to canonical policy inputs.
+4. Run preprocess, policy inference, and postprocess/action validation.
+5. Validate all axis and ST3215 targets, then publish one sequence atomically.
+6. Daemon devices translate the snapshot into PDO fields or serial frames;
+   only transports perform physical I/O.
 
 ## Development
 
@@ -64,6 +82,29 @@ env UV_CACHE_DIR=/tmp/uv-cache uv pip install -e ".[dev]"
 pytest
 ```
 
+## C++ robot I/O daemon
+
+The C++ implementation packages `robot-io-daemon`, `policy-runtime-host`, safe
+diagnostic CLIs, an Elmo Gold static-mode example, and a hardened systemd
+listener. IgH EtherCAT and ZeroMQ are optional at configure time, while the
+fake backends and PTY tests keep development hardware-free. Use CMake >=3.24
+from the documented `uv` environment, for example:
+
+```bash
+env UV_CACHE_DIR=/tmp/uv-cache uv run --with 'cmake>=3.24' cmake -S . -B build \
+  -DPOLICY_RUNTIME_WITH_IGH=OFF
+env UV_CACHE_DIR=/tmp/uv-cache uv run --with 'cmake>=3.24' cmake --build build
+```
+
+Target installation, service setup, and the PREEMPT_RT/EtherCAT qualification
+procedure are in [docs/robot-io-daemon.md](docs/robot-io-daemon.md). Passing
+fake/PTY tests, packaging checks, or CLI help does not validate connected
+hardware; real IgH/Elmo and 12-axis HIL remain deployment qualification steps.
+Migration, parity-gate, and Python compatibility-layer details are in
+[docs/migration/cpp-runtime.md](docs/migration/cpp-runtime.md); the outstanding
+target matrix is tracked in
+[docs/qualification/cpp-runtime-final.md](docs/qualification/cpp-runtime-final.md).
+
 ## Quickstart
 
 Validate schemas, runtime, transport, and robot I/O abstractions:
@@ -75,16 +116,23 @@ pytest policy_embodied_runtime/tests
 
 The basic runtime flow has three roles:
 
-1. An environment or hardware process exposes the robot devices declared by the robot profile. In simulation this is `policy-soarm101-sim`; on real hardware this is the physical serial/CAN/network device.
-2. `policy-runtime-host` loads the robot profile and policy profile, builds sensors/actuators, runs the sensor threads, calls policy inference, and writes actuator commands.
-3. An upstream input publisher sends robot inputs, such as remote-control commands, network commands, or task requests. For SO-ARM101 simulation this is `policy-soarm101-command-publisher`.
+1. `robot-io-daemon` loads the robot profile, owns EtherCAT/serial devices,
+   and publishes versioned snapshots over its Unix socket.
+2. `policy-runtime-host` loads the policy profile, reads snapshots, runs
+   policy inference, and publishes validated axis/servo commands.
+3. An upstream RPC client or simulator supplies policy observations. For
+   SO-ARM101 simulation this is `policy-soarm101-command-publisher`.
 
-Run a minimal runtime host:
+Run a minimal policy host (direct handler mode):
 
 ```bash
 policy-runtime-host \
   --policy-profile policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json
 ```
+
+For a packaged daemon listener, pass the same socket and generation-file paths
+to the host (`--robot-io-socket` and `--robot-io-generation-file`); the service
+unit documents the corresponding `/run/policy-runtime` locations.
 
 Run the SO-ARM101 flow with simulation as the environment:
 
@@ -142,6 +190,11 @@ Policy RPC observations and actions use the canonical fields declared by the act
 
 Current implementation is staged:
 
-- Phase 1-2: scaffold, schemas, config loader, examples, validation tests
-- Phase 3-5: policy registry, dummy policy, robot runtime, ZMQ transport
-- Phase 6-9: robot I/O abstractions, example policies, integration tests, documentation refinement
+- Python policy/protocol/runtime modules remain as a deliberate compatibility
+  layer because published wheel entry points and the parity oracle still use
+  them; new hardware deployments should select the CMake-installed native
+  `policy-runtime-host` explicitly.
+- C++ runtime host, versioned daemon IPC, CiA402/Elmo EtherCAT, and ST3215
+  serial execution paths are implemented and covered by fake/PTY tests.
+- PREEMPT_RT scheduling, real IgH linkage, Elmo commissioning, and 12-axis HIL
+  are target-environment qualification work; see the daemon guide.
