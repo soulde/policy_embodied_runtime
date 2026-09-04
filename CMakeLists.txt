@@ -195,6 +195,12 @@ if(POLICY_RUNTIME_BUILD_TESTS)
     policy_runtime_configure_target(damiao_transport_test)
     add_test(NAME damiao_transport_test COMMAND damiao_transport_test)
 
+    add_executable(damiao_motor_test tests/cpp/integration/damiao_motor_test.cpp)
+    target_link_libraries(damiao_motor_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(damiao_motor_test)
+    add_test(NAME damiao_motor_test COMMAND damiao_motor_test)
+
     add_executable(ipc_test tests/cpp/integration/ipc_test.cpp)
     target_link_libraries(ipc_test
         PRIVATE policy_runtime_core GTest::gtest_main)
