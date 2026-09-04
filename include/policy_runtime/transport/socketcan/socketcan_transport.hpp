@@ -24,6 +24,8 @@ class SocketCanTransport {
  public:
   explicit SocketCanTransport(int fd) noexcept : fd_(fd) {}
 
+  bool valid() const noexcept { return fd_ >= 0; }
+
   Result<void> send_frame(const CanFrame& frame) noexcept;
   Result<std::optional<CanFrame>> receive_frame() noexcept;
 

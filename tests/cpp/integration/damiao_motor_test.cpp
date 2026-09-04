@@ -1,13 +1,18 @@
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <fcntl.h>
 #include <optional>
+#include <unistd.h>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "policy_runtime/common/result.hpp"
+#include "policy_runtime/robot/devices/damiao_motor_bus.hpp"
 #include "policy_runtime/robot/devices/damiao_motor_device.hpp"
+#include "policy_runtime/robot_io/transport_scheduler.hpp"
 #include "policy_runtime/transport/socketcan/socketcan_transport.hpp"
 
 namespace {
@@ -135,6 +140,50 @@ TEST(DamiaoMotorDeviceTest, OutOfRangeCommandIsRejectedBeforeSending) {
   EXPECT_FALSE(result.has_value());
   EXPECT_TRUE(device.fault_latched());
   EXPECT_TRUE(transport.sent.empty());
+}
+
+}  // namespace
+
+namespace {
+
+using policy_runtime::DamiaoMotorBus;
+using policy_runtime::SocketCanTransport;
+using policy_runtime::TransportHealth;
+using policy_runtime::TransportScheduler;
+using policy_runtime::VirtualCanTransport;
+
+TEST(DamiaoMotorBusTest, RegistersWithSchedulerAndCyclesOneShot) {
+  DamiaoMotorConfig config;
+  config.motor_id = 0x01U;
+  config.limits = DamiaoLimits{12.5F, 30.0F, 10.0F};
+
+  DamiaoMotorBus bus(config, DamiaoMotorBus::CanTransport{
+                                  SocketCanTransport{-1}});
+  EXPECT_FALSE(bus.open().has_value());
+
+  // A pre-opened PTY pair provides a real descriptor for the serial variant.
+  int master = ::open("/dev/ptmx", O_RDWR | O_NOCTTY);
+  ASSERT_GE(master, 0);
+
+  DamiaoMotorBus serial_bus(config, DamiaoMotorBus::CanTransport{
+                                        VirtualCanTransport{master}});
+  ASSERT_TRUE(serial_bus.open().has_value());
+
+  TransportScheduler scheduler;
+  ASSERT_TRUE(scheduler.add(serial_bus).has_value());
+  EXPECT_TRUE(scheduler.executor_id(serial_bus).has_value());
+
+  serial_bus.stage_command(DamiaoMitCommand{});
+  policy_runtime::CycleContext context;
+  context.scheduled_start = std::chrono::steady_clock::now();
+  serial_bus.cycle(context);
+  // No feedback ever arrives, so the cycle faults and health degrades.
+  EXPECT_FALSE(serial_bus.last_cycle_result().has_value());
+  EXPECT_TRUE(serial_bus.device().fault_latched());
+  EXPECT_EQ(serial_bus.health(), TransportHealth::failed);
+
+  ASSERT_TRUE(scheduler.remove(serial_bus).has_value());
+  close(master);
 }
 
 }  // namespace

@@ -592,3 +592,19 @@ TEST(ProfileLoaderTest, RejectsUnsupportedDamiaoMotorConfigurations) {
   negative_limit["sensors"][0]["args"]["torque_max"] = -1.0;
   expect_robot_rejected(negative_limit);
 }
+
+TEST(ProfileLoaderTest, LoadsDamiaoExampleProfile) {
+  auto profile = load_robot_profile(source_path(
+      "policy_embodied_runtime/examples/robot_profiles/"
+      "damiao_can_robot_profile.json"));
+  ASSERT_TRUE(profile.has_value());
+  ASSERT_EQ(profile.value().damiao_motors.size(), 2U);
+  const auto& first = profile.value().damiao_motors.at(0);
+  EXPECT_EQ(first.transport,
+            policy_runtime::profiles::DamiaoTransport::socketcan);
+  EXPECT_EQ(first.motor_id, 1U);
+  const auto& second = profile.value().damiao_motors.at(1);
+  EXPECT_EQ(second.transport,
+            policy_runtime::profiles::DamiaoTransport::virtual_serial);
+  EXPECT_EQ(second.path, "/dev/ttyUSB0");
+}

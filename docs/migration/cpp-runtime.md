@@ -97,3 +97,23 @@ a safe stop, profile edit, and restart.
 Passing fake, PTY, parity, or sanitizer tests does not qualify real EtherCAT
 hardware. The final environment and hardware matrix is recorded in
 [the C++ runtime qualification report](../qualification/cpp-runtime-final.md).
+
+## Generic Damiao CAN motors
+
+Robot profiles support `damiao_motor` devices speaking the vendor's MIT-mode
+CAN protocol over two transports: `socketcan` (a Linux SocketCAN interface such
+as `can0`) and `virtual_serial` (a USB-CAN adapter exposed as a virtual serial
+port). The transport is selected statically with the `transport` arg and cannot
+be changed at runtime; only `mit` mode is accepted today. Each device requires
+one sensor and one actuator entry sharing `motor_id`, `position_max`,
+`velocity_max`, `torque_max`, and `feedback_timeout` (seconds); see
+`policy_embodied_runtime/examples/robot_profiles/damiao_can_robot_profile.json`.
+
+Realtime behavior matches the rest of the native runtime: descriptors are
+opened before the loop and left nonblocking, each cycle performs exactly one
+send and at most one bounded receive, and any write error, short write,
+malformed frame, range violation, motor-ID mismatch, or feedback staleness
+latches a fault with no retry, reopen, or reinitialization. Recovery is
+performed by restarting the process. `DamiaoMotorBus` implements the
+`Transport` interface so the scheduler registers each motor like any other
+hard-realtime transport.
