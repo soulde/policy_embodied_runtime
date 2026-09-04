@@ -77,6 +77,7 @@ add_library(policy_runtime_core
     src/policy/pipeline.cpp
     src/profiles/loader.cpp
     src/protocol/cia402/state_machine.cpp
+    src/protocol/damiao/protocol.cpp
     src/protocol/st3215/protocol.cpp
     src/protocol/rpc/codec.cpp
     src/robot/devices/cia402/axis.cpp
@@ -93,7 +94,9 @@ add_library(policy_runtime_core
     src/robot_io/transport_scheduler.cpp
     src/transport/ethercat/elmo_gold.cpp
     src/transport/ethercat/master.cpp
-    src/transport/serial/serial_transport.cpp)
+    src/transport/serial/serial_transport.cpp
+    src/transport/serial/virtual_can_transport.cpp
+    src/transport/socketcan/socketcan_transport.cpp)
 target_include_directories(policy_runtime_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
@@ -179,6 +182,24 @@ if(POLICY_RUNTIME_BUILD_TESTS)
     target_link_libraries(transport_scheduler_test
         PRIVATE policy_runtime_core GTest::gtest_main)
     policy_runtime_configure_target(transport_scheduler_test)
+
+    add_executable(damiao_protocol_test tests/cpp/unit/damiao_protocol_test.cpp)
+    target_link_libraries(damiao_protocol_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(damiao_protocol_test)
+    add_test(NAME damiao_protocol_test COMMAND damiao_protocol_test)
+
+    add_executable(damiao_transport_test tests/cpp/integration/damiao_transport_test.cpp)
+    target_link_libraries(damiao_transport_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(damiao_transport_test)
+    add_test(NAME damiao_transport_test COMMAND damiao_transport_test)
+
+    add_executable(damiao_motor_test tests/cpp/integration/damiao_motor_test.cpp)
+    target_link_libraries(damiao_motor_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(damiao_motor_test)
+    add_test(NAME damiao_motor_test COMMAND damiao_motor_test)
 
     add_executable(ipc_test tests/cpp/integration/ipc_test.cpp)
     target_link_libraries(ipc_test

@@ -52,6 +52,14 @@ termios, framing, retries, timeout handling, and all blocking I/O. Serial
 faults enter the daemon's latched safety supervisor and cannot interfere with
 the EtherCAT cycle.
 
+Damiao CAN motors use the vendor MIT-mode protocol over SocketCAN or a
+USB-CAN virtual serial port, configured statically in the robot profile
+(`damiao_motor` devices; see
+`policy_embodied_runtime/examples/robot_profiles/damiao_can_robot_profile.json`).
+Each `DamiaoMotorBus` is a hard-realtime transport performing one nonblocking
+send and at most one bounded receive per cycle; faults latch and recovery is
+restart-only.
+
 The daemon/host IPC is versioned. Axis-only profiles use the compact v1
 layout; profiles containing ST3215 devices use v2 with independent bounded
 axis and servo snapshots. Setup transfers role-checked file descriptors and a

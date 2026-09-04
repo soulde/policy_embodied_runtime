@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "policy_runtime/protocol/damiao/protocol.hpp"
+
 namespace policy_runtime::profiles {
 
 struct DeviceLink {
@@ -67,11 +69,25 @@ struct St3215ServoProfile {
   std::chrono::milliseconds maximum_command_future{50};
 };
 
+enum class DamiaoTransport : std::uint8_t { socketcan, virtual_serial };
+
+struct DamiaoMotorProfile {
+  std::string sensor_name;
+  std::string actuator_name;
+  std::string path;
+  DamiaoTransport transport{DamiaoTransport::socketcan};
+  std::uint8_t motor_id{};
+  DamiaoLimits limits;
+  std::chrono::milliseconds feedback_timeout{100};
+  std::string safety_group;
+};
+
 struct RobotProfile {
   std::vector<DeviceConfig> sensors;
   std::vector<DeviceConfig> actuators;
   std::vector<AxisConfig> axes;
   std::vector<St3215ServoProfile> st3215_servos;
+  std::vector<DamiaoMotorProfile> damiao_motors;
 };
 
 }  // namespace policy_runtime::profiles

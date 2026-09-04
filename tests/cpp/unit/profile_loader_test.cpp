@@ -532,3 +532,79 @@ TEST(ProfileLoaderTest, RejectsInvalidProcessorsAndBindings) {
   unexpected_binding_key["inputs"][0]["unexpected"] = true;
   expect_policy_rejected(unexpected_binding_key);
 }
+
+TEST(ProfileLoaderTest, ParsesDamiaoMotorProfiles) {
+  const Json base = Json::parse(R"({
+    "sensors": [{"name": "motor_a_sensor",
+                 "device": {"type": "damiao_motor", "path": "can0"},
+                 "args": {"motor_id": 1, "position_max": 12.5,
+                          "velocity_max": 30.0, "torque_max": 10.0,
+                          "transport": "virtual_serial"}}],
+    "actuators": [{"name": "motor_a_actuator",
+                   "device": {"type": "damiao_motor", "path": "can0"},
+                   "args": {"motor_id": 1, "position_max": 12.5,
+                            "velocity_max": 30.0, "torque_max": 10.0,
+                            "transport": "virtual_serial"}}]
+  })");
+  const auto file = TemporaryJsonFile(base);
+  auto profile = load_robot_profile(file.path());
+  ASSERT_TRUE(profile.has_value());
+  ASSERT_EQ(profile.value().damiao_motors.size(), 1U);
+  const auto& motor = profile.value().damiao_motors.at(0);
+  EXPECT_EQ(motor.sensor_name, "motor_a_sensor");
+  EXPECT_EQ(motor.actuator_name, "motor_a_actuator");
+  EXPECT_EQ(motor.path, "can0");
+  EXPECT_EQ(motor.motor_id, 1U);
+  EXPECT_EQ(motor.transport,
+            policy_runtime::profiles::DamiaoTransport::virtual_serial);
+  EXPECT_FLOAT_EQ(motor.limits.position_max, 12.5F);
+  EXPECT_FLOAT_EQ(motor.limits.velocity_max, 30.0F);
+  EXPECT_FLOAT_EQ(motor.limits.torque_max, 10.0F);
+}
+
+TEST(ProfileLoaderTest, RejectsUnsupportedDamiaoMotorConfigurations) {
+  const Json base = Json::parse(R"({
+    "sensors": [{"name": "s", "device": {"type": "damiao_motor", "path": "can0"},
+                 "args": {"motor_id": 1, "position_max": 12.5,
+                          "velocity_max": 30.0, "torque_max": 10.0}}],
+    "actuators": [{"name": "a", "device": {"type": "damiao_motor", "path": "can0"},
+                   "args": {"motor_id": 1, "position_max": 12.5,
+                            "velocity_max": 30.0, "torque_max": 10.0}}]
+  })");
+
+  auto unsupported_transport = base;
+  unsupported_transport["actuators"][0]["args"]["transport"] = "usb";
+  expect_robot_rejected(unsupported_transport);
+
+  auto unsupported_mode = base;
+  unsupported_mode["sensors"][0]["args"]["mode"] = "position";
+  expect_robot_rejected(unsupported_mode);
+
+  auto zero_motor_id = base;
+  zero_motor_id["sensors"][0]["args"]["motor_id"] = 0;
+  expect_robot_rejected(zero_motor_id);
+
+  auto missing_pair = base;
+  missing_pair["actuators"].erase(0);
+  expect_robot_rejected(missing_pair);
+
+  auto negative_limit = base;
+  negative_limit["sensors"][0]["args"]["torque_max"] = -1.0;
+  expect_robot_rejected(negative_limit);
+}
+
+TEST(ProfileLoaderTest, LoadsDamiaoExampleProfile) {
+  auto profile = load_robot_profile(source_path(
+      "policy_embodied_runtime/examples/robot_profiles/"
+      "damiao_can_robot_profile.json"));
+  ASSERT_TRUE(profile.has_value());
+  ASSERT_EQ(profile.value().damiao_motors.size(), 2U);
+  const auto& first = profile.value().damiao_motors.at(0);
+  EXPECT_EQ(first.transport,
+            policy_runtime::profiles::DamiaoTransport::socketcan);
+  EXPECT_EQ(first.motor_id, 1U);
+  const auto& second = profile.value().damiao_motors.at(1);
+  EXPECT_EQ(second.transport,
+            policy_runtime::profiles::DamiaoTransport::virtual_serial);
+  EXPECT_EQ(second.path, "/dev/ttyUSB0");
+}

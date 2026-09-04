@@ -1,0 +1,68 @@
+{
+  "sensors": [
+    {
+      "name": "joint_1_position",
+      "device": {
+        "type": "damiao_motor",
+        "path": "can0"
+      },
+      "args": {
+        "motor_id": 1,
+        "mode": "mit",
+        "transport": "socketcan",
+        "position_max": 12.5,
+        "velocity_max": 30.0,
+        "torque_max": 10.0,
+        "feedback_timeout": 0.1
+      }
+    },
+    {
+      "name": "joint_2_position",
+      "device": {
+        "type": "damiao_motor",
+        "path": "/dev/ttyUSB0"
+      },
+      "args": {
+        "motor_id": 2,
+        "mode": "mit",
+        "transport": "virtual_serial",
+        "position_max": 12.5,
+        "velocity_max": 30.0,
+        "torque_max": 10.0,
+        "feedback_timeout": 0.1
+      }
+    }
+  ],
+  "actuators": [
+    {
+      "name": "joint_1_torque",
+      "device": {
+        "type": "damiao_motor",
+        "path": "can0"
+      },
+      "args": {
+        "motor_id": 1,
+        "mode": "mit",
+        "transport": "socketcan",
+        "position_max": 12.5,
+        "velocity_max": 30.0,
+        "torque_max": 10.0
+      }
+    },
+    {
+      "name": "joint_2_torque",
+      "device": {
+        "type": "damiao_motor",
+        "path": "/dev/ttyUSB0"
+      },
+      "args": {
+        "motor_id": 2,
+        "mode": "mit",
+        "transport": "virtual_serial",
+        "position_max": 12.5,
+        "velocity_max": 30.0,
+        "torque_max": 10.0
+      }
+    }
+  ]
+}

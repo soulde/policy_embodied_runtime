@@ -893,6 +893,156 @@ bool derive_st3215(const std::vector<DeviceConfig>& sensors,
   return true;
 }
 
+std::optional<double> required_double_arg(const DeviceConfig& config,
+                                          std::string_view key,
+                                          std::string& error) {
+  const auto* text = arg(config, key, error);
+  if (text == nullptr) {
+    return std::nullopt;
+  }
+  const auto value = parse_double(*text);
+  if (!value || *value <= 0.0) {
+    error = config.name + ".args." + std::string(key) +
+            " must be a positive finite number";
+    return std::nullopt;
+  }
+  return value;
+}
+
+std::optional<DamiaoMotorProfile> parse_damiao_motor(
+    const DeviceConfig& config, bool sensor, std::string& error) {
+  DamiaoMotorProfile profile;
+  if (sensor) {
+    profile.sensor_name = config.name;
+  } else {
+    profile.actuator_name = config.name;
+  }
+  profile.path = config.device.path;
+
+  const auto* mode_text = optional_arg(config, "mode");
+  if (mode_text != nullptr && *mode_text != "mit") {
+    error = config.name + ".args.mode must be 'mit'";
+    return std::nullopt;
+  }
+  const auto* transport_text = optional_arg(config, "transport");
+  if (transport_text == nullptr || *transport_text == "socketcan") {
+    profile.transport = DamiaoTransport::socketcan;
+  } else if (*transport_text == "virtual_serial") {
+    profile.transport = DamiaoTransport::virtual_serial;
+  } else {
+    error = config.name + ".args.transport must be 'socketcan' or 'virtual_serial'";
+    return std::nullopt;
+  }
+
+  const auto motor_id =
+      unsigned_arg(config, "motor_id", std::uint16_t{0}, error);
+  if (!motor_id || *motor_id == 0U || *motor_id > 0x0FU) {
+    error = config.name + ".args.motor_id must be within 1..15";
+    return std::nullopt;
+  }
+  profile.motor_id = static_cast<std::uint8_t>(*motor_id);
+
+  const auto position_max = required_double_arg(config, "position_max", error);
+  const auto velocity_max = required_double_arg(config, "velocity_max", error);
+  const auto torque_max = required_double_arg(config, "torque_max", error);
+  if (!position_max || !velocity_max || !torque_max) {
+    return std::nullopt;
+  }
+  profile.limits = DamiaoLimits{static_cast<float>(*position_max),
+                                static_cast<float>(*velocity_max),
+                                static_cast<float>(*torque_max)};
+
+  const auto feedback_timeout =
+      milliseconds_from_seconds_arg(config, "feedback_timeout",
+                                    std::chrono::milliseconds{100}, error);
+  if (!feedback_timeout || *feedback_timeout <= std::chrono::milliseconds{0}) {
+    error = config.name + ".args.feedback_timeout must be positive";
+    return std::nullopt;
+  }
+  profile.feedback_timeout = *feedback_timeout;
+
+  const auto* safety = optional_arg(config, "safety_group");
+  if (safety != nullptr) {
+    profile.safety_group = *safety;
+  }
+  return profile;
+}
+
+bool derive_damiao_motors(const std::vector<DeviceConfig>& sensors,
+                          const std::vector<DeviceConfig>& actuators,
+                          std::vector<DamiaoMotorProfile>& motors,
+                          std::string& error) {
+  struct Derived {
+    DamiaoMotorProfile profile;
+    bool has_sensor{};
+    bool has_actuator{};
+  };
+  std::vector<Derived> derived;
+  std::map<std::string, std::size_t> identities;
+  const auto add = [&](const DeviceConfig& device, bool sensor) -> bool {
+    if (device.device.type != "damiao_motor") {
+      return true;
+    }
+    auto parsed = parse_damiao_motor(device, sensor, error);
+    if (!parsed) {
+      return false;
+    }
+    const auto identity =
+        parsed->path + "\n" + std::to_string(parsed->motor_id);
+    const auto existing = identities.find(identity);
+    if (existing == identities.end()) {
+      identities.emplace(identity, derived.size());
+      derived.push_back({std::move(*parsed), sensor, !sensor});
+      return true;
+    }
+    auto& physical = derived.at(existing->second);
+    if ((sensor && physical.has_sensor) ||
+        (!sensor && physical.has_actuator)) {
+      error = "duplicate damiao_motor physical link: " + device.device.path;
+      return false;
+    }
+    if (parsed->transport != physical.profile.transport ||
+        parsed->limits.position_max != physical.profile.limits.position_max ||
+        parsed->limits.velocity_max != physical.profile.limits.velocity_max ||
+        parsed->limits.torque_max != physical.profile.limits.torque_max ||
+        parsed->feedback_timeout != physical.profile.feedback_timeout) {
+      error = "inconsistent damiao_motor static configuration for: " +
+              device.device.path;
+      return false;
+    }
+    if (sensor) {
+      physical.profile.sensor_name = parsed->sensor_name;
+    } else {
+      physical.profile.actuator_name = parsed->actuator_name;
+    }
+    physical.has_sensor = physical.has_sensor || sensor;
+    physical.has_actuator = physical.has_actuator || !sensor;
+    return true;
+  };
+  for (const auto& sensor : sensors) {
+    if (!add(sensor, true)) {
+      return false;
+    }
+  }
+  for (const auto& actuator : actuators) {
+    if (!add(actuator, false)) {
+      return false;
+    }
+  }
+  if (derived.size() > 32U) {
+    error = "robot profile supports at most 32 damiao motors";
+    return false;
+  }
+  for (auto& physical : derived) {
+    if (!physical.has_sensor || !physical.has_actuator) {
+      error = "damiao_motor physical link requires one sensor and one actuator";
+      return false;
+    }
+    motors.push_back(std::move(physical.profile));
+  }
+  return true;
+}
+
 bool parse_bounds(const Json& value, SemanticBounds& bounds, std::string& error) {
   if (!value.is_object()) {
     error = "semantic field bounds must be an object";
@@ -1194,6 +1344,10 @@ Result<RobotProfile> load_robot_profile(const std::filesystem::path& path) {
   }
   if (!derive_st3215(profile.sensors, profile.actuators,
                      profile.st3215_servos, error)) {
+    return invalid<RobotProfile>(std::move(error));
+  }
+  if (!derive_damiao_motors(profile.sensors, profile.actuators,
+                            profile.damiao_motors, error)) {
     return invalid<RobotProfile>(std::move(error));
   }
   return Result<RobotProfile>::success(std::move(profile));
