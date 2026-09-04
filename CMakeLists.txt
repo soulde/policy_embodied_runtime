@@ -94,7 +94,9 @@ add_library(policy_runtime_core
     src/robot_io/transport_scheduler.cpp
     src/transport/ethercat/elmo_gold.cpp
     src/transport/ethercat/master.cpp
-    src/transport/serial/serial_transport.cpp)
+    src/transport/serial/serial_transport.cpp
+    src/transport/serial/virtual_can_transport.cpp
+    src/transport/socketcan/socketcan_transport.cpp)
 target_include_directories(policy_runtime_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
@@ -186,6 +188,12 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         PRIVATE policy_runtime_core GTest::gtest_main)
     policy_runtime_configure_target(damiao_protocol_test)
     add_test(NAME damiao_protocol_test COMMAND damiao_protocol_test)
+
+    add_executable(damiao_transport_test tests/cpp/integration/damiao_transport_test.cpp)
+    target_link_libraries(damiao_transport_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(damiao_transport_test)
+    add_test(NAME damiao_transport_test COMMAND damiao_transport_test)
 
     add_executable(ipc_test tests/cpp/integration/ipc_test.cpp)
     target_link_libraries(ipc_test
