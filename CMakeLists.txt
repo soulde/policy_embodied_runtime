@@ -63,12 +63,8 @@ endif()
 
 find_package(nlohmann_json 3.11.3 CONFIG QUIET)
 if(NOT TARGET nlohmann_json::nlohmann_json)
-    include(FetchContent)
-    FetchContent_Declare(
-        nlohmann_json
-        URL https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.tar.gz
-        URL_HASH SHA256=0d8ef5af7f9794e3263480193c491549b2ba6cc74bb018906202ada498a79406)
-    FetchContent_MakeAvailable(nlohmann_json)
+    # Vendored header-only source (trimmed from the v3.11.3 release tarball).
+    add_subdirectory(third_party/nlohmann-json)
 endif()
 
 add_library(policy_runtime_core
