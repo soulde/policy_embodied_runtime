@@ -3,14 +3,12 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <span>
 #include <string>
-#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -98,6 +96,14 @@ struct St3215BusOptions {
   std::chrono::nanoseconds service_period{std::chrono::milliseconds{1}};
 };
 
+// Hard-realtime shared ST3215 serial bus with the same one-shot contract as
+// the CAN paths: the owner's realtime loop calls cycle() once per period.
+// Each cycle performs at most one bounded receive (the response to the
+// previous cycle's request) and stages exactly one write, then performs one
+// transport cycle. Write errors, malformed frames, and device-ID mismatches
+// latch a permanent fault with no retry or recovery; a response that stays
+// absent past the servo feedback timeout also latches. Recovery is process
+// restart.
 class St3215Bus {
  public:
   St3215Bus(std::shared_ptr<FrameTransport> transport,
@@ -112,7 +118,12 @@ class St3215Bus {
   void stop(TransportScheduler& scheduler) noexcept;
   void stop() noexcept;
 
+  // One realtime service step. Must be called from a single thread while
+  // running(); performs no allocation, blocking, or retry.
+  void cycle(const CycleContext& context) noexcept;
+
   bool running() const noexcept;
+  bool fault_latched() const noexcept { return fault_latched_; }
   std::size_t servo_count() const noexcept;
   TransportHealth health() const noexcept;
   std::shared_ptr<FrameTransport> transport() const noexcept;
@@ -122,17 +133,21 @@ class St3215Bus {
     std::shared_ptr<St3215Servo> servo;
     std::uint64_t consumed_publication{};
     std::uint64_t feedback_sequence{};
+    std::uint64_t goal_sequence{};
+    bool goal_dispatched{};
+    std::int64_t last_response_ns{};
     St3215ServoCommand command{};
     bool has_command{};
     bool command_timed_out{};
   };
 
-  void executor_main(std::stop_token stop_token) noexcept;
-  void service_one(ServoRuntime& runtime,
-                   const CycleContext& context);
-  Result<St3215ServoFeedback> transact(
-      ServoRuntime& runtime, std::span<const std::byte> frame,
-      bool position_response, const CycleContext& context);
+  void refresh_staged(ServoRuntime& runtime, std::int64_t now_ns) noexcept;
+  // Non-noexcept: transport I/O may throw; cycle() contains the fault latch.
+  void poll_response(ServoRuntime& runtime, std::int64_t now_ns);
+  void dispatch_request(ServoRuntime& runtime, std::int64_t now_ns);
+  Result<St3215ServoFeedback> consume_response(ServoRuntime& runtime,
+                                               std::int64_t now_ns);
+  Result<void> send_request(ServoRuntime& runtime);
   St3215ServoFeedback failed_feedback(ServoRuntime& runtime,
                                       std::uint32_t flags,
                                       std::int64_t now_ns) noexcept;
@@ -141,13 +156,15 @@ class St3215Bus {
   St3215BusOptions options_;
   mutable std::mutex lifecycle_mutex_;
   std::vector<ServoRuntime> servos_;
-  std::jthread executor_;
-  std::condition_variable_any executor_wake_;
-  std::mutex executor_wait_mutex_;
   TransportScheduler* scheduler_{};
   std::atomic<bool> running_{};
   std::atomic<TransportHealth> health_{TransportHealth::failed};
   std::uint64_t cycle_sequence_{};
+  std::size_t cursor_{};
+  std::size_t pending_index_{};
+  bool dispatched_{false};
+  std::int64_t started_ns_{};
+  bool fault_latched_{false};
 };
 
 inline constexpr std::size_t kMaximumSt3215Servos = 32U;
@@ -173,6 +190,9 @@ class St3215DeviceRegistry {
   Result<void> start(TransportScheduler& scheduler);
   void stop(TransportScheduler& scheduler) noexcept;
   void stop() noexcept;
+
+  // One realtime step across every bus; called from the daemon cycle thread.
+  void cycle(const CycleContext& context) noexcept;
 
   St3215CommandAcceptance stage_command(
       std::size_t servo_index,

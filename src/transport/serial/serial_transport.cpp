@@ -559,8 +559,14 @@ void SerialTransport::cycle(const CycleContext&) noexcept {
       impl_->publish_error(SerialError::closed);
       return;
     }
-    if (impl_->last_error.load(std::memory_order_acquire) ==
-        SerialError::timeout) {
+    // The quarantine flush belongs to bounded-wait transactions: it discards
+    // a late response after a real receive deadline expired. Nonblocking
+    // (zero read timeout) callers consume responses across cycles instead,
+    // so flushing would destroy frames that are merely early for the next
+    // poll.
+    if (impl_->config.read_timeout.count() > 0 &&
+        impl_->last_error.load(std::memory_order_acquire) ==
+            SerialError::timeout) {
       impl_->resynchronize_after_timeout();
       impl_->last_error.store(SerialError::none, std::memory_order_release);
     }

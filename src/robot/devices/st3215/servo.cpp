@@ -197,19 +197,8 @@ Result<void> St3215Bus::start(TransportScheduler& scheduler) {
   }
   scheduler_ = &scheduler;
   health_.store(TransportHealth::healthy, std::memory_order_release);
+  started_ns_ = steady_now_ns();
   running_.store(true, std::memory_order_release);
-  try {
-    executor_ = std::jthread(
-        [this](std::stop_token stop_token) { executor_main(stop_token); });
-  } catch (const std::exception& error) {
-    running_.store(false, std::memory_order_release);
-    transport_->close();
-    static_cast<void>(scheduler.remove(*transport_));
-    scheduler_ = nullptr;
-    return Result<void>::failure(
-        {ErrorCode::unavailable,
-         std::string("failed to start ST3215 serial executor: ") + error.what()});
-  }
   return Result<void>::success();
 }
 
@@ -233,12 +222,6 @@ void St3215Bus::stop() noexcept {
     }
     scheduler = scheduler_;
   }
-  if (executor_.joinable()) {
-    executor_.request_stop();
-    transport_->request_stop();
-    executor_wake_.notify_all();
-    executor_.join();
-  }
   std::scoped_lock lock(lifecycle_mutex_);
   transport_->close();
   if (scheduler != nullptr) {
@@ -255,6 +238,9 @@ bool St3215Bus::running() const noexcept {
 std::size_t St3215Bus::servo_count() const noexcept { return servos_.size(); }
 
 TransportHealth St3215Bus::health() const noexcept {
+  if (fault_latched_) {
+    return TransportHealth::failed;
+  }
   return health_.load(std::memory_order_acquire);
 }
 
@@ -262,33 +248,39 @@ std::shared_ptr<FrameTransport> St3215Bus::transport() const noexcept {
   return transport_;
 }
 
-void St3215Bus::executor_main(std::stop_token stop_token) noexcept {
-  auto next_release = std::chrono::steady_clock::now();
-  std::size_t cursor{};
-  while (!stop_token.stop_requested() &&
-         running_.load(std::memory_order_acquire)) {
-    next_release += options_.service_period;
-    const CycleContext context{
-        ++cycle_sequence_, next_release, options_.service_period};
-    try {
-      service_one(servos_[cursor], context);
-    } catch (...) {
-      auto feedback = failed_feedback(
-          servos_[cursor], kSt3215FeedbackIo, steady_now_ns());
-      servos_[cursor].servo->publish_feedback(feedback);
-      health_.store(TransportHealth::failed, std::memory_order_release);
+void St3215Bus::cycle(const CycleContext& context) noexcept {
+  if (!running_.load(std::memory_order_acquire) || servos_.empty()) {
+    return;
+  }
+  const auto now_ns = steady_now_ns();
+  ++cycle_sequence_;
+  static_cast<void>(context);
+  try {
+    if (fault_latched_) {
+      servos_[cursor_].servo->publish_feedback(failed_feedback(
+          servos_[cursor_], kSt3215FeedbackIo, now_ns));
+    } else {
+      if (dispatched_) {
+        poll_response(servos_[pending_index_], now_ns);
+      }
+      if (!fault_latched_) {
+        cursor_ = dispatched_ ? (pending_index_ + 1U) % servos_.size() : 0U;
+        refresh_staged(servos_[cursor_], now_ns);
+        dispatch_request(servos_[cursor_], now_ns);
+        pending_index_ = cursor_;
+        dispatched_ = true;
+      }
     }
-    cursor = (cursor + 1U) % servos_.size();
-    std::unique_lock wait_lock(executor_wait_mutex_);
-    static_cast<void>(executor_wake_.wait_until(
-        wait_lock, stop_token, next_release,
-        [this] { return !running_.load(std::memory_order_acquire); }));
+  } catch (...) {
+    fault_latched_ = true;
+    health_.store(TransportHealth::failed, std::memory_order_release);
+    servos_[cursor_].servo->publish_feedback(failed_feedback(
+        servos_[cursor_], kSt3215FeedbackIo, now_ns));
   }
 }
 
-void St3215Bus::service_one(ServoRuntime& runtime,
-                            const CycleContext& context) {
-  const auto now_ns = steady_now_ns();
+void St3215Bus::refresh_staged(ServoRuntime& runtime,
+                               std::int64_t now_ns) noexcept {
   St3215Servo::StagedCommand staged;
   if (runtime.servo->read_staged(runtime.consumed_publication, staged)) {
     runtime.consumed_publication = staged.publication;
@@ -296,7 +288,6 @@ void St3215Bus::service_one(ServoRuntime& runtime,
     runtime.has_command = true;
     runtime.command_timed_out = false;
   }
-
   if (runtime.has_command && runtime.servo->config().command_timeout.count() > 0 &&
       (now_ns < runtime.command.timestamp_ns ||
        now_ns - runtime.command.timestamp_ns >
@@ -305,130 +296,150 @@ void St3215Bus::service_one(ServoRuntime& runtime,
     runtime.command.enabled = false;
     runtime.command_timed_out = true;
   }
+}
 
-  if (runtime.has_command && runtime.command.enabled &&
-      !runtime.command.emergency_stop) {
+void St3215Bus::poll_response(ServoRuntime& runtime,
+                              std::int64_t now_ns) {
+  refresh_staged(runtime, now_ns);
+  auto response = consume_response(runtime, now_ns);
+  if (response.has_value()) {
+    auto feedback = response.value();
+    if (runtime.command_timed_out) {
+      feedback.command_sequence = runtime.command.sequence;
+      feedback.flags &= ~kSt3215FeedbackValid;
+      feedback.flags |= kSt3215FeedbackStale | kSt3215FeedbackTimeout;
+    }
+    if (!runtime.has_command || !runtime.command.enabled ||
+        runtime.command.emergency_stop) {
+      feedback.flags |= kSt3215FeedbackDisabled;
+    }
+    runtime.last_response_ns = now_ns;
+    runtime.servo->publish_feedback(feedback);
+  } else if (response.error().code != ErrorCode::timeout) {
+    fault_latched_ = true;
+    health_.store(TransportHealth::failed, std::memory_order_release);
+    runtime.servo->publish_feedback(failed_feedback(
+        runtime, error_flag(response.error().code), now_ns));
+    return;
+  } else {
+    // No response bytes yet. Staleness is measured from the last accepted
+    // response (or bus start) so a slow first answer is not misjudged, and
+    // latches the bus once the servo feedback timeout expires.
+    const auto reference =
+        std::max(runtime.last_response_ns, started_ns_);
+    const auto timeout_ns =
+        runtime.servo->config().feedback_timeout.count() * 1'000'000LL;
+    if (now_ns - reference > timeout_ns) {
+      fault_latched_ = true;
+      health_.store(TransportHealth::failed, std::memory_order_release);
+      runtime.servo->publish_feedback(failed_feedback(
+          runtime, kSt3215FeedbackTimeout, now_ns));
+    }
+  }
+}
+
+void St3215Bus::dispatch_request(ServoRuntime& runtime,
+                                 std::int64_t now_ns) {
+  auto sent = send_request(runtime);
+  if (!sent.has_value()) {
+    fault_latched_ = true;
+    health_.store(TransportHealth::failed, std::memory_order_release);
+    runtime.servo->publish_feedback(failed_feedback(
+        runtime, error_flag(sent.error().code), now_ns));
+    return;
+  }
+}
+
+Result<St3215ServoFeedback> St3215Bus::consume_response(
+    ServoRuntime& runtime, std::int64_t now_ns) {
+  std::array<std::byte, kSt3215MaximumFrameSize> response{};
+  auto received = transport_->read(0U, response);
+  if (!received.has_value()) {
+    return Result<St3215ServoFeedback>::failure(received.error());
+  }
+  auto status = St3215Protocol::parse_status(
+      std::span<const std::byte>(response.data(), received.value()));
+  if (!status.has_value()) {
+    return Result<St3215ServoFeedback>::failure(status.error());
+  }
+  if (status.value().device_id != runtime.servo->config().device_id) {
+    return Result<St3215ServoFeedback>::failure(
+        {ErrorCode::protocol,
+         "ST3215 response device ID does not match request"});
+  }
+  // Response latency varies between zero and one service period, so the
+  // request a response answers cannot be inferred reliably; frames are
+  // already checksum- and device-id-validated. A frame carrying parameters
+  // is a position read answer, an empty one is a write acknowledgement.
+  St3215ServoFeedback feedback = runtime.servo->feedback();
+  feedback.feedback_sequence = ++runtime.feedback_sequence;
+  feedback.command_sequence =
+      runtime.has_command ? runtime.command.sequence : 0U;
+  feedback.timestamp_ns = now_ns;
+  feedback.status_error = status.value().error;
+  feedback.transport_health = static_cast<std::uint32_t>(transport_->health());
+  feedback.flags = status.value().error == 0U
+                       ? kSt3215FeedbackValid
+                       : kSt3215FeedbackStale | kSt3215FeedbackDeviceError;
+  if (const auto serial =
+          std::dynamic_pointer_cast<SerialTransport>(transport_)) {
+    feedback.timeout_count = serial->timeout_count();
+    feedback.io_error_count = serial->io_error_count();
+  }
+  if (status.value().error == 0U && status.value().parameters.size() >= 2U) {
+    auto raw = read_st3215_u16_le(status.value().parameters);
+    if (!raw.has_value()) {
+      return Result<St3215ServoFeedback>::failure(raw.error());
+    }
+    auto radians = position_units_to_radians(
+        raw.value(), runtime.servo->config().max_position_units);
+    if (!radians.has_value()) {
+      return Result<St3215ServoFeedback>::failure(radians.error());
+    }
+    feedback.raw_position = raw.value();
+    feedback.position_rad = radians.value();
+  }
+  return Result<St3215ServoFeedback>::success(feedback);
+}
+
+Result<void> St3215Bus::send_request(ServoRuntime& runtime) {
+  std::array<std::byte, kSt3215MaximumFrameSize> frame{};
+  std::span<const std::byte> request;
+  const bool command_active = runtime.has_command && runtime.command.enabled &&
+                              !runtime.command.emergency_stop;
+  // A command sequence is written to the device exactly once; every later
+  // visit polls present position so feedback keeps flowing while moving.
+  const bool send_goal =
+      command_active && (!runtime.goal_dispatched ||
+                         runtime.goal_sequence != runtime.command.sequence);
+  if (send_goal) {
     auto position = radians_to_position_units(
         runtime.command.target_position_rad,
         runtime.servo->config().max_position_units);
     if (!position.has_value()) {
-      runtime.servo->publish_feedback(failed_feedback(
-          runtime, kSt3215FeedbackProtocol, now_ns));
-      return;
+      return Result<void>::failure(position.error());
     }
-    const auto goal = St3215Protocol::goal_position_command(
+    const auto encoded = St3215Protocol::goal_position_command(
         runtime.servo->config().device_id, position.value(),
         runtime.servo->config().time_units,
         runtime.servo->config().speed_units);
-    auto acknowledged = transact(runtime, goal, false, context);
-    if (!acknowledged.has_value()) {
-      if (acknowledged.error().code != ErrorCode::timeout) {
-        runtime.servo->publish_feedback(failed_feedback(
-            runtime, error_flag(acknowledged.error().code), now_ns));
-        return;
-      }
-    }
-    if (acknowledged.has_value() &&
-        (acknowledged.value().flags & kSt3215FeedbackDeviceError) != 0U) {
-      runtime.servo->publish_feedback(acknowledged.value());
-      return;
-    }
+    std::copy(encoded.begin(), encoded.end(), frame.begin());
+    request = std::span<const std::byte>(frame.data(), encoded.size());
+    runtime.goal_dispatched = true;
+    runtime.goal_sequence = runtime.command.sequence;
+  } else {
+    const auto encoded = St3215Protocol::read_present_position_command(
+        runtime.servo->config().device_id);
+    std::copy(encoded.begin(), encoded.end(), frame.begin());
+    request = std::span<const std::byte>(frame.data(), encoded.size());
   }
-
-  auto present = transact(
-      runtime,
-      St3215Protocol::read_present_position_command(
-          runtime.servo->config().device_id),
-      true, context);
-  if (!present.has_value()) {
-    runtime.servo->publish_feedback(failed_feedback(
-        runtime, error_flag(present.error().code), now_ns));
-    return;
-  }
-  auto feedback = present.value();
-  if (runtime.command_timed_out) {
-    feedback.command_sequence = runtime.command.sequence;
-    feedback.flags &= ~kSt3215FeedbackValid;
-    feedback.flags |= kSt3215FeedbackStale | kSt3215FeedbackTimeout;
-  }
-  if (!runtime.has_command || !runtime.command.enabled ||
-      runtime.command.emergency_stop) {
-    feedback.flags |= kSt3215FeedbackDisabled;
-  }
-  runtime.servo->publish_feedback(feedback);
-  health_.store(transport_->health(), std::memory_order_release);
-}
-
-Result<St3215ServoFeedback> St3215Bus::transact(
-    ServoRuntime& runtime, std::span<const std::byte> frame,
-    bool position_response, const CycleContext& context) {
-  auto staged = transport_->write(0U, frame);
+  auto staged = transport_->write(0U, request);
   if (!staged.has_value()) {
-    return Result<St3215ServoFeedback>::failure(staged.error());
+    return staged;
   }
-  transport_->cycle(context);
-  Error last_error{ErrorCode::timeout, "ST3215 response is unavailable"};
-  for (unsigned attempt = 0; attempt < 8U; ++attempt) {
-    std::array<std::byte, kSt3215MaximumFrameSize> response{};
-    auto received = transport_->read(0U, response);
-    if (!received.has_value()) {
-      last_error = received.error();
-      break;
-    }
-    auto status = St3215Protocol::parse_status(
-        std::span<const std::byte>(response.data(), received.value()));
-    if (!status.has_value()) {
-      last_error = status.error();
-      transport_->cycle(context);
-      continue;
-    }
-    if (status.value().device_id != runtime.servo->config().device_id) {
-      last_error = {ErrorCode::protocol,
-                    "ST3215 response device ID does not match request"};
-      transport_->cycle(context);
-      continue;
-    }
-    if (status.value().error == 0U &&
-        ((position_response && status.value().parameters.size() < 2U) ||
-         (!position_response && !status.value().parameters.empty()))) {
-      last_error = {ErrorCode::protocol,
-                    "ST3215 response shape does not match request"};
-      transport_->cycle(context);
-      continue;
-    }
-    St3215ServoFeedback feedback = runtime.servo->feedback();
-    feedback.feedback_sequence = ++runtime.feedback_sequence;
-    feedback.command_sequence =
-        runtime.has_command ? runtime.command.sequence : 0U;
-    feedback.timestamp_ns = steady_now_ns();
-    feedback.status_error = status.value().error;
-    feedback.transport_health =
-        static_cast<std::uint32_t>(transport_->health());
-    feedback.flags = status.value().error == 0U
-                         ? kSt3215FeedbackValid
-                         : kSt3215FeedbackStale |
-                               kSt3215FeedbackDeviceError;
-    if (const auto serial =
-            std::dynamic_pointer_cast<SerialTransport>(transport_)) {
-      feedback.timeout_count = serial->timeout_count();
-      feedback.io_error_count = serial->io_error_count();
-    }
-    if (position_response && status.value().error == 0U) {
-      auto raw = read_st3215_u16_le(status.value().parameters);
-      if (!raw.has_value()) {
-        return Result<St3215ServoFeedback>::failure(raw.error());
-      }
-      auto radians = position_units_to_radians(
-          raw.value(), runtime.servo->config().max_position_units);
-      if (!radians.has_value()) {
-        return Result<St3215ServoFeedback>::failure(radians.error());
-      }
-      feedback.raw_position = raw.value();
-      feedback.position_rad = radians.value();
-    }
-    return Result<St3215ServoFeedback>::success(feedback);
-  }
-  return Result<St3215ServoFeedback>::failure(std::move(last_error));
+  transport_->cycle(CycleContext{cycle_sequence_, std::chrono::steady_clock::now(),
+                                 options_.service_period});
+  return Result<void>::success();
 }
 
 St3215ServoFeedback St3215Bus::failed_feedback(
@@ -468,32 +479,34 @@ Result<void> St3215DeviceRegistry::configure(
   servos.reserve(profiles.size());
   safety_groups.reserve(profiles.size());
   for (const auto& profile : profiles) {
+    // Daemon-driven hard-realtime cycles require zero-wait I/O: any
+    // configured receive/transmit deadline would block the realtime loop.
+    // Profile timeouts remain informational for the compatibility layer.
+    auto serial = profile.serial;
+    serial.read_timeout = std::chrono::milliseconds{0};
+    serial.write_timeout = std::chrono::milliseconds{0};
     auto bus = std::find_if(
         buses.begin(), buses.end(), [&](const BusEntry& candidate) {
           return candidate.serial.path == profile.serial.path;
         });
     if (bus == buses.end()) {
       auto transport = std::make_shared<SerialTransport>(SerialConfig{
-          profile.serial.path,
-          profile.serial.baud_rate,
-          profile.serial.read_buffer_size,
-          profile.serial.maximum_frame_size,
-          profile.serial.read_timeout,
-          profile.serial.write_timeout});
+          serial.path,
+          serial.baud_rate,
+          serial.read_buffer_size,
+          serial.maximum_frame_size,
+          serial.read_timeout,
+          serial.write_timeout});
       buses.push_back(BusEntry{
-          profile.serial,
+          serial,
           std::make_unique<St3215Bus>(
               std::move(transport),
               St3215BusOptions{profile.serial.service_period})});
       bus = std::prev(buses.end());
-    } else if (bus->serial.baud_rate != profile.serial.baud_rate ||
-               bus->serial.read_buffer_size !=
-                   profile.serial.read_buffer_size ||
-               bus->serial.maximum_frame_size !=
-                   profile.serial.maximum_frame_size ||
-               bus->serial.read_timeout != profile.serial.read_timeout ||
-               bus->serial.write_timeout != profile.serial.write_timeout ||
-               bus->serial.service_period != profile.serial.service_period) {
+    } else if (bus->serial.baud_rate != serial.baud_rate ||
+               bus->serial.read_buffer_size != serial.read_buffer_size ||
+               bus->serial.maximum_frame_size != serial.maximum_frame_size ||
+               bus->serial.service_period != serial.service_period) {
       return Result<void>::failure(
           {ErrorCode::invalid_argument,
            "inconsistent ST3215 registry serial configuration"});
@@ -563,6 +576,15 @@ void St3215DeviceRegistry::stop() noexcept {
     }
   }
   scheduler_ = nullptr;
+}
+
+void St3215DeviceRegistry::cycle(const CycleContext& context) noexcept {
+  if (!running_.load(std::memory_order_acquire)) {
+    return;
+  }
+  for (auto& bus : buses_) {
+    bus.bus->cycle(context);
+  }
 }
 
 St3215CommandAcceptance St3215DeviceRegistry::stage_command(

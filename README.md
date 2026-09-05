@@ -53,7 +53,7 @@ policy-runtime-host (non-RT)                 robot-io-daemon
                │ Unix SOCK_SEQPACKET + memfd snapshots │
                └───────────────────────────────────────┘
                                            ┌───────────┴───────────┐
-                                           │ non-RT serial executor│
+                                           │ daemon RT serial cycles│
                                            │ ST3215 shared bus     │
                                            └───────────────────────┘
 ```
@@ -65,11 +65,15 @@ lower-priority thread. CiA402 is the protocol layer; `Cia402Axis` is both a
 typed `Sensor` and `Actuator`. CSP/CSV/CST (8/9/10) are static profile choices
 and cannot be switched at runtime.
 
-Serial/ST3215 uses a separate non-real-time executor. `St3215Servo` only
-stages commands and consumes lock-free snapshots; one shared serial bus owns
-termios, framing, retries, timeout handling, and all blocking I/O. Serial
-faults enter the daemon's latched safety supervisor and cannot interfere with
-the EtherCAT cycle.
+Serial/ST3215 now follows the same hard-realtime contract as the CAN paths:
+the daemon cycle drives one `St3215Bus::cycle()` per period, which performs at
+most one bounded receive (the response to the previous cycle's request) and
+stages exactly one write on the shared half-duplex bus. The serial transport
+runs with zero read/write timeouts so cycles never block, write errors,
+malformed frames, and device-ID mismatches latch a permanent fault, and a
+response absent past the servo feedback timeout also latches. Recovery is
+restart-only. `St3215Servo` still only stages commands and consumes lock-free
+snapshots.
 
 Damiao CAN motors use the vendor MIT-mode protocol over SocketCAN or a
 USB-CAN virtual serial port, configured statically in the robot profile

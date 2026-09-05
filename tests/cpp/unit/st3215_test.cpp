@@ -270,7 +270,15 @@ TEST(St3215Test, MatchesPythonModuloRoundingAndRadiansConversion) {
             2U);
 }
 
-TEST(St3215Test, SharedBusUsesOneNonRealtimeOwnerForAllPhysicalIo) {
+void pump_cycles(St3215Bus& bus, unsigned count) {
+  const auto period = std::chrono::milliseconds{1};
+  for (unsigned index = 0U; index < count; ++index) {
+    bus.cycle(policy_runtime::CycleContext{
+        index, std::chrono::steady_clock::now() + index * period, period});
+  }
+}
+
+TEST(St3215Test, SharedBusUsesOneCycleOwnerForAllPhysicalIo) {
   auto transport = std::make_shared<RecordingFrameTransport>();
   transport->positions[1] = 100;
   transport->positions[2] = 200;
@@ -291,8 +299,9 @@ TEST(St3215Test, SharedBusUsesOneNonRealtimeOwnerForAllPhysicalIo) {
   EXPECT_EQ(second->stage_command(
                 St3215ServoCommand{8, 101, std::numbers::pi / 2.0, true, false}),
             St3215CommandAcceptance::accepted);
-  ASSERT_TRUE(wait_for_feedback(*first, 7));
-  ASSERT_TRUE(wait_for_feedback(*second, 8));
+  pump_cycles(bus, 3U);
+  EXPECT_EQ(first->feedback().command_sequence, 7U);
+  EXPECT_EQ(second->feedback().command_sequence, 8U);
   bus.stop(scheduler);
 
   EXPECT_EQ(transport->open_calls.load(), 1U);
@@ -300,11 +309,10 @@ TEST(St3215Test, SharedBusUsesOneNonRealtimeOwnerForAllPhysicalIo) {
   const auto physical_threads = transport->physical_thread_ids();
   ASSERT_FALSE(physical_threads.empty());
   for (const auto thread : physical_threads) {
-    EXPECT_NE(thread, caller);
-    EXPECT_EQ(thread, physical_threads.front());
+    EXPECT_EQ(thread, caller);
   }
   const auto frames = transport->written_frames();
-  ASSERT_GE(frames.size(), 4U);
+  ASSERT_GE(frames.size(), 3U);
   for (const auto& frame : frames) {
     EXPECT_TRUE(St3215Protocol::decode_packet(frame).has_value());
   }
@@ -335,13 +343,14 @@ TEST(St3215Test, RejectsStaleAndFutureCommandsAndStopsResendingExpiredEnable) {
   ASSERT_EQ(servo->stage_command(
                 St3215ServoCommand{2, fresh_ns, 0.5, true, false}),
             St3215CommandAcceptance::accepted);
-  ASSERT_TRUE(wait_for_feedback(*servo, 2));
+  pump_cycles(bus, 2U);
+  EXPECT_EQ(servo->feedback().command_sequence, 2U);
   std::this_thread::sleep_for(40ms);
   const auto first = transport->written_frames();
   const auto goals_before = std::count_if(first.begin(), first.end(), [](const auto& frame) {
     return frame.size() > 4U && std::to_integer<std::uint8_t>(frame[4]) == 0x03U;
   });
-  std::this_thread::sleep_for(20ms);
+  pump_cycles(bus, 4U);
   const auto second = transport->written_frames();
   const auto goals_after = std::count_if(second.begin(), second.end(), [](const auto& frame) {
     return frame.size() > 4U && std::to_integer<std::uint8_t>(frame[4]) == 0x03U;
@@ -369,12 +378,7 @@ TEST(St3215Test, PublishesDeviceErrorBeforeSuccessShapeValidation) {
   ASSERT_EQ(servo->stage_command(
                 St3215ServoCommand{1, 1, 0.5, true, false}),
             St3215CommandAcceptance::accepted);
-  const auto deadline = std::chrono::steady_clock::now() + 200ms;
-  while ((servo->feedback().flags & policy_runtime::kSt3215FeedbackDeviceError) ==
-             0U &&
-         std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::yield();
-  }
+  pump_cycles(bus, 2U);
   EXPECT_EQ(servo->feedback().status_error, 4U);
   EXPECT_NE(servo->feedback().flags & policy_runtime::kSt3215FeedbackDeviceError,
             0U);
@@ -464,7 +468,7 @@ TEST(St3215Test, RegistryRejectsAWholeSnapshotBeforeStagingAnyServo) {
       << "record timestamps must match the outer snapshot before any commit";
 }
 
-TEST(St3215Test, ExecutorContainsTransportExceptionsAndPublishesFailure) {
+TEST(St3215Test, CycleContainsTransportExceptionsAndLatchesFault) {
   auto transport = std::make_shared<RecordingFrameTransport>();
   transport->throw_on_write.store(true, std::memory_order_release);
   auto servo = std::make_shared<St3215Servo>(St3215ServoConfig{
@@ -477,13 +481,10 @@ TEST(St3215Test, ExecutorContainsTransportExceptionsAndPublishesFailure) {
                 St3215ServoCommand{1, 1, 0.5, true, false}),
             St3215CommandAcceptance::accepted);
 
-  const auto deadline = std::chrono::steady_clock::now() + 250ms;
-  while ((servo->feedback().flags & policy_runtime::kSt3215FeedbackIo) == 0U &&
-         std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::yield();
-  }
+  pump_cycles(bus, 1U);
 
   EXPECT_TRUE(bus.running());
+  EXPECT_TRUE(bus.fault_latched());
   EXPECT_NE(servo->feedback().flags & policy_runtime::kSt3215FeedbackIo, 0U);
   EXPECT_NE(servo->feedback().flags & policy_runtime::kSt3215FeedbackStale,
             0U);

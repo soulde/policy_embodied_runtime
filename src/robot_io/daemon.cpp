@@ -541,6 +541,7 @@ bool RobotIoDaemon::owns_cycle() const noexcept {
 
 void RobotIoDaemon::cycle_owned(const CycleContext& context) noexcept {
   static_cast<void>(refresh_commands_owned());
+  serial_devices_.cycle(context);
   if (ethercat_master_ != nullptr) {
     ethercat_master_->cycle(context);
   } else {
