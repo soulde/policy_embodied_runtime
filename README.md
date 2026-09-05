@@ -24,6 +24,25 @@ The runtime follows `Transport -> Protocol/Device -> Sensor` on input and
 physical I/O; a protocol translates fields in a process image or frame; a
 device exposes typed sensor/actuator values.
 
+The C++ tree mirrors this layering one-to-one under `include/policy_runtime/`
+and `src/` (both consumed by the CMake build):
+
+| Module | Responsibility |
+| --- | --- |
+| `common/` | `Result<T>` error type shared by every layer |
+| `transport/` | EtherCAT/IgH backend + Elmo Gold PDO mapping, SocketCAN, USB serial, USB-CAN virtual serial framing |
+| `protocol/` | CiA402 PDO/state machine, ST3215, Damiao MIT CAN codec, RPC JSON envelope codec |
+| `robot/devices/` | `Cia402Axis`, `St3215Servo`, `DamiaoMotorDevice`/`DamiaoMotorBus` typed sensor/actuator adapters |
+| `robot_io/` | daemon, versioned IPC, snapshot exchange, safety supervisor, transport scheduler |
+| `runtime/` | `policy-runtime-host` pipeline, host CLI, daemon client |
+| `profiles/` | robot/policy JSON profile loader with static validation |
+| `policy/` | preprocess, policy, postprocess pipeline stages |
+
+Third-party C++ dependencies are vendored under `third_party/` (currently
+`nlohmann-json` 3.11.3, header-only, trimmed to build inputs), so a clean
+checkout configures and builds fully offline; IgH EtherCAT and ZeroMQ remain
+optional configure-time features.
+
 ```text
 policy-runtime-host (non-RT)                 robot-io-daemon
 ┌──────────────────────────────┐       ┌──────────────────────────────┐
@@ -102,7 +121,11 @@ from the documented `uv` environment, for example:
 env UV_CACHE_DIR=/tmp/uv-cache uv run --with 'cmake>=3.24' cmake -S . -B build \
   -DPOLICY_RUNTIME_WITH_IGH=OFF
 env UV_CACHE_DIR=/tmp/uv-cache uv run --with 'cmake>=3.24' cmake --build build
+ctest --test-dir build
 ```
+
+nlohmann/json is vendored in `third_party/nlohmann-json` and compiled from
+source when no system package is found, so the build needs no network access.
 
 Target installation, service setup, and the PREEMPT_RT/EtherCAT qualification
 procedure are in [docs/robot-io-daemon.md](docs/robot-io-daemon.md). Passing
@@ -159,6 +182,7 @@ The simulator exposes a stable virtual serial path at `/tmp/rusty_robot_soarm101
 
 - `policy_embodied_runtime/examples/robot_profiles/soarm101_sim_robot_profile.json`: SO-ARM101 sensors, actuators, serial transport, and ST3215 device IDs
 - `policy_embodied_runtime/examples/robot_profiles/default_rpc_robot_profile.json`: default RPC sensor/actuator robot I/O profile
+- `policy_embodied_runtime/examples/robot_profiles/damiao_can_robot_profile.json`: Damiao CAN motors over SocketCAN and a USB-CAN virtual serial port
 - `policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json`: MVP single-step dummy policy
 - `policy_embodied_runtime/examples/policy_profiles/pi0_like_policy_profile.json`: placeholder chunked policy shape
 - `policy_embodied_runtime/examples/policy_profiles/soarm101_sim_policy_profile.json`: policy bindings from SO-ARM101 robot data names to canonical model fields
