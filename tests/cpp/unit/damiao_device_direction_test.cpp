@@ -1,3 +1,5 @@
+#include <vector>
+
 #include <gtest/gtest.h>
 
 #include "policy_runtime/robot/devices/damiao.hpp"
@@ -40,6 +42,19 @@ TEST(DamiaoDeviceDirectionTest, MotorExposesIndependentSensorAndActuatorDevices)
   auto command = motor.actuator().encode_frame();
   ASSERT_TRUE(command.has_value());
   EXPECT_EQ(command.value().address, 5U);
+}
+
+TEST(DamiaoDeviceDirectionTest, SensorAndActuatorCanBeManagedAsSeparateCollections) {
+  std::vector<policy_runtime::DamiaoSensor> sensors;
+  std::vector<policy_runtime::DamiaoActuator> actuators;
+  sensors.emplace_back(7U, policy_runtime::DamiaoLimits{12.5F, 30.0F, 10.0F});
+  actuators.emplace_back(7U, policy_runtime::DamiaoLimits{12.5F, 30.0F, 10.0F});
+  policy_runtime::DeviceFrame feedback;
+  feedback.address = 7U;
+  feedback.size = 8U;
+  EXPECT_TRUE(sensors.front().accepts(feedback));
+  actuators.front().set_enabled(false);
+  EXPECT_TRUE(actuators.front().encode_frame().has_value());
 }
 
 }  // namespace

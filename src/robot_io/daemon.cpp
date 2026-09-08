@@ -165,10 +165,13 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
   }
   std::vector<std::unique_ptr<robot_io::TransportRuntime>> damiao_buses;
   std::array<std::optional<DamiaoBusRoute>, kRobotIoMaximumServos> damiao_routes;
-  std::vector<DamiaoMotor> damiao_motors;
-  damiao_motors.reserve(profile.damiao_motors.size());
+  std::vector<DamiaoSensor> damiao_sensors;
+  std::vector<DamiaoActuator> damiao_actuators;
+  damiao_sensors.reserve(profile.damiao_motors.size());
+  damiao_actuators.reserve(profile.damiao_motors.size());
   for (const auto& motor : profile.damiao_motors) {
-    damiao_motors.emplace_back(motor.motor_id, motor.limits);
+    damiao_sensors.emplace_back(motor.motor_id, motor.limits);
+    damiao_actuators.emplace_back(motor.motor_id, motor.limits);
   }
   for (const auto& [path, members] : damiao_bus_members) {
     auto transport = SocketCanTransport::open(path);
@@ -184,9 +187,9 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
           }
           std::size_t global_index = 0U;
           for (const auto candidate : members) {
-            if (damiao_motors_[candidate].sensor().accepts(frame)) {
+            if (damiao_sensors_[candidate].accepts(frame)) {
               global_index = candidate;
-              auto feedback = damiao_motors_[candidate].sensor().decode(frame);
+              auto feedback = damiao_sensors_[candidate].decode(frame);
               if (!feedback.has_value()) return;
               static_cast<void>(dds_->enqueue_damiao_sensor_realtime(
                   global_index,
@@ -247,7 +250,8 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
   axes_ = std::move(configured_axes);
   transport_runtimes_ = std::move(damiao_buses);
   damiao_routes_ = damiao_routes;
-  damiao_motors_ = std::move(damiao_motors);
+  damiao_sensors_ = std::move(damiao_sensors);
+  damiao_actuators_ = std::move(damiao_actuators);
   axis_count_ = static_cast<std::uint32_t>(profile.axes.size());
   DaemonAxisSnapshot initial{};
   initial.axis_count = axis_count_;
@@ -312,10 +316,10 @@ Result<void> RobotIoDaemon::attach_dds(
       [this](std::size_t index,
              const robot_io::dds::DamiaoCommandValue& value) {
         if (index >= damiao_routes_.size() || !damiao_routes_[index].has_value() ||
-            index >= damiao_motors_.size()) {
+            index >= damiao_actuators_.size()) {
           return;
         }
-        auto& actuator = damiao_motors_[index].actuator();
+        auto& actuator = damiao_actuators_[index];
         actuator.set_enabled(value.enabled);
         actuator.set_command({value.position, value.velocity, value.kp, value.kd,
                                value.torque});

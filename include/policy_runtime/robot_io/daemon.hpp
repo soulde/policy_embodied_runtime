@@ -148,7 +148,8 @@ class RobotIoDaemon {
     std::size_t local_index{};
   };
   std::vector<std::unique_ptr<robot_io::TransportRuntime>> transport_runtimes_;
-  std::vector<DamiaoMotor> damiao_motors_;
+  std::vector<DamiaoSensor> damiao_sensors_;
+  std::vector<DamiaoActuator> damiao_actuators_;
   std::array<std::optional<DamiaoBusRoute>, kRobotIoMaximumServos>
       damiao_routes_{};
   EthercatMaster* ethercat_master_{};
