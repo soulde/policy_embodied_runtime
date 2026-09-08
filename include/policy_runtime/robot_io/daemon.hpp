@@ -16,6 +16,7 @@
 #include "policy_runtime/robot/devices/cia402/axis.hpp"
 #include "policy_runtime/robot/devices/damiao.hpp"
 #include "policy_runtime/robot_io/transport_runtime.hpp"
+#include "policy_runtime/robot_io/topology.hpp"
 #include "policy_runtime/robot/devices/st3215/servo.hpp"
 #include "policy_runtime/robot_io/local_snapshot.hpp"
 #include "policy_runtime/robot_io/realtime_loop.hpp"
@@ -143,15 +144,11 @@ class RobotIoDaemon {
   SafetySupervisor command_ingress_;
   TransportScheduler scheduler_;
   St3215DeviceRegistry serial_devices_;
-  struct DamiaoTransportRoute {
-    std::size_t transport_index{};
-    std::size_t local_index{};
-  };
   std::vector<std::unique_ptr<robot_io::TransportRuntime>> transport_runtimes_;
   std::vector<DamiaoSensor> damiao_sensors_;
   std::vector<DamiaoActuator> damiao_actuators_;
-  std::array<std::optional<DamiaoTransportRoute>, kRobotIoMaximumServos>
-      damiao_routes_{};
+  std::array<std::optional<robot_io::DeviceBinding>, kRobotIoMaximumServos>
+      actuator_bindings_{};
   EthercatMaster* ethercat_master_{};
   std::optional<robot_io::dds::DdsDaemonEndpoint> dds_;
   std::array<std::optional<Cia402Axis>, kRobotIoMaximumAxes> axes_{};

@@ -169,7 +169,8 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
     damiao_bus_members[motor.path].push_back(index);
   }
   std::vector<std::unique_ptr<robot_io::TransportRuntime>> damiao_buses;
-  std::array<std::optional<DamiaoTransportRoute>, kRobotIoMaximumServos> damiao_routes;
+  std::array<std::optional<robot_io::DeviceBinding>, kRobotIoMaximumServos>
+      actuator_bindings;
   std::vector<DamiaoSensor> damiao_sensors;
   std::vector<DamiaoActuator> damiao_actuators;
   damiao_sensors.reserve(profile.damiao_motors.size());
@@ -215,6 +216,7 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
     for (std::size_t local_index = 0; local_index < members.size(); ++local_index) {
       const auto global_index = members[local_index];
       std::size_t transport_slot = local_index;
+      std::optional<std::size_t> actuator_profile_index;
       const auto& motor = profile.damiao_motors[global_index];
       for (const auto& binding : compiled_topology.value().devices) {
         if (!binding.actuator_profile_index.has_value() ||
@@ -227,11 +229,15 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
             binding.transport_index < compiled_topology.value().transports.size() &&
             compiled_topology.value().transports[binding.transport_index].path == path) {
           transport_slot = binding.transmit_slot;
+          actuator_profile_index = binding.actuator_profile_index;
           break;
         }
       }
-      damiao_routes[global_index] =
-          DamiaoTransportRoute{transport_index, transport_slot};
+      robot_io::DeviceBinding route;
+      route.actuator_profile_index = actuator_profile_index;
+      route.transport_index = transport_index;
+      route.transmit_slot = transport_slot;
+      actuator_bindings[global_index] = route;
     }
     damiao_buses.push_back(
         std::make_unique<robot_io::TransportRuntime>(std::move(runtime.value())));
@@ -272,7 +278,7 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
   }
   axes_ = std::move(configured_axes);
   transport_runtimes_ = std::move(damiao_buses);
-  damiao_routes_ = damiao_routes;
+  actuator_bindings_ = actuator_bindings;
   damiao_sensors_ = std::move(damiao_sensors);
   damiao_actuators_ = std::move(damiao_actuators);
   axis_count_ = static_cast<std::uint32_t>(profile.axes.size());
@@ -338,7 +344,8 @@ Result<void> RobotIoDaemon::attach_dds(
   callbacks.stage_damiao_command =
       [this](std::size_t index,
              const robot_io::dds::DamiaoCommandValue& value) {
-        if (index >= damiao_routes_.size() || !damiao_routes_[index].has_value() ||
+        if (index >= actuator_bindings_.size() ||
+            !actuator_bindings_[index].has_value() ||
             index >= damiao_actuators_.size()) {
           return;
         }
@@ -353,10 +360,10 @@ Result<void> RobotIoDaemon::attach_dds(
         if (!frame.has_value()) return;
         auto outgoing = frame.value();
         outgoing.sequence = value.sequence;
-        const auto route = *damiao_routes_[index];
+        const auto route = *actuator_bindings_[index];
         if (route.transport_index < transport_runtimes_.size()) {
           static_cast<void>(transport_runtimes_[route.transport_index]->stage(
-              route.local_index, outgoing));
+              route.transmit_slot, outgoing));
         }
       };
   auto endpoint = robot_io::dds::DdsDaemonEndpoint::create(
