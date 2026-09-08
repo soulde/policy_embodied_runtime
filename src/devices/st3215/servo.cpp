@@ -1,4 +1,4 @@
-#include "policy_runtime/robot/devices/st3215/servo.hpp"
+#include "policy_runtime/devices/st3215/servo.hpp"
 
 #include <algorithm>
 #include <array>

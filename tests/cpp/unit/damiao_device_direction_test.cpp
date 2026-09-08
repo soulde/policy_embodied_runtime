@@ -2,7 +2,7 @@
 
 #include <gtest/gtest.h>
 
-#include "policy_runtime/robot/devices/damiao.hpp"
+#include "policy_runtime/devices/damiao.hpp"
 
 namespace {
 

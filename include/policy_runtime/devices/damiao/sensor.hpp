@@ -1,7 +1,7 @@
 #pragma once
 
 #include "policy_runtime/protocol/damiao/protocol.hpp"
-#include "policy_runtime/robot/devices/device.hpp"
+#include "policy_runtime/devices/device.hpp"
 
 namespace policy_runtime {
 

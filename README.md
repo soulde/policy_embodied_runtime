@@ -32,7 +32,7 @@ and `src/` (both consumed by the CMake build):
 | `common/` | `Result<T>` error type shared by every layer |
 | `transport/` | EtherCAT/IgH backend + Elmo Gold PDO mapping, SocketCAN, USB serial, USB-CAN virtual serial framing |
 | `protocol/` | CiA402 PDO/state machine, ST3215, Damiao MIT CAN codec, RPC JSON envelope codec |
-| `robot/devices/` | Directional `SensorDevice`/`ActuatorDevice` implementations, including Damiao sensor and actuator codecs |
+| `devices/` | Directional `SensorDevice`/`ActuatorDevice` implementations, including Damiao sensor and actuator codecs |
 | `robot_io/` | daemon, versioned IPC, snapshot exchange, safety supervisor, transport scheduler |
 | `runtime/` | `policy-runtime-host` pipeline, host CLI, daemon client |
 | `profiles/` | robot/policy JSON profile loader with static validation |

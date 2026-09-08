@@ -5,7 +5,7 @@
 #include <limits>
 #include <optional>
 
-#include "policy_runtime/robot/devices/cia402/axis.hpp"
+#include "policy_runtime/devices/cia402/axis.hpp"
 #include "policy_runtime/protocol/cia402/units.hpp"
 
 namespace policy_runtime {

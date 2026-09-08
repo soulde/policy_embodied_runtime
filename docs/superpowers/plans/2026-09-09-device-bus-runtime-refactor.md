@@ -45,7 +45,7 @@ class ActuatorDevice {
 ```
 
 - [ ] Move CiA402 state-machine/PDO codec behavior under
-  `robot/devices/cia402/`; remove runtime dependency on `protocol/cia402/`.
+  `devices/cia402/`; remove runtime dependency on `protocol/cia402/`.
 - [ ] Split Damiao into `DamiaoSensor` and `DamiaoActuator`. The sensor owns
   feedback decoding; the actuator owns enable, disable, zero and MIT encoding.
 - [ ] Split ST3215 into `St3215Sensor` and `St3215Actuator`; each owns its packet

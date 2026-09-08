@@ -33,7 +33,7 @@ EtherCAT 属于 `transport`，CiA 402 属于 `protocol`，受控轴属于 robot 
 src/
 ├── apps/
 ├── robot_io/              # daemon、IPC、scheduler、safety supervisor
-├── robot/devices/cia402/  # axis、sensor、actuator、config
+├── devices/cia402/  # axis、sensor、actuator、config
 ├── protocol/cia402/       # object dictionary、state machine、mode、units
 ├── transport/ethercat/    # IgH master、domain、slave、PDO、DC、SDO
 ├── transport/serial/

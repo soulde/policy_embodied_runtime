@@ -14,7 +14,7 @@
 
 #include "policy_runtime/profiles/robot_profile.hpp"
 #include "policy_runtime/protocol/st3215/protocol.hpp"
-#include "policy_runtime/robot/devices/st3215/servo.hpp"
+#include "policy_runtime/devices/st3215/servo.hpp"
 #include "policy_runtime/robot_io/transport_scheduler.hpp"
 
 namespace {

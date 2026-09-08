@@ -38,7 +38,7 @@
 
 ### Task 3: Device adapter and configuration
 
-**Files:** create `include/policy_runtime/robot/devices/damiao/motor.hpp`, `src/robot/devices/damiao/motor.cpp`, and `tests/cpp/integration/damiao_motor_test.cpp`; modify profile loader and CMake registration.
+**Files:** create `include/policy_runtime/devices/damiao/motor.hpp`, `src/devices/damiao/motor.cpp`, and `tests/cpp/integration/damiao_motor_test.cpp`; modify profile loader and CMake registration.
 
 - [ ] Write failing tests for Sensor/Actuator conversion, static mode selection, stale feedback faulting, and one-shot send failure propagation.
 - [ ] Implement the device adapter with preallocated state and latched fault semantics.

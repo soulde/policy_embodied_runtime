@@ -1,4 +1,4 @@
-#include "policy_runtime/robot/devices/cia402/axis.hpp"
+#include "policy_runtime/devices/cia402/axis.hpp"
 
 #include <algorithm>
 #include <cmath>

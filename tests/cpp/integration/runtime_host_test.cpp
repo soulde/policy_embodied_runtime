@@ -8,7 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "policy_runtime/protocol/rpc/codec.hpp"
-#include "policy_runtime/robot/devices/cia402/axis.hpp"
+#include "policy_runtime/devices/cia402/axis.hpp"
 #include "policy_runtime/runtime/runtime_host.hpp"
 #include "policy_runtime/runtime/runtime_host_cli.hpp"
 

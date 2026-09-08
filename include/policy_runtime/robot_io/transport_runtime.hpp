@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "policy_runtime/common/result.hpp"
-#include "policy_runtime/robot/devices/device.hpp"
+#include "policy_runtime/devices/device.hpp"
 #include "policy_runtime/robot_io/dds/realtime_mailbox.hpp"
 #include "policy_runtime/transport/socketcan/socketcan_transport.hpp"
 

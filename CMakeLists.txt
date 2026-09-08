@@ -74,8 +74,8 @@ add_library(policy_runtime_core
     src/protocol/damiao/protocol.cpp
     src/protocol/st3215/protocol.cpp
     src/protocol/rpc/codec.cpp
-    src/robot/devices/cia402/axis.cpp
-    src/robot/devices/st3215/servo.cpp
+    src/devices/cia402/axis.cpp
+    src/devices/st3215/servo.cpp
     src/robot_io/daemon.cpp
     src/robot_io/dds/topic_registry.cpp
     src/robot_io/transport_runtime.cpp
