@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <future>
 #include <thread>
+#include <type_traits>
 #include <fcntl.h>
 #include <linux/can.h>
 #include <poll.h>
@@ -12,12 +13,19 @@
 #include <gtest/gtest.h>
 
 #include "policy_runtime/robot_io/daemon/transport_runtime.hpp"
-#include "policy_runtime/robot_io/daemon/transport_runtime.hpp"
+#include "policy_runtime/transport/asynchronous_transport.hpp"
+#include "policy_runtime/transport/frame_transport.hpp"
+#include "policy_runtime/transport/socketcan/socketcan_transport.hpp"
+
+static_assert(std::is_base_of_v<policy_runtime::AsynchronousTransport,
+                                policy_runtime::FrameTransport>);
+static_assert(std::is_base_of_v<policy_runtime::AsynchronousTransport,
+                                policy_runtime::SocketCanTransport>);
 
 namespace policy_runtime::robot_io {
 namespace {
 
-class FakeTransport final : public policy_runtime::Transport {
+class FakeTransport final : public policy_runtime::AsynchronousTransport {
  public:
   policy_runtime::Result<void> open() override {
     opened = true;
@@ -31,9 +39,11 @@ class FakeTransport final : public policy_runtime::Transport {
     return policy_runtime::SchedulingClass::soft_realtime_periodic;
   }
   void cycle(const policy_runtime::CycleContext&) noexcept override { ++cycles; }
+  void receive_once() noexcept override { ++receives; }
 
   bool opened{};
   std::uint32_t cycles{};
+  std::uint32_t receives{};
 };
 
 TEST(TransportRuntimeTest, SendsRawFramesWithoutKnowingDeviceProtocol) {
@@ -87,6 +97,7 @@ TEST(TransportRuntimeTest, RunsAnyTransportThroughGenericCycleContract) {
 
   EXPECT_FALSE(transport.opened);
   EXPECT_GT(transport.cycles, 0U);
+  EXPECT_GT(transport.receives, 0U);
 }
 
 }  // namespace

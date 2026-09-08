@@ -35,7 +35,8 @@ SocketCanTransport::~SocketCanTransport() {
 
 SocketCanTransport::SocketCanTransport(SocketCanTransport&& other) noexcept
     : fd_(std::exchange(other.fd_, -1)),
-      owns_fd_(std::exchange(other.owns_fd_, false)) {}
+      owns_fd_(std::exchange(other.owns_fd_, false)),
+      receive_handler_(std::move(other.receive_handler_)) {}
 
 SocketCanTransport& SocketCanTransport::operator=(
     SocketCanTransport&& other) noexcept {
@@ -45,8 +46,51 @@ SocketCanTransport& SocketCanTransport::operator=(
     }
     fd_ = std::exchange(other.fd_, -1);
     owns_fd_ = std::exchange(other.owns_fd_, false);
+    receive_handler_ = std::move(other.receive_handler_);
   }
   return *this;
+}
+
+Result<void> SocketCanTransport::open() {
+  return valid() ? Result<void>::success()
+                 : Result<void>::failure(
+                       {ErrorCode::unavailable,
+                        "SocketCAN descriptor is not open"});
+}
+
+void SocketCanTransport::close() noexcept {
+  if (owns_fd_ && fd_ >= 0) {
+    ::close(fd_);
+  }
+  fd_ = -1;
+  owns_fd_ = false;
+}
+
+TransportHealth SocketCanTransport::health() const noexcept {
+  return valid() ? TransportHealth::healthy : TransportHealth::failed;
+}
+
+SchedulingClass SocketCanTransport::scheduling_class() const noexcept {
+  return SchedulingClass::asynchronous;
+}
+
+void SocketCanTransport::cycle(const CycleContext&) noexcept {}
+
+void SocketCanTransport::receive_once() noexcept {
+  auto received = receive_frame();
+  if (received.has_value() && received.value().has_value() &&
+      receive_handler_) {
+    try {
+      receive_handler_(received.value().value());
+    } catch (...) {
+      // Transport callbacks are owned by the runtime; a callback failure must
+      // not terminate the physical receive worker.
+    }
+  }
+}
+
+void SocketCanTransport::set_receive_handler(ReceiveHandler handler) {
+  receive_handler_ = std::move(handler);
 }
 
 Result<SocketCanTransport> SocketCanTransport::open(

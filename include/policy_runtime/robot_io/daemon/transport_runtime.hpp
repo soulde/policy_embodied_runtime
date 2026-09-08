@@ -14,13 +14,14 @@
 #include "policy_runtime/devices/device.hpp"
 #include "policy_runtime/robot_io/dds/realtime_mailbox.hpp"
 #include "policy_runtime/transport/socketcan/socketcan_transport.hpp"
+#include "policy_runtime/transport/asynchronous_transport.hpp"
 #include "policy_runtime/transport/transport.hpp"
 
 namespace policy_runtime::robot_io {
 
-// Unified runtime for all physical transports. Generic transports use one
-// cycle worker; CAN transports additionally use bounded frame staging and
-// receive/send workers, without exposing a second runtime type.
+// Unified runtime. Cyclic transports use one cycle worker. Asynchronous
+// transports use one receive worker plus the same cycle worker; cycle() sends
+// directly and there is intentionally no separate transmit worker.
 class TransportRuntime final {
  public:
   using ReceiveCallback =
@@ -55,19 +56,17 @@ class TransportRuntime final {
   TransportRuntime(SocketCanTransport transport, ReceiveCallback callback,
                    std::vector<std::unique_ptr<Slot>> slots);
   void cycle_loop(std::stop_token stop);
-  void receive_loop(std::stop_token stop);
-  void send_loop(std::stop_token stop);
 
   Mode mode_{Mode::generic};
   Transport* transport_{};
   std::unique_ptr<SocketCanTransport> can_transport_;
+  AsynchronousTransport* asynchronous_transport_{};
   std::chrono::nanoseconds period_{};
   ReceiveCallback callback_;
   std::vector<std::unique_ptr<Slot>> slots_;
   std::atomic<bool> running_{};
   std::jthread worker_;
   std::jthread receive_worker_;
-  std::jthread send_worker_;
   std::chrono::microseconds poll_period_{100};
   std::uint64_t receive_sequence_{};
 };

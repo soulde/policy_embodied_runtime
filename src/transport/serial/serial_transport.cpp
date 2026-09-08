@@ -544,6 +544,22 @@ void SerialTransport::close() noexcept {
 
 void SerialTransport::request_stop() noexcept { impl_->request_stop(); }
 
+void SerialTransport::receive_once() noexcept {
+  try {
+    std::scoped_lock io_lock(impl_->io_mutex);
+    if (!impl_->opened.load(std::memory_order_acquire) || impl_->fd < 0) {
+      impl_->publish_error(SerialError::closed);
+      return;
+    }
+    const auto receive_error = impl_->receive_one(std::chrono::milliseconds{0});
+    if (receive_error != SerialError::timeout) {
+      impl_->publish_error(receive_error);
+    }
+  } catch (...) {
+    impl_->publish_error(SerialError::internal);
+  }
+}
+
 TransportHealth SerialTransport::health() const noexcept {
   return impl_->health.load(std::memory_order_acquire);
 }
