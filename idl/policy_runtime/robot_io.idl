@@ -8,7 +8,7 @@ struct MessageHeader {
   string<64> robot_id;
   string<64> device_id;
   string<64> session_id;
-  unsigned long long sequence;
+  unsigned long long sequence_number;
   long long source_timestamp_ns;
   unsigned long long bus_cycle;
   unsigned long flags;

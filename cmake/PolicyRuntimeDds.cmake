@@ -6,6 +6,16 @@ set(POLICY_RUNTIME_DDS_CXX_TARGET "")
 
 if(POLICY_RUNTIME_WITH_DDS)
     find_package(CycloneDDS CONFIG REQUIRED)
+
+    # CycloneDDS-CXX 0.10.x may export iceoryx_binding_c in ddscxx's link
+    # interface without loading that package itself.  Load it first when the
+    # installed Cyclone DDS was built with shared-memory support.
+    get_target_property(POLICY_RUNTIME_CYCLONEDDS_HAS_SHM
+        CycloneDDS::ddsc SHM_SUPPORT_IS_AVAILABLE)
+    if(POLICY_RUNTIME_CYCLONEDDS_HAS_SHM)
+        find_package(iceoryx_binding_c CONFIG REQUIRED)
+    endif()
+
     find_package(CycloneDDS-CXX CONFIG REQUIRED)
 
     if(NOT TARGET CycloneDDS::ddsc)

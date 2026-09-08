@@ -144,6 +144,9 @@ install(TARGETS robot-io-daemon policy-runtime-host robot-io-health
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES configs/robot_profiles/elmo_gold_example.json
     DESTINATION "${CMAKE_INSTALL_DATADIR}/policy-runtime/robot_profiles")
+install(FILES configs/cyclonedds-loopback.xml
+    DESTINATION "${CMAKE_INSTALL_SYSCONFDIR}/policy-runtime"
+    RENAME cyclonedds.xml)
 install(FILES packaging/systemd/robot-io-daemon.service
     DESTINATION "${POLICY_RUNTIME_SYSTEMD_UNIT_DIR}")
 install(FILES docs/robot-io-daemon.md
