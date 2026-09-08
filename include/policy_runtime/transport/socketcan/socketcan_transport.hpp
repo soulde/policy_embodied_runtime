@@ -1,21 +1,14 @@
 #pragma once
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
 
 #include "policy_runtime/common/result.hpp"
+#include "policy_runtime/transport/can_frame.hpp"
 
 namespace policy_runtime {
-
-// Canonical CAN data frame shared by every CAN-capable transport.
-struct CanFrame {
-  std::uint32_t id{};
-  std::array<std::byte, 8> data{};
-  std::uint8_t dlc{8};
-};
 
 // Transport over a pre-opened, nonblocking SocketCAN descriptor. One
 // send_frame() performs exactly one write(2); one receive_frame() performs at

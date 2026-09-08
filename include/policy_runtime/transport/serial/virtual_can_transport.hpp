@@ -5,7 +5,7 @@
 #include <optional>
 
 #include "policy_runtime/common/result.hpp"
-#include "policy_runtime/transport/socketcan/socketcan_transport.hpp"
+#include "policy_runtime/transport/can_frame.hpp"
 
 namespace policy_runtime {
 
