@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "policy_runtime/transport/ethercat/master.hpp"
+#include "policy_runtime/robot_io/topology.hpp"
 
 namespace policy_runtime {
 namespace {
@@ -149,6 +150,10 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
       !checked.has_value()) {
     return checked;
   }
+  auto compiled_topology = robot_io::compile_physical_topology(profile);
+  if (!compiled_topology.has_value()) {
+    return Result<void>::failure(compiled_topology.error());
+  }
   if (profile.damiao_motors.size() > kRobotIoMaximumServos) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument, "robot I/O daemon supports at most 32 Damiao motors"});
@@ -208,7 +213,23 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
       return Result<void>::failure(runtime.error());
     }
     for (std::size_t local_index = 0; local_index < members.size(); ++local_index) {
-      damiao_routes[members[local_index]] = DamiaoBusRoute{bus_index, local_index};
+      const auto global_index = members[local_index];
+      std::size_t transport_slot = local_index;
+      const auto& motor = profile.damiao_motors[global_index];
+      for (const auto& binding : compiled_topology.value().devices) {
+        if (binding.direction != robot_io::DeviceDirection::actuator ||
+            binding.profile_index >= profile.actuators.size()) {
+          continue;
+        }
+        const auto& actuator = profile.actuators[binding.profile_index];
+        if (actuator.name == motor.actuator_name &&
+            binding.bus_index < compiled_topology.value().buses.size() &&
+            compiled_topology.value().buses[binding.bus_index].path == path) {
+          transport_slot = binding.transport_slot;
+          break;
+        }
+      }
+      damiao_routes[global_index] = DamiaoBusRoute{bus_index, transport_slot};
     }
     damiao_buses.push_back(
         std::make_unique<robot_io::TransportRuntime>(std::move(runtime.value())));
