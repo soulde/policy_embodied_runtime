@@ -89,6 +89,7 @@ add_library(policy_runtime_core
     src/transport/ethercat/elmo_gold.cpp
     src/transport/ethercat/igh_backend.cpp
     src/transport/ethercat/master.cpp
+    src/transport/ethercat/cia402_adapter.cpp
     src/transport/serial/serial_transport.cpp
     src/transport/serial/virtual_can_transport.cpp
     src/transport/socketcan/socketcan_transport.cpp)

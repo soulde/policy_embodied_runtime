@@ -5,6 +5,7 @@
 #include <set>
 #include <utility>
 
+#include "policy_runtime/transport/ethercat/cia402_adapter.hpp"
 #include "policy_runtime/transport/ethercat/elmo_gold.hpp"
 
 namespace policy_runtime {
@@ -507,85 +508,16 @@ Result<void> EthercatMaster::open() {
     return initialized;
   }
 
-  std::vector<Cia402PdoHandles> handles(axes_.size());
+  std::vector<Cia402PdoHandles> handles;
+  handles.reserve(axes_.size());
   for (std::size_t axis_index = 0; axis_index < axes_.size(); ++axis_index) {
     const auto& configuration = axes_[axis_index];
-    const auto slave = EthercatSlaveAddress{configuration.axis.alias,
-                                            configuration.axis.position};
-    auto startup_array =
-        ElmoGoldDeviceDescription::startup_sdos(configuration.axis.mode);
-    std::vector<SdoDownloadRequest> startup(startup_array.begin(), startup_array.end());
-    startup.insert(startup.end(), configuration.startup_parameters.begin(),
-                   configuration.startup_parameters.end());
-    const auto slave_configuration = EthercatSlaveConfiguration{
-        slave,
-        EthercatDeviceIdentity{configuration.axis.vendor_id,
-                               configuration.axis.product_code,
-                               configuration.axis.revision},
-        ElmoGoldDeviceDescription::rx_pdo_definition(configuration.axis.mode),
-        ElmoGoldDeviceDescription::feedback_pdos(),
-        DistributedClockConfiguration{ElmoGoldDeviceDescription::assign_activate(),
-                                      ElmoGoldDeviceDescription::sync0_cycle_ns(), 0},
-        startup};
-    auto configured = backend_->configure_slave(slave_configuration);
+    auto configured = Cia402PdoAdapter::configure_axis(*backend_, configuration);
     if (!configured.has_value()) {
       backend_->deactivate();
-      return configured;
+      return Result<void>::failure(configured.error());
     }
-
-    auto& axis_handles = handles[axis_index];
-    const auto bind_input = [&]<class T>(ObjectAddress address, std::uint8_t bits,
-                                         TypedPdoField<T>& field) {
-      auto location = backend_->bind_pdo_entry(slave, address, bits);
-      if (!location.has_value()) {
-        return Result<void>::failure(location.error());
-      }
-      return field.bind(location.value());
-    };
-    auto result =
-        bind_input(ObjectAddress{0x6041U, 0U}, 16U, axis_handles.status_word);
-    if (result.has_value()) {
-      result = bind_input(ObjectAddress{0x6061U, 0U}, 8U,
-                          axis_handles.mode_display);
-    }
-    if (result.has_value()) {
-      result = bind_input(ObjectAddress{0x6064U, 0U}, 32U,
-                          axis_handles.actual_position);
-    }
-    if (result.has_value()) {
-      result = bind_input(ObjectAddress{0x606CU, 0U}, 32U,
-                          axis_handles.actual_velocity);
-    }
-    if (result.has_value()) {
-      result = bind_input(ObjectAddress{0x6077U, 0U}, 16U,
-                          axis_handles.actual_torque);
-    }
-    if (result.has_value()) {
-      result = bind_input(ObjectAddress{0x6040U, 0U}, 16U,
-                          axis_handles.control_word);
-    }
-    if (!result.has_value()) {
-      backend_->deactivate();
-      return result;
-    }
-
-    Result<void> target = Result<void>::failure(
-        {ErrorCode::internal, "unreachable static CiA 402 mode"});
-    switch (configuration.axis.mode) {
-      case profiles::Cia402Mode::csp:
-        target = bind_input({0x607AU, 0U}, 32U, axis_handles.target_position);
-        break;
-      case profiles::Cia402Mode::csv:
-        target = bind_input({0x60FFU, 0U}, 32U, axis_handles.target_velocity);
-        break;
-      case profiles::Cia402Mode::cst:
-        target = bind_input({0x6071U, 0U}, 16U, axis_handles.target_torque);
-        break;
-    }
-    if (!target.has_value()) {
-      backend_->deactivate();
-      return target;
-    }
+    handles.push_back(std::move(configured.value()));
   }
 
   for (auto& field : process_image_fields_) {
@@ -732,21 +664,8 @@ void EthercatMaster::cycle(const CycleContext&) noexcept {
     for (std::size_t axis_index = 0; axis_index < pdo_handles_.size(); ++axis_index) {
       const auto& handles = pdo_handles_[axis_index];
       auto& pdo = pdo_views_[axis_index];
-      const auto status_word = handles.status_word.read(image);
-      const auto mode_display = handles.mode_display.read(image);
-      const auto actual_position = handles.actual_position.read(image);
-      const auto actual_velocity = handles.actual_velocity.read(image);
-      const auto actual_torque = handles.actual_torque.read(image);
-      valid_image = valid_image && status_word.has_value() && mode_display.has_value() &&
-                    actual_position.has_value() && actual_velocity.has_value() &&
-                    actual_torque.has_value();
-      if (status_word && mode_display && actual_position && actual_velocity && actual_torque) {
-        pdo.status_word = *status_word;
-        pdo.mode_display = *mode_display;
-        pdo.actual_position = *actual_position;
-        pdo.actual_velocity = *actual_velocity;
-        pdo.actual_torque = *actual_torque;
-      }
+      valid_image = Cia402PdoAdapter::read_inputs(handles, image, pdo) &&
+                    valid_image;
     }
   }
 
@@ -767,31 +686,10 @@ void EthercatMaster::cycle(const CycleContext&) noexcept {
   for (std::size_t axis_index = 0; axis_index < pdo_handles_.size(); ++axis_index) {
     const auto& handles = pdo_handles_[axis_index];
     const auto& pdo = pdo_views_[axis_index];
-    const auto control_word = outputs_enabled ? pdo.control_word : 0U;
-    outputs_written = handles.control_word.write(image, control_word) && outputs_written;
-    switch (axes_[axis_index].axis.mode) {
-      case profiles::Cia402Mode::csp:
-        outputs_written = handles.target_position.write(
-                              image, outputs_enabled
-                                         ? pdo.target_position
-                                         : std::int32_t{0}) &&
-                          outputs_written;
-        break;
-      case profiles::Cia402Mode::csv:
-        outputs_written = handles.target_velocity.write(
-                              image, outputs_enabled
-                                         ? pdo.target_velocity
-                                         : std::int32_t{0}) &&
-                          outputs_written;
-        break;
-      case profiles::Cia402Mode::cst:
-        outputs_written = handles.target_torque.write(
-                              image, outputs_enabled
-                                         ? pdo.target_torque
-                                         : std::int16_t{0}) &&
-                          outputs_written;
-        break;
-    }
+    outputs_written = Cia402PdoAdapter::write_outputs(
+                          handles, image, pdo, axes_[axis_index].axis.mode,
+                          outputs_enabled) &&
+                      outputs_written;
   }
 
   if (!mailboxes_.empty()) {
