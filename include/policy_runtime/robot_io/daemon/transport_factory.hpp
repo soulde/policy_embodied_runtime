@@ -6,7 +6,7 @@
 
 #include "policy_runtime/common/result.hpp"
 #include "policy_runtime/robot_io/daemon/topology.hpp"
-#include "policy_runtime/robot_io/daemon/transport_runtime.hpp"
+#include "policy_runtime/robot_io/daemon/can_transport_runtime.hpp"
 #include "policy_runtime/transport/ethercat/backend.hpp"
 #include "policy_runtime/transport/ethercat/master.hpp"
 #include "policy_runtime/transport/serial/serial_transport.hpp"
@@ -19,8 +19,8 @@ class TransportFactory final {
  public:
   static Result<void> validate(const PhysicalTransportKey& key);
 
-  static Result<std::unique_ptr<TransportRuntime>> create_socketcan(
-      const PhysicalTransportKey& key, TransportRuntime::ReceiveCallback callback,
+  static Result<std::unique_ptr<CanTransportRuntime>> create_socketcan(
+      const PhysicalTransportKey& key, CanTransportRuntime::ReceiveCallback callback,
       std::size_t actuator_slots = 32U);
 
   static Result<std::shared_ptr<SerialTransport>> create_serial(

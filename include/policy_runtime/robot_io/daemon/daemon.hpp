@@ -15,7 +15,7 @@
 #include "policy_runtime/devices/cia402/state_machine.hpp"
 #include "policy_runtime/devices/cia402/axis.hpp"
 #include "policy_runtime/devices/damiao.hpp"
-#include "policy_runtime/robot_io/daemon/transport_runtime.hpp"
+#include "policy_runtime/robot_io/daemon/can_transport_runtime.hpp"
 #include "policy_runtime/robot_io/daemon/topology.hpp"
 #include "policy_runtime/devices/st3215/servo.hpp"
 #include "policy_runtime/robot_io/daemon/local_snapshot.hpp"
@@ -144,7 +144,7 @@ class RobotIoDaemon {
   SafetySupervisor command_ingress_;
   TransportScheduler scheduler_;
   St3215DeviceRegistry serial_devices_;
-  std::vector<std::unique_ptr<robot_io::TransportRuntime>> transport_runtimes_;
+  std::vector<std::unique_ptr<robot_io::CanTransportRuntime>> transport_runtimes_;
   std::vector<profiles::AxisConfig> axis_configurations_;
   std::vector<DamiaoSensor> damiao_sensors_;
   std::vector<DamiaoActuator> damiao_actuators_;
