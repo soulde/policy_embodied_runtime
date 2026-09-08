@@ -1,4 +1,12 @@
 {
+  "dds": {
+    "backend": "dds",
+    "robot_id": "damiao_arm",
+    "local_domain_id": 0,
+    "cyclone_config": "/etc/policy-runtime/cyclonedds.xml",
+    "sensor_queue_capacity": 64,
+    "external": {"enabled": false, "domain_id": 10, "topics": []}
+  },
   "sensors": [
     {
       "name": "joint_1_position",

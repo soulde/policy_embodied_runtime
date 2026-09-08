@@ -71,6 +71,23 @@ struct St3215ServoProfile {
 
 enum class DamiaoTransport : std::uint8_t { socketcan, virtual_serial };
 
+enum class RobotIoBackend : std::uint8_t { unix_shm, dds };
+
+struct DdsExternalConfig {
+  bool enabled{};
+  std::uint32_t domain_id{};
+  std::vector<std::string> topics;
+};
+
+struct DdsConfig {
+  RobotIoBackend backend{RobotIoBackend::unix_shm};
+  std::string robot_id;
+  std::uint32_t local_domain_id{};
+  std::string cyclone_config{"configs/cyclonedds-loopback.xml"};
+  std::size_t sensor_queue_capacity{64U};
+  DdsExternalConfig external;
+};
+
 struct DamiaoMotorProfile {
   std::string sensor_name;
   std::string actuator_name;
@@ -88,6 +105,7 @@ struct RobotProfile {
   std::vector<AxisConfig> axes;
   std::vector<St3215ServoProfile> st3215_servos;
   std::vector<DamiaoMotorProfile> damiao_motors;
+  DdsConfig dds;
 };
 
 }  // namespace policy_runtime::profiles
