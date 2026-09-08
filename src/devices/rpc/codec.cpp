@@ -1,4 +1,4 @@
-#include "policy_runtime/protocol/rpc/codec.hpp"
+#include "policy_runtime/devices/rpc/codec.hpp"
 
 #include <cctype>
 #include <initializer_list>

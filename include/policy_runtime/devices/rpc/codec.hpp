@@ -4,7 +4,7 @@
 #include <string_view>
 
 #include "policy_runtime/common/result.hpp"
-#include "policy_runtime/protocol/rpc/messages.hpp"
+#include "policy_runtime/devices/rpc/messages.hpp"
 
 namespace policy_runtime::rpc {
 

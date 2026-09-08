@@ -73,7 +73,7 @@ add_library(policy_runtime_core
     src/devices/cia402/state_machine.cpp
     src/devices/damiao/protocol.cpp
     src/devices/st3215/protocol.cpp
-    src/protocol/rpc/codec.cpp
+    src/devices/rpc/codec.cpp
     src/devices/cia402/axis.cpp
     src/devices/st3215/servo.cpp
     src/robot_io/daemon/daemon.cpp

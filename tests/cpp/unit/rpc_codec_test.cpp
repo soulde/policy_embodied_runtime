@@ -6,7 +6,8 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
-#include "policy_runtime/protocol/rpc/codec.hpp"
+#include "policy_runtime/devices/rpc/codec.hpp"
+#include "policy_runtime/devices/rpc/rpc.hpp"
 
 namespace {
 
@@ -19,6 +20,13 @@ std::string read_fixture(const std::string& relative_path) {
 }
 
 }  // namespace
+
+TEST(RpcDeviceTest, CarriesTransportAndEndpointConfiguration) {
+  const policy_runtime::RpcConfig config{
+      "policy", policy_runtime::RpcTransportKind::zmq, "ipc:///tmp/policy.sock"};
+  EXPECT_EQ(config.endpoint, "ipc:///tmp/policy.sock");
+  EXPECT_EQ(config.transport, policy_runtime::RpcTransportKind::zmq);
+}
 
 void expect_protocol_error(const nlohmann::json& message, std::string_view expected) {
   const auto decoded = policy_runtime::rpc::decode_envelope(message.dump());
