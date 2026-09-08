@@ -34,44 +34,23 @@ record before use.
 ## Service boundary and hardening
 
 Create a `robot-io` service account, then grant it access to `/dev/EtherCAT0`
-through a narrowly scoped udev rule. The packaged unit starts the daemon's
-direct service mode. The daemon creates
-`/run/policy-runtime/robot-io.sock` as an owner-only Unix `SOCK_SEQPACKET`
-listener, publishes the current nonzero incarnation in the owner-only
-`robot-io.generation` file, accepts one connection, and authenticates its peer
-with `SO_PEERCRED`. The connecting runtime host or supervisor must therefore
-run as `robot-io`, read the generation file, connect the socket, and pass that
-generation to `RobotIoClient`. Every service restart publishes a fresh
-generation, so mappings from an earlier incarnation are rejected.
+through a narrowly scoped udev rule. The packaged unit starts the daemon with
+the reviewed robot profile. In DDS mode the daemon and policy host discover
+each other through the configured CycloneDDS domain; no Unix socket, shared
+memory mapping, or generation file is created by this service.
 
-The packaged runtime host performs that handoff directly when given both
-service paths. It opens the generation file without following a final symlink,
-requires owner-only files owned by its effective user, connects an owner-only
-Unix `SOCK_SEQPACKET` socket, verifies the peer credentials and stable
-generation-file inode, and then lets the IPC setup handshake validate the
-published generation:
+Start the host with the same robot profile and DDS configuration:
 
 ```bash
 sudo -u robot-io policy-runtime-host \
   --policy-profile /path/to/reviewed-policy-profile.json \
-  --robot-profile /usr/share/policy-runtime/robot_profiles/elmo_gold_example.json \
-  --robot-io-socket /run/policy-runtime/robot-io.sock \
-  --robot-io-generation-file /run/policy-runtime/robot-io.generation
+  --robot-profile /usr/share/policy-runtime/robot_profiles/elmo_gold_example.json
 ```
 
-Build the host with compatible ZeroMQ/cppzmq development files for its policy
-RPC loop. Supervise the host separately from the daemon. After a daemon
-restart, restart the host so it opens the newly published generation file and
-performs a new handshake; never reuse the old mappings or a cached generation.
-
-The positional `ROBOT_PROFILE CONNECTED_SOCKET_FD GENERATION` daemon form
-remains available for supervisors that already create and pass a connected
-descriptor. The packaged unit uses the listener form directly and does not
-assume that an arbitrary descriptor such as FD 3 is connected.
-
-The runtime host's existing `--robot-io-fd` plus `--robot-io-generation` form
-also remains available to those supervisors. Descriptor mode and service-path
-mode are mutually exclusive.
+Build the host with compatible ZeroMQ/cppzmq development files when the policy
+RPC loop is enabled. Supervise the host separately from the daemon. Restart
+both processes after changing the DDS domain, robot id, topic allowlist, or
+profile topology.
 
 The supplied unit has `LimitRTPRIO=95`, `LimitMEMLOCK=infinity`,
 `Restart=on-failure`, and a private `/run/policy-runtime` directory. It keeps
@@ -87,9 +66,8 @@ sudo systemctl start robot-io-daemon
 sudo systemctl status robot-io-daemon
 ```
 
-Do not enable the unit at boot until socket ownership, generation discovery,
-the IPC handshake, and restart with a newly generated incarnation have been
-exercised on the target.
+Do not enable the unit at boot until DDS discovery, topic permissions, profile
+validation, and a controlled daemon restart have been exercised on the target.
 
 `robot-io-health` and `ethercat-cycle-stats` currently have a deliberately
 safe failure mode: `--help` works, while a normal invocation reports
