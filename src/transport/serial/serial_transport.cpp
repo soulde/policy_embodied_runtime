@@ -109,7 +109,7 @@ class SerialTransport::Impl {
   explicit Impl(SerialConfig value) : config(std::move(value)) {}
 
   struct Frame {
-    ChannelId channel{};
+    SerialChannelId channel{};
     std::size_t size{};
     std::array<std::byte, kMaximumFrameStorage> data{};
   };
@@ -544,6 +544,22 @@ void SerialTransport::close() noexcept {
 
 void SerialTransport::request_stop() noexcept { impl_->request_stop(); }
 
+void SerialTransport::receive_once() noexcept {
+  try {
+    std::scoped_lock io_lock(impl_->io_mutex);
+    if (!impl_->opened.load(std::memory_order_acquire) || impl_->fd < 0) {
+      impl_->publish_error(SerialError::closed);
+      return;
+    }
+    const auto receive_error = impl_->receive_one(std::chrono::milliseconds{0});
+    if (receive_error != SerialError::timeout) {
+      impl_->publish_error(receive_error);
+    }
+  } catch (...) {
+    impl_->publish_error(SerialError::internal);
+  }
+}
+
 TransportHealth SerialTransport::health() const noexcept {
   return impl_->health.load(std::memory_order_acquire);
 }
@@ -596,7 +612,7 @@ void SerialTransport::cycle(const CycleContext&) noexcept {
   }
 }
 
-Result<void> SerialTransport::write(ChannelId channel,
+Result<void> SerialTransport::write(SerialChannelId channel,
                                     std::span<const std::byte> data) {
   if (!impl_->opened.load(std::memory_order_acquire)) {
     return Result<void>::failure(
@@ -623,7 +639,7 @@ Result<void> SerialTransport::write(ChannelId channel,
   return Result<void>::success();
 }
 
-Result<std::size_t> SerialTransport::read(ChannelId channel,
+Result<std::size_t> SerialTransport::read(SerialChannelId channel,
                                           std::span<std::byte> buffer) {
   if (!impl_->opened.load(std::memory_order_acquire)) {
     return Result<std::size_t>::failure(

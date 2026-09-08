@@ -31,7 +31,7 @@ include/policy_runtime/profiles/       robot/policy configuration types
 include/policy_runtime/transport/      lifecycle and scheduling interfaces
 include/policy_runtime/protocol/cia402 CiA 402 state and PDO codecs
 include/policy_runtime/robot_io/       snapshots, IPC, daemon, scheduler, safety
-include/policy_runtime/robot/devices/  CiA402Axis and later ST3215 devices
+include/policy_runtime/devices/  CiA402Axis and later ST3215 devices
 include/policy_runtime/runtime/        policy host and RobotIoClient
 src/                                   one implementation file per interface
 apps/                                  two executable entry points
@@ -268,8 +268,8 @@ git commit -m "Port runtime profile loading to C++"
 - Create: `include/policy_runtime/transport/frame_transport.hpp`
 - Create: `include/policy_runtime/transport/cyclic_transport.hpp`
 - Create: `include/policy_runtime/transport/object_dictionary_transport.hpp`
-- Create: `include/policy_runtime/robot_io/transport_scheduler.hpp`
-- Create: `src/robot_io/transport_scheduler.cpp`
+- Create: `include/policy_runtime/robot_io/daemon/transport_scheduler.hpp`
+- Create: `src/robot_io/daemon/transport_scheduler.cpp`
 - Create: `tests/cpp/unit/transport_scheduler_test.cpp`
 
 **Interfaces:**
@@ -412,9 +412,9 @@ git commit -m "Add versioned robot I/O IPC"
 - Create: `include/policy_runtime/protocol/cia402/state_machine.hpp`
 - Create: `include/policy_runtime/protocol/cia402/pdo.hpp`
 - Create: `include/policy_runtime/protocol/cia402/units.hpp`
-- Create: `include/policy_runtime/robot/devices/cia402/axis.hpp`
+- Create: `include/policy_runtime/devices/cia402/axis.hpp`
 - Create: `src/protocol/cia402/state_machine.cpp`
-- Create: `src/robot/devices/cia402/axis.cpp`
+- Create: `src/devices/cia402/axis.cpp`
 - Create: `tests/cpp/unit/cia402_state_machine_test.cpp`
 - Create: `tests/cpp/unit/cia402_axis_test.cpp`
 
@@ -467,7 +467,7 @@ ctest --test-dir build -R 'cia402_(state_machine|axis)_test' --output-on-failure
 - [ ] **Step 5: Commit**
 
 ```bash
-git add include/policy_runtime/protocol/cia402 include/policy_runtime/robot/devices/cia402 src/protocol/cia402 src/robot/devices/cia402 tests/cpp/unit/cia402_*
+git add include/policy_runtime/protocol/cia402 include/policy_runtime/devices/cia402 src/protocol/cia402 src/devices/cia402 tests/cpp/unit/cia402_*
 git commit -m "Implement CiA 402 axis control"
 ```
 
@@ -542,12 +542,12 @@ git commit -m "Add IgH EtherCAT transport"
 ### Task 8: Robot I/O Daemon, Real-Time Loop, and Safety
 
 **Files:**
-- Create: `include/policy_runtime/robot_io/daemon.hpp`
-- Create: `include/policy_runtime/robot_io/realtime_loop.hpp`
-- Create: `include/policy_runtime/robot_io/safety_supervisor.hpp`
-- Create: `src/robot_io/daemon.cpp`
-- Create: `src/robot_io/realtime_loop.cpp`
-- Create: `src/robot_io/safety_supervisor.cpp`
+- Create: `include/policy_runtime/robot_io/daemon/daemon.hpp`
+- Create: `include/policy_runtime/robot_io/daemon/realtime_loop.hpp`
+- Create: `include/policy_runtime/robot_io/daemon/safety_supervisor.hpp`
+- Create: `src/robot_io/daemon/daemon.cpp`
+- Create: `src/robot_io/daemon/realtime_loop.cpp`
+- Create: `src/robot_io/daemon/safety_supervisor.cpp`
 - Create: `apps/robot_io_daemon_main.cpp`
 - Create: `tests/cpp/integration/robot_io_daemon_test.cpp`
 
@@ -673,10 +673,10 @@ git commit -m "Port policy runtime host to C++"
 **Files:**
 - Create: `include/policy_runtime/transport/serial/serial_transport.hpp`
 - Create: `include/policy_runtime/protocol/st3215/protocol.hpp`
-- Create: `include/policy_runtime/robot/devices/st3215/servo.hpp`
+- Create: `include/policy_runtime/devices/st3215/servo.hpp`
 - Create: `src/transport/serial/serial_transport.cpp`
 - Create: `src/protocol/st3215/protocol.cpp`
-- Create: `src/robot/devices/st3215/servo.cpp`
+- Create: `src/devices/st3215/servo.cpp`
 - Create: `tests/cpp/unit/st3215_test.cpp`
 - Create: `tests/cpp/integration/virtual_serial_test.cpp`
 
@@ -715,7 +715,7 @@ pytest policy_embodied_runtime/tests/test_st3215.py policy_embodied_runtime/test
 - [ ] **Step 5: Commit**
 
 ```bash
-git add include/policy_runtime/transport/serial include/policy_runtime/protocol/st3215 include/policy_runtime/robot/devices/st3215 src/transport/serial src/protocol/st3215 src/robot/devices/st3215 tests/cpp/unit/st3215_test.cpp tests/cpp/integration/virtual_serial_test.cpp
+git add include/policy_runtime/transport/serial include/policy_runtime/protocol/st3215 include/policy_runtime/devices/st3215 src/transport/serial src/protocol/st3215 src/devices/st3215 tests/cpp/unit/st3215_test.cpp tests/cpp/integration/virtual_serial_test.cpp
 git commit -m "Move serial robot I/O into daemon"
 ```
 

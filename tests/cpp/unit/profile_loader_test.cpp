@@ -18,6 +18,7 @@ namespace {
 using Json = nlohmann::json;
 using policy_runtime::ErrorCode;
 using policy_runtime::profiles::Cia402Mode;
+using policy_runtime::profiles::RobotIoBackend;
 using policy_runtime::profiles::load_policy_profile;
 using policy_runtime::profiles::load_robot_profile;
 
@@ -60,7 +61,7 @@ class TemporaryJsonFile {
 
 void expect_robot_rejected(const Json& value) {
   const TemporaryJsonFile file(value);
-  const auto profile = load_robot_profile(file.path());
+  auto profile = load_robot_profile(file.path());
   EXPECT_FALSE(profile.has_value());
   if (!profile.has_value()) {
     EXPECT_EQ(profile.error().code, ErrorCode::invalid_argument);
@@ -83,7 +84,38 @@ Json dummy_policy() {
       "policy_embodied_runtime/examples/policy_profiles/dummy_policy_profile.json");
 }
 
+Json dds_profile() {
+  auto profile = read_json("configs/robot_profiles/elmo_gold_example.json");
+  profile["dds"] = {
+      {"backend", "dds"},
+      {"robot_id", "arm_a"},
+      {"local_domain_id", 0},
+      {"cyclone_config", "/etc/policy-runtime/cyclonedds.xml"},
+      {"sensor_queue_capacity", 64},
+      {"external", {{"enabled", false}, {"domain_id", 10}, {"topics", Json::array()}}}};
+  return profile;
+}
+
 }  // namespace
+
+TEST(ProfileLoaderTest, ParsesStaticDdsTopologyAndExternalAllowlist) {
+  const TemporaryJsonFile file(dds_profile());
+  auto profile = load_robot_profile(file.path());
+  ASSERT_TRUE(profile.has_value()) << profile.error().message;
+  EXPECT_EQ(profile.value().dds.backend, RobotIoBackend::dds);
+  EXPECT_EQ(profile.value().dds.robot_id, "arm_a");
+  EXPECT_EQ(profile.value().dds.local_domain_id, 0U);
+  EXPECT_EQ(profile.value().dds.sensor_queue_capacity, 64U);
+  EXPECT_FALSE(profile.value().dds.external.enabled);
+}
+
+TEST(ProfileLoaderTest, RejectsCommandTopicInExternalAllowlist) {
+  auto json = dds_profile();
+  json["dds"]["external"]["enabled"] = true;
+  json["dds"]["external"]["topics"] = Json::array(
+      {"robot_io_arm_a_actuator_joint_1_target_command"});
+  expect_robot_rejected(json);
+}
 
 TEST(ProfileLoaderTest, LoadsExistingRobotProfileAndStringifiesArgs) {
   auto profile = load_robot_profile(source_path(

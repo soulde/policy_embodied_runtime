@@ -4,7 +4,7 @@
 
 #include <gtest/gtest.h>
 
-#include "policy_runtime/transport/ethercat/elmo_gold.hpp"
+#include "policy_runtime/devices/cia402/elmo_gold.hpp"
 
 namespace {
 

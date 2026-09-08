@@ -13,9 +13,13 @@
 #include <gtest/gtest.h>
 
 #include "policy_runtime/profiles/robot_profile.hpp"
-#include "policy_runtime/protocol/st3215/protocol.hpp"
-#include "policy_runtime/robot/devices/st3215/servo.hpp"
-#include "policy_runtime/robot_io/transport_scheduler.hpp"
+#include "policy_runtime/devices/st3215/protocol.hpp"
+#include "policy_runtime/devices/st3215/servo.hpp"
+#include "policy_runtime/devices/st3215/st3215.hpp"
+#include "policy_runtime/devices/st3215/actuator.hpp"
+#include "policy_runtime/devices/st3215/sensor.hpp"
+#include "policy_runtime/robot_io/daemon/transport_scheduler.hpp"
+#include "policy_runtime/transport/serial/serial_transport.hpp"
 
 namespace {
 
@@ -39,8 +43,10 @@ Bytes bytes(std::initializer_list<std::uint8_t> values) {
   return output;
 }
 
-class RecordingFrameTransport final : public policy_runtime::FrameTransport {
+class RecordingSerialTransport final : public policy_runtime::SerialTransport {
  public:
+  RecordingSerialTransport() : SerialTransport(policy_runtime::SerialConfig{}) {}
+
   policy_runtime::Result<void> open() override {
     ++open_calls;
     open_.store(true, std::memory_order_release);
@@ -63,7 +69,7 @@ class RecordingFrameTransport final : public policy_runtime::FrameTransport {
   }
 
   policy_runtime::Result<void> write(
-      policy_runtime::ChannelId, std::span<const std::byte> data) override {
+      std::uint32_t, std::span<const std::byte> data) override {
     if (throw_on_write.load(std::memory_order_acquire)) {
       throw std::runtime_error("injected frame transport exception");
     }
@@ -75,7 +81,7 @@ class RecordingFrameTransport final : public policy_runtime::FrameTransport {
   }
 
   policy_runtime::Result<std::size_t> read(
-      policy_runtime::ChannelId, std::span<std::byte> buffer) override {
+      std::uint32_t, std::span<std::byte> buffer) override {
     std::scoped_lock lock(mutex_);
     physical_threads.push_back(std::this_thread::get_id());
     if (response.empty()) {
@@ -279,7 +285,7 @@ void pump_cycles(St3215Bus& bus, unsigned count) {
 }
 
 TEST(St3215Test, SharedBusUsesOneCycleOwnerForAllPhysicalIo) {
-  auto transport = std::make_shared<RecordingFrameTransport>();
+  auto transport = std::make_shared<RecordingSerialTransport>();
   transport->positions[1] = 100;
   transport->positions[2] = 200;
   auto first = std::make_shared<St3215Servo>(St3215ServoConfig{
@@ -323,7 +329,7 @@ TEST(St3215Test, RejectsStaleAndFutureCommandsAndStopsResendingExpiredEnable) {
   const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                           std::chrono::steady_clock::now().time_since_epoch())
                           .count();
-  auto transport = std::make_shared<RecordingFrameTransport>();
+  auto transport = std::make_shared<RecordingSerialTransport>();
   auto servo = std::make_shared<St3215Servo>(St3215ServoConfig{
       "freshness", 1, 1, 4095, 0, 0, 250ms, 20ms, 5ms});
   EXPECT_EQ(servo->stage_command(
@@ -367,7 +373,7 @@ TEST(St3215Test, RejectsStaleAndFutureCommandsAndStopsResendingExpiredEnable) {
 }
 
 TEST(St3215Test, PublishesDeviceErrorBeforeSuccessShapeValidation) {
-  auto transport = std::make_shared<RecordingFrameTransport>();
+  auto transport = std::make_shared<RecordingSerialTransport>();
   transport->status_error.store(4U, std::memory_order_release);
   auto servo = std::make_shared<St3215Servo>(St3215ServoConfig{
       "device-error", 1, 1, 4095, 0, 0, 250ms});
@@ -469,7 +475,7 @@ TEST(St3215Test, RegistryRejectsAWholeSnapshotBeforeStagingAnyServo) {
 }
 
 TEST(St3215Test, CycleContainsTransportExceptionsAndLatchesFault) {
-  auto transport = std::make_shared<RecordingFrameTransport>();
+  auto transport = std::make_shared<RecordingSerialTransport>();
   transport->throw_on_write.store(true, std::memory_order_release);
   auto servo = std::make_shared<St3215Servo>(St3215ServoConfig{
       "servo", 1, 1, 4095, 0, 0, 250ms});
@@ -492,7 +498,7 @@ TEST(St3215Test, CycleContainsTransportExceptionsAndLatchesFault) {
 }
 
 TEST(St3215Test, StopWakesAOneSecondServicePeriodWithoutWaitingForDeadline) {
-  auto transport = std::make_shared<RecordingFrameTransport>();
+  auto transport = std::make_shared<RecordingSerialTransport>();
   auto servo = std::make_shared<St3215Servo>(St3215ServoConfig{
       "bounded-stop", 1, 1, 4095, 0, 0, 250ms});
   St3215Bus bus{transport, St3215BusOptions{1s}};

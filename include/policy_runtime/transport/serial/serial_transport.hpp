@@ -8,7 +8,7 @@
 #include <span>
 #include <string>
 
-#include "policy_runtime/transport/frame_transport.hpp"
+#include "policy_runtime/transport/asynchronous_transport.hpp"
 
 namespace policy_runtime {
 
@@ -31,7 +31,9 @@ enum class SerialError : std::uint8_t {
   internal,
 };
 
-class SerialTransport final : public FrameTransport {
+using SerialChannelId = std::uint32_t;
+
+class SerialTransport : public AsynchronousTransport {
  public:
   explicit SerialTransport(SerialConfig config);
   ~SerialTransport() override;
@@ -39,17 +41,18 @@ class SerialTransport final : public FrameTransport {
   SerialTransport(const SerialTransport&) = delete;
   SerialTransport& operator=(const SerialTransport&) = delete;
 
-  Result<void> open() override;
-  void close() noexcept override;
-  void request_stop() noexcept override;
-  TransportHealth health() const noexcept override;
-  SchedulingClass scheduling_class() const noexcept override;
-  void cycle(const CycleContext& context) noexcept override;
+  virtual Result<void> open() override;
+  virtual void close() noexcept override;
+  virtual void request_stop() noexcept override;
+  virtual void receive_once() noexcept override;
+  virtual TransportHealth health() const noexcept override;
+  virtual SchedulingClass scheduling_class() const noexcept override;
+  virtual void cycle(const CycleContext& context) noexcept override;
 
-  Result<void> write(ChannelId channel,
-                     std::span<const std::byte> data) override;
-  Result<std::size_t> read(ChannelId channel,
-                           std::span<std::byte> buffer) override;
+  virtual Result<void> write(SerialChannelId channel,
+                             std::span<const std::byte> data);
+  virtual Result<std::size_t> read(SerialChannelId channel,
+                                   std::span<std::byte> buffer);
 
   SerialError last_error() const noexcept;
   std::uint64_t timeout_count() const noexcept;

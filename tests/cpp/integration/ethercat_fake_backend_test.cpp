@@ -20,7 +20,7 @@
 
 #include <gtest/gtest.h>
 
-#include "policy_runtime/transport/ethercat/elmo_gold.hpp"
+#include "policy_runtime/devices/cia402/elmo_gold.hpp"
 #include "policy_runtime/transport/ethercat/master.hpp"
 
 namespace allocation_probe {
@@ -457,6 +457,25 @@ TEST(EthercatFakeBackendTest, ConfiguresAndBindsBeforeActivation) {
   EXPECT_TRUE(master.pdo_handles()[0].target_position.is_bound());
   EXPECT_FALSE(master.pdo_handles()[0].target_velocity.is_bound());
   EXPECT_FALSE(master.pdo_handles()[0].target_torque.is_bound());
+}
+
+TEST(EthercatFakeBackendTest, BindsAndExposesNonCia402PdoFields) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
+  ASSERT_TRUE(master.register_process_image_field(
+      EthercatSlaveAddress{0U, 0U}, ObjectAddress{0x2000U, 0U},
+      policy_runtime::PdoDirection::input, 32U, 100U)
+                  .has_value());
+  ASSERT_TRUE(master.register_process_image_field(
+      EthercatSlaveAddress{0U, 0U}, ObjectAddress{0x2001U, 0U},
+      policy_runtime::PdoDirection::output, 16U, 101U)
+                  .has_value());
+
+  ASSERT_TRUE(master.open().has_value());
+  ASSERT_TRUE(master.write_process_image_field(101U, 0x1234U));
+  EXPECT_EQ(master.read_process_image_field(100U), 0U);
+  EXPECT_EQ(master.process_image_field_count(), 2U);
+  EXPECT_EQ(backend->bind_count(), 9U);
 }
 
 TEST(EthercatFakeBackendTest, StagesTwoAliasesWithTheSameRelativePositionIndependently) {

@@ -69,15 +69,17 @@ TEST(SocketCanTransportTest, RoundTripsOneFramePerCall) {
   close(fds[1]);
 }
 
-TEST(SocketCanTransportTest, EmptyReadIsReportedAsIoFault) {
+TEST(SocketCanTransportTest, EmptyReadIsReportedAsNoFrame) {
   int fds[2];
   ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
   set_nonblocking(fds[0]);
   set_nonblocking(fds[1]);
 
   SocketCanTransport transport(fds[0]);
-  // EAGAIN on an empty nonblocking descriptor surfaces as a fault result.
-  EXPECT_FALSE(transport.receive_frame().has_value());
+  // An empty nonblocking descriptor is a normal receive-loop condition.
+  auto empty = transport.receive_frame();
+  ASSERT_TRUE(empty.has_value());
+  EXPECT_FALSE(empty.value().has_value());
 
   close(fds[0]);
   close(fds[1]);

@@ -46,8 +46,8 @@
 **Files:**
 - Modify: `include/policy_runtime/runtime/runtime_host.hpp`
 - Modify: `src/runtime/runtime_host.cpp`
-- Modify: `include/policy_runtime/robot_io/daemon.hpp`
-- Modify: `src/robot_io/daemon.cpp`
+- Modify: `include/policy_runtime/robot_io/daemon/daemon.hpp`
+- Modify: `src/robot_io/daemon/daemon.cpp`
 - Modify: `apps/robot_io_daemon_main.cpp`
 - Test: `tests/cpp/integration/runtime_host_test.cpp`
 - Test: `tests/cpp/integration/robot_io_daemon_test.cpp`
@@ -67,11 +67,11 @@
 **Files:**
 - Modify: `include/policy_runtime/profiles/robot_profile.hpp`
 - Modify: `src/profiles/loader.cpp`
-- Modify: `include/policy_runtime/robot/devices/st3215/servo.hpp`
-- Modify: `src/robot/devices/st3215/servo.cpp`
-- Modify: `include/policy_runtime/robot_io/safety_supervisor.hpp`
-- Modify: `src/robot_io/safety_supervisor.cpp`
-- Modify: `src/robot_io/daemon.cpp`
+- Modify: `include/policy_runtime/devices/st3215/servo.hpp`
+- Modify: `src/devices/st3215/servo.cpp`
+- Modify: `include/policy_runtime/robot_io/daemon/safety_supervisor.hpp`
+- Modify: `src/robot_io/daemon/safety_supervisor.cpp`
+- Modify: `src/robot_io/daemon/daemon.cpp`
 - Test: `tests/cpp/unit/profile_loader_test.cpp`
 - Test: `tests/cpp/unit/st3215_test.cpp`
 - Test: `tests/cpp/integration/virtual_serial_test.cpp`
@@ -89,8 +89,8 @@
 ### Task 4: Transaction Isolation, Status Errors, and ACK Policy
 
 **Files:**
-- Modify: `include/policy_runtime/robot/devices/st3215/servo.hpp`
-- Modify: `src/robot/devices/st3215/servo.cpp`
+- Modify: `include/policy_runtime/devices/st3215/servo.hpp`
+- Modify: `src/devices/st3215/servo.cpp`
 - Modify: `src/transport/serial/serial_transport.cpp`
 - Test: `tests/cpp/unit/st3215_test.cpp`
 - Test: `tests/cpp/integration/virtual_serial_test.cpp`
@@ -110,7 +110,7 @@
 - Modify: `include/policy_runtime/transport/serial/serial_transport.hpp`
 - Modify: `src/transport/serial/serial_transport.cpp`
 - Modify: `src/profiles/loader.cpp`
-- Modify: `src/robot/devices/st3215/servo.cpp`
+- Modify: `src/devices/st3215/servo.cpp`
 - Test: `tests/cpp/integration/virtual_serial_test.cpp`
 - Test: `tests/cpp/unit/profile_loader_test.cpp`
 - Test: `tests/cpp/unit/st3215_test.cpp`

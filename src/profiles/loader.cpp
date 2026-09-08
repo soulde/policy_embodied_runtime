@@ -21,6 +21,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "policy_runtime/robot_io/dds/topic_registry.hpp"
+
 namespace policy_runtime::profiles {
 namespace {
 
@@ -1311,6 +1313,142 @@ bool validate_bindings(const std::vector<RobotPolicyBinding>& bindings,
   return true;
 }
 
+bool parse_domain_id(const Json& object, std::string_view key,
+                     std::uint32_t& output, std::string_view section,
+                     std::string& error) {
+  const auto* value = member(object, key);
+  if (value == nullptr) {
+    return true;
+  }
+  if (!value->is_number_unsigned()) {
+    error = std::string(section) + "." + std::string(key) +
+            " must be an unsigned integer";
+    return false;
+  }
+  const auto parsed = value->get<std::uint64_t>();
+  if (parsed > 232U) {
+    error = std::string(section) + "." + std::string(key) +
+            " must be in [0, 232]";
+    return false;
+  }
+  output = static_cast<std::uint32_t>(parsed);
+  return true;
+}
+
+bool parse_dds_config(const Json& root, DdsConfig& output,
+                      std::string& error) {
+  const auto* dds = member(root, "dds");
+  if (dds == nullptr) {
+    return true;
+  }
+  if (!dds->is_object() ||
+      !only_keys(*dds,
+                 {"backend", "robot_id", "local_domain_id", "cyclone_config",
+                  "sensor_queue_capacity", "external"},
+                 "dds", error)) {
+    if (error.empty()) {
+      error = "dds must be an object";
+    }
+    return false;
+  }
+  const auto backend = required_string(*dds, "backend", "dds", error, true);
+  if (!backend) {
+    return false;
+  }
+  if (*backend == "unix_shm") {
+    output.backend = RobotIoBackend::unix_shm;
+  } else if (*backend == "dds") {
+    output.backend = RobotIoBackend::dds;
+  } else {
+    error = "dds.backend must be 'unix_shm' or 'dds'";
+    return false;
+  }
+  if (output.backend == RobotIoBackend::dds) {
+    const auto robot_id = required_string(*dds, "robot_id", "dds", error, true);
+    if (!robot_id) {
+      return false;
+    }
+    output.robot_id = trim(*robot_id);
+  }
+  if (!parse_domain_id(*dds, "local_domain_id", output.local_domain_id,
+                       "dds", error)) {
+    return false;
+  }
+  if (const auto* config = member(*dds, "cyclone_config");
+      config != nullptr) {
+    if (!config->is_string() || is_blank(config->get_ref<const std::string&>())) {
+      error = "dds.cyclone_config must be a nonempty string";
+      return false;
+    }
+    output.cyclone_config = config->get<std::string>();
+  }
+  if (const auto* capacity = member(*dds, "sensor_queue_capacity");
+      capacity != nullptr) {
+    if (!capacity->is_number_unsigned()) {
+      error = "dds.sensor_queue_capacity must be an unsigned integer";
+      return false;
+    }
+    const auto parsed = capacity->get<std::uint64_t>();
+    constexpr std::array<std::uint64_t, 5> supported{16U, 32U, 64U, 128U,
+                                                     256U};
+    if (std::find(supported.begin(), supported.end(), parsed) ==
+        supported.end()) {
+      error =
+          "dds.sensor_queue_capacity must be one of 16, 32, 64, 128, or 256";
+      return false;
+    }
+    output.sensor_queue_capacity = static_cast<std::size_t>(parsed);
+  }
+  const auto* external = member(*dds, "external");
+  if (external == nullptr) {
+    return true;
+  }
+  if (!external->is_object() ||
+      !only_keys(*external, {"enabled", "domain_id", "topics"},
+                 "dds.external", error)) {
+    if (error.empty()) {
+      error = "dds.external must be an object";
+    }
+    return false;
+  }
+  if (const auto* enabled = member(*external, "enabled"); enabled != nullptr) {
+    if (!enabled->is_boolean()) {
+      error = "dds.external.enabled must be a boolean";
+      return false;
+    }
+    output.external.enabled = enabled->get<bool>();
+  }
+  if (!parse_domain_id(*external, "domain_id", output.external.domain_id,
+                       "dds.external", error)) {
+    return false;
+  }
+  if (const auto* topics = member(*external, "topics"); topics != nullptr) {
+    if (!topics->is_array()) {
+      error = "dds.external.topics must be an array";
+      return false;
+    }
+    std::set<std::string> unique;
+    for (const auto& topic : *topics) {
+      if (!topic.is_string() || is_blank(topic.get_ref<const std::string&>())) {
+        error = "dds.external.topics entries must be nonempty strings";
+        return false;
+      }
+      auto name = topic.get<std::string>();
+      if (!unique.insert(name).second) {
+        error = "dds.external.topics contains a duplicate";
+        return false;
+      }
+      output.external.topics.push_back(std::move(name));
+    }
+  }
+  if (output.external.enabled &&
+      output.external.domain_id == output.local_domain_id) {
+    error = "dds external and local domain IDs must differ";
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 Result<RobotProfile> load_robot_profile(const std::filesystem::path& path) {
@@ -1326,6 +1464,9 @@ Result<RobotProfile> load_robot_profile(const std::filesystem::path& path) {
   std::string error;
   if (!parse_device_list(*root, "sensors", "sensor", profile.sensors, error) ||
       !parse_device_list(*root, "actuators", "actuator", profile.actuators, error)) {
+    return invalid<RobotProfile>(std::move(error));
+  }
+  if (!parse_dds_config(*root, profile.dds, error)) {
     return invalid<RobotProfile>(std::move(error));
   }
   std::set<std::string> names;
@@ -1349,6 +1490,26 @@ Result<RobotProfile> load_robot_profile(const std::filesystem::path& path) {
   if (!derive_damiao_motors(profile.sensors, profile.actuators,
                             profile.damiao_motors, error)) {
     return invalid<RobotProfile>(std::move(error));
+  }
+  if (profile.dds.backend == RobotIoBackend::dds) {
+    auto registry =
+        robot_io::dds::build_dds_topic_registry(profile, profile.dds.robot_id);
+    if (!registry.has_value()) {
+      return invalid<RobotProfile>(registry.error().message);
+    }
+    std::set<std::string> externally_publishable;
+    for (const auto& descriptor : registry.value()) {
+      if (descriptor.kind == robot_io::dds::DdsTopicKind::state ||
+          descriptor.kind == robot_io::dds::DdsTopicKind::health) {
+        externally_publishable.insert(descriptor.topic_name);
+      }
+    }
+    for (const auto& topic : profile.dds.external.topics) {
+      if (!externally_publishable.contains(topic)) {
+        return invalid<RobotProfile>(
+            "dds.external.topics may contain only configured sensor or health topics");
+      }
+    }
   }
   return Result<RobotProfile>::success(std::move(profile));
 }

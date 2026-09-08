@@ -5,7 +5,8 @@
 #include <set>
 #include <utility>
 
-#include "policy_runtime/transport/ethercat/elmo_gold.hpp"
+#include "policy_runtime/devices/cia402/ethercat_binding.hpp"
+#include "policy_runtime/devices/cia402/elmo_gold.hpp"
 
 namespace policy_runtime {
 namespace {
@@ -507,85 +508,27 @@ Result<void> EthercatMaster::open() {
     return initialized;
   }
 
-  std::vector<Cia402PdoHandles> handles(axes_.size());
+  std::vector<Cia402PdoHandles> handles;
+  handles.reserve(axes_.size());
   for (std::size_t axis_index = 0; axis_index < axes_.size(); ++axis_index) {
     const auto& configuration = axes_[axis_index];
-    const auto slave = EthercatSlaveAddress{configuration.axis.alias,
-                                            configuration.axis.position};
-    auto startup_array =
-        ElmoGoldDeviceDescription::startup_sdos(configuration.axis.mode);
-    std::vector<SdoDownloadRequest> startup(startup_array.begin(), startup_array.end());
-    startup.insert(startup.end(), configuration.startup_parameters.begin(),
-                   configuration.startup_parameters.end());
-    const auto slave_configuration = EthercatSlaveConfiguration{
-        slave,
-        EthercatDeviceIdentity{configuration.axis.vendor_id,
-                               configuration.axis.product_code,
-                               configuration.axis.revision},
-        ElmoGoldDeviceDescription::rx_pdo_definition(configuration.axis.mode),
-        ElmoGoldDeviceDescription::feedback_pdos(),
-        DistributedClockConfiguration{ElmoGoldDeviceDescription::assign_activate(),
-                                      ElmoGoldDeviceDescription::sync0_cycle_ns(), 0},
-        startup};
-    auto configured = backend_->configure_slave(slave_configuration);
+    auto configured = Cia402EthercatBinding::configure_axis(*backend_, configuration);
     if (!configured.has_value()) {
       backend_->deactivate();
-      return configured;
+      return Result<void>::failure(configured.error());
     }
+    handles.push_back(std::move(configured.value()));
+  }
 
-    auto& axis_handles = handles[axis_index];
-    const auto bind_input = [&]<class T>(ObjectAddress address, std::uint8_t bits,
-                                         TypedPdoField<T>& field) {
-      auto location = backend_->bind_pdo_entry(slave, address, bits);
-      if (!location.has_value()) {
-        return Result<void>::failure(location.error());
-      }
-      return field.bind(location.value());
-    };
-    auto result =
-        bind_input(ObjectAddress{0x6041U, 0U}, 16U, axis_handles.status_word);
-    if (result.has_value()) {
-      result = bind_input(ObjectAddress{0x6061U, 0U}, 8U,
-                          axis_handles.mode_display);
-    }
-    if (result.has_value()) {
-      result = bind_input(ObjectAddress{0x6064U, 0U}, 32U,
-                          axis_handles.actual_position);
-    }
-    if (result.has_value()) {
-      result = bind_input(ObjectAddress{0x606CU, 0U}, 32U,
-                          axis_handles.actual_velocity);
-    }
-    if (result.has_value()) {
-      result = bind_input(ObjectAddress{0x6077U, 0U}, 16U,
-                          axis_handles.actual_torque);
-    }
-    if (result.has_value()) {
-      result = bind_input(ObjectAddress{0x6040U, 0U}, 16U,
-                          axis_handles.control_word);
-    }
-    if (!result.has_value()) {
+  for (auto& field : process_image_fields_) {
+    auto location = backend_->bind_pdo_entry(
+        field.slave, field.address, field.bit_length);
+    if (!location.has_value()) {
       backend_->deactivate();
-      return result;
+      return Result<void>::failure(location.error());
     }
-
-    Result<void> target = Result<void>::failure(
-        {ErrorCode::internal, "unreachable static CiA 402 mode"});
-    switch (configuration.axis.mode) {
-      case profiles::Cia402Mode::csp:
-        target = bind_input({0x607AU, 0U}, 32U, axis_handles.target_position);
-        break;
-      case profiles::Cia402Mode::csv:
-        target = bind_input({0x60FFU, 0U}, 32U, axis_handles.target_velocity);
-        break;
-      case profiles::Cia402Mode::cst:
-        target = bind_input({0x6071U, 0U}, 16U, axis_handles.target_torque);
-        break;
-    }
-    if (!target.has_value()) {
-      backend_->deactivate();
-      return target;
-    }
+    field.location = location.value();
+    field.bound = true;
   }
 
   auto activated = backend_->activate();
@@ -721,22 +664,14 @@ void EthercatMaster::cycle(const CycleContext&) noexcept {
     for (std::size_t axis_index = 0; axis_index < pdo_handles_.size(); ++axis_index) {
       const auto& handles = pdo_handles_[axis_index];
       auto& pdo = pdo_views_[axis_index];
-      const auto status_word = handles.status_word.read(image);
-      const auto mode_display = handles.mode_display.read(image);
-      const auto actual_position = handles.actual_position.read(image);
-      const auto actual_velocity = handles.actual_velocity.read(image);
-      const auto actual_torque = handles.actual_torque.read(image);
-      valid_image = valid_image && status_word.has_value() && mode_display.has_value() &&
-                    actual_position.has_value() && actual_velocity.has_value() &&
-                    actual_torque.has_value();
-      if (status_word && mode_display && actual_position && actual_velocity && actual_torque) {
-        pdo.status_word = *status_word;
-        pdo.mode_display = *mode_display;
-        pdo.actual_position = *actual_position;
-        pdo.actual_velocity = *actual_velocity;
-        pdo.actual_torque = *actual_torque;
-      }
+      valid_image = Cia402EthercatBinding::read_inputs(handles, image, pdo) &&
+                    valid_image;
     }
+  }
+
+  if (process_image_handler_ != nullptr) {
+    process_image_handler_(process_image_handler_context_, image, domain,
+                           valid_image);
   }
 
   if (valid_image && cycle_handler_ != nullptr) {
@@ -756,31 +691,10 @@ void EthercatMaster::cycle(const CycleContext&) noexcept {
   for (std::size_t axis_index = 0; axis_index < pdo_handles_.size(); ++axis_index) {
     const auto& handles = pdo_handles_[axis_index];
     const auto& pdo = pdo_views_[axis_index];
-    const auto control_word = outputs_enabled ? pdo.control_word : 0U;
-    outputs_written = handles.control_word.write(image, control_word) && outputs_written;
-    switch (axes_[axis_index].axis.mode) {
-      case profiles::Cia402Mode::csp:
-        outputs_written = handles.target_position.write(
-                              image, outputs_enabled
-                                         ? pdo.target_position
-                                         : std::int32_t{0}) &&
-                          outputs_written;
-        break;
-      case profiles::Cia402Mode::csv:
-        outputs_written = handles.target_velocity.write(
-                              image, outputs_enabled
-                                         ? pdo.target_velocity
-                                         : std::int32_t{0}) &&
-                          outputs_written;
-        break;
-      case profiles::Cia402Mode::cst:
-        outputs_written = handles.target_torque.write(
-                              image, outputs_enabled
-                                         ? pdo.target_torque
-                                         : std::int16_t{0}) &&
-                          outputs_written;
-        break;
-    }
+    outputs_written = Cia402EthercatBinding::write_outputs(
+                          handles, image, pdo, axes_[axis_index].axis.mode,
+                          outputs_enabled) &&
+                      outputs_written;
   }
 
   if (!mailboxes_.empty()) {
@@ -828,6 +742,75 @@ Result<void> EthercatMaster::register_cyclic_output(CyclicField field) {
   return register_field(field, false);
 }
 
+Result<void> EthercatMaster::register_process_image_field(
+    EthercatSlaveAddress slave, ObjectAddress address, PdoDirection direction,
+    std::uint8_t bit_length, CyclicFieldId id) {
+  if (admission_is_open() || id == 0U ||
+      (bit_length != 8U && bit_length != 16U && bit_length != 32U)) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument,
+         "process-image fields require a unique id and 8/16/32-bit width"});
+  }
+  const auto duplicate = std::any_of(
+      process_image_fields_.begin(), process_image_fields_.end(),
+      [id](const auto& field) { return field.id == id; });
+  if (duplicate) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument, "process-image field id is already registered"});
+  }
+  process_image_fields_.push_back(
+      EthercatProcessImageField{slave, address, direction, bit_length, id});
+  return Result<void>::success();
+}
+
+std::optional<std::uint32_t> EthercatMaster::read_process_image_field(
+    CyclicFieldId id) const noexcept {
+  const auto found = std::find_if(
+      process_image_fields_.begin(), process_image_fields_.end(),
+      [id](const auto& field) { return field.id == id; });
+  if (found == process_image_fields_.end() || !found->bound ||
+      found->direction != PdoDirection::input) {
+    return std::nullopt;
+  }
+  const auto image = backend_->process_image();
+  if (found->location.byte_offset > image.size() ||
+      found->bit_length / 8U > image.size() - found->location.byte_offset) {
+    return std::nullopt;
+  }
+  std::uint32_t value{};
+  for (std::size_t index = 0U; index < found->bit_length / 8U; ++index) {
+    value |= static_cast<std::uint32_t>(std::to_integer<unsigned char>(
+                  image[found->location.byte_offset + index]))
+             << (index * 8U);
+  }
+  return value;
+}
+
+bool EthercatMaster::write_process_image_field(CyclicFieldId id,
+                                                std::uint32_t value) noexcept {
+  const auto found = std::find_if(
+      process_image_fields_.begin(), process_image_fields_.end(),
+      [id](const auto& field) { return field.id == id; });
+  if (found == process_image_fields_.end() || !found->bound ||
+      found->direction != PdoDirection::output) {
+    return false;
+  }
+  auto image = backend_->process_image();
+  if (found->location.byte_offset > image.size() ||
+      found->bit_length / 8U > image.size() - found->location.byte_offset) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < found->bit_length / 8U; ++index) {
+    image[found->location.byte_offset + index] = std::byte{
+        static_cast<unsigned char>(value >> (index * 8U))};
+  }
+  return true;
+}
+
+std::size_t EthercatMaster::process_image_field_count() const noexcept {
+  return process_image_fields_.size();
+}
+
 Result<void> EthercatMaster::set_cycle_handler(CycleHandler handler, void* context) {
   if (admission_is_open() || handler == nullptr ||
       supervised_cycle_handler_ != nullptr) {
@@ -836,6 +819,19 @@ Result<void> EthercatMaster::set_cycle_handler(CycleHandler handler, void* conte
   }
   cycle_handler_ = handler;
   cycle_handler_context_ = context;
+  return Result<void>::success();
+}
+
+Result<void> EthercatMaster::set_process_image_handler(
+    ProcessImageHandler handler, void* context) {
+  if (admission_is_open() || handler == nullptr ||
+      (cycle_handler_ != nullptr && cycle_handler_context_ != context)) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument,
+         "process-image handler must be installed before open"});
+  }
+  process_image_handler_ = handler;
+  process_image_handler_context_ = context;
   return Result<void>::success();
 }
 
@@ -870,7 +866,7 @@ std::span<const Cia402PdoHandles> EthercatMaster::pdo_handles() const noexcept {
   return pdo_handles_;
 }
 
-ObjectDictionaryTransport& EthercatMaster::mailbox(std::size_t axis_index) {
+EthercatMailbox& EthercatMaster::mailbox(std::size_t axis_index) {
   return *mailboxes_.at(axis_index);
 }
 

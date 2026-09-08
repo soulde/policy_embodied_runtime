@@ -18,11 +18,12 @@ output. Recovery is performed by process restart.
 
 ## Layering
 
-`DamiaoMotorDevice` exposes the common Sensor/Actuator interface. It delegates
-physical command/feedback conversion to `DamiaoProtocol`, which emits and
-consumes a canonical message. `SocketCanTransport` maps that message to CAN
-ID/DLC/data, while `VirtualSerialTransport` maps it to the adapter's framed
-serial stream. Transport code contains no motor semantics.
+`DamiaoSensor` and `DamiaoActuator` independently expose the directional
+Sensor/Actuator interfaces. They delegate physical command/feedback conversion
+to the Damiao codec. `SocketCanTransport` maps raw frames to CAN
+ID/DLC/data, while `VirtualSerialTransport` maps them to the adapter's framed
+serial stream. Transport code contains no motor semantics, and a single
+physical transport may carry multiple protocols.
 
 ## Verification
 

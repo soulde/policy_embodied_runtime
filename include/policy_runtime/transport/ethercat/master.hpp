@@ -5,15 +5,15 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <span>
 #include <vector>
 
 #include "policy_runtime/profiles/robot_profile.hpp"
-#include "policy_runtime/protocol/cia402/pdo.hpp"
+#include "policy_runtime/devices/cia402/pdo.hpp"
 #include "policy_runtime/transport/cyclic_transport.hpp"
 #include "policy_runtime/transport/ethercat/backend.hpp"
-#include "policy_runtime/transport/object_dictionary_transport.hpp"
 
 namespace policy_runtime {
 
@@ -35,7 +35,19 @@ struct Cia402PdoHandles {
   TypedPdoField<std::int16_t> target_torque;
 };
 
-class EthercatMailbox final : public ObjectDictionaryTransport {
+// A protocol-neutral process-image field. Protocol/device adapters may use
+// this for PDO data that is not part of the built-in CiA402 compatibility path.
+struct EthercatProcessImageField {
+  EthercatSlaveAddress slave{};
+  ObjectAddress address{};
+  PdoDirection direction{PdoDirection::input};
+  std::uint8_t bit_length{};
+  CyclicFieldId id{};
+  PdoFieldLocation location{};
+  bool bound{};
+};
+
+class EthercatMailbox final : public Transport {
  public:
   Result<void> open() override;
   void close() noexcept override;
@@ -44,10 +56,10 @@ class EthercatMailbox final : public ObjectDictionaryTransport {
   void cycle(const CycleContext& context) noexcept override;
 
   Result<MailboxRequestId> queue_download(
-      ObjectAddress address, std::span<const std::byte> data) override;
-  Result<MailboxRequestId> queue_upload(ObjectAddress address) override;
+      ObjectAddress address, std::span<const std::byte> data);
+  Result<MailboxRequestId> queue_upload(ObjectAddress address);
   std::optional<MailboxRequestStatus> mailbox_status(
-      MailboxRequestId request_id) const override;
+      MailboxRequestId request_id) const;
 
  private:
   struct OwnerLifecycle {
@@ -114,6 +126,8 @@ class EthercatMailbox final : public ObjectDictionaryTransport {
 
 class EthercatMaster final : public CyclicTransport {
  public:
+  using ProcessImageHandler = void (*)(void*, std::span<std::byte>,
+                                       const DomainHealth&, bool) noexcept;
   using CycleHandler = void (*)(void*, std::span<Cia402PdoView>) noexcept;
   using SupervisedCycleHandler = void (*)(void*, std::span<Cia402PdoView>,
                                           const DomainHealth&, bool) noexcept;
@@ -135,12 +149,24 @@ class EthercatMaster final : public CyclicTransport {
   Result<void> register_cyclic_output(CyclicField field) override;
 
   Result<void> set_cycle_handler(CycleHandler handler, void* context);
+  Result<void> set_process_image_handler(ProcessImageHandler handler,
+                                          void* context);
   Result<void> set_supervised_cycle_handler(SupervisedCycleHandler handler,
                                             void* context);
   Result<void> clear_supervised_cycle_handler(void* context);
   std::span<Cia402PdoView> pdo_views() noexcept;
   std::span<const Cia402PdoHandles> pdo_handles() const noexcept;
-  ObjectDictionaryTransport& mailbox(std::size_t axis_index);
+  Result<void> register_process_image_field(EthercatSlaveAddress slave,
+                                            ObjectAddress address,
+                                            PdoDirection direction,
+                                            std::uint8_t bit_length,
+                                            CyclicFieldId id);
+  std::optional<std::uint32_t> read_process_image_field(
+      CyclicFieldId id) const noexcept;
+  bool write_process_image_field(CyclicFieldId id,
+                                 std::uint32_t value) noexcept;
+  std::size_t process_image_field_count() const noexcept;
+  EthercatMailbox& mailbox(std::size_t axis_index);
 
  private:
   static constexpr std::uint64_t kCycleOpenBit = std::uint64_t{1U} << 63U;
@@ -162,7 +188,10 @@ class EthercatMaster final : public CyclicTransport {
   std::vector<std::unique_ptr<EthercatMailbox>> mailboxes_;
   std::vector<CyclicField> registered_inputs_;
   std::vector<CyclicField> registered_outputs_;
+  std::vector<EthercatProcessImageField> process_image_fields_;
   CycleHandler cycle_handler_{};
+  ProcessImageHandler process_image_handler_{};
+  void* process_image_handler_context_{};
   SupervisedCycleHandler supervised_cycle_handler_{};
   void* cycle_handler_context_{};
   std::mutex lifecycle_mutex_;

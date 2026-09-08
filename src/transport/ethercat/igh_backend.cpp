@@ -1,7 +1,5 @@
 #include "policy_runtime/transport/ethercat/backend.hpp"
 
-#if POLICY_RUNTIME_WITH_IGH
-
 #include <ecrt.h>
 
 #include <algorithm>
@@ -539,5 +537,3 @@ SdoTransferProgress IghBackend::progress_cancel_sdo(
 }
 
 }  // namespace policy_runtime
-
-#endif

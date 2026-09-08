@@ -14,9 +14,8 @@
 #include "policy_runtime/policy/policy.hpp"
 #include "policy_runtime/profiles/policy_profile.hpp"
 #include "policy_runtime/profiles/robot_profile.hpp"
-#include "policy_runtime/protocol/rpc/messages.hpp"
-#include "policy_runtime/robot_io/snapshot.hpp"
-#include "policy_runtime/runtime/robot_io_client.hpp"
+#include "policy_runtime/devices/rpc/messages.hpp"
+#include "policy_runtime/robot_io/daemon/value_snapshot.hpp"
 
 namespace policy_runtime {
 
@@ -25,16 +24,24 @@ class RuntimeRobotIo {
   virtual ~RuntimeRobotIo() = default;
   virtual std::uint32_t axis_count() const noexcept = 0;
   virtual std::uint32_t servo_count() const noexcept = 0;
+  virtual std::uint32_t damiao_count() const noexcept { return 0U; }
   virtual Result<Snapshot<AxisFeedback>> read_feedback() = 0;
   virtual Result<Snapshot<St3215ServoFeedback>> read_servo_feedback() = 0;
+  virtual Result<Snapshot<DamiaoFeedback>> read_damiao_feedback() {
+    return Result<Snapshot<DamiaoFeedback>>::failure(
+        {ErrorCode::unavailable, "Damiao feedback is unavailable"});
+  }
   virtual Result<void> publish_commands(
       std::span<const AxisCommand> axis_commands,
       std::span<const St3215ServoCommand> servo_commands,
       std::uint64_t sequence, std::int64_t timestamp_ns) = 0;
+  virtual Result<void> publish_damiao_commands(
+      std::span<const DamiaoMitCommand>, std::span<const bool>,
+      std::uint64_t, std::int64_t) {
+    return Result<void>::success();
+  }
   virtual void close() noexcept = 0;
 };
-
-std::unique_ptr<RuntimeRobotIo> make_runtime_robot_io(RobotIoClient client);
 
 class RuntimeHost {
  public:

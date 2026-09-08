@@ -9,44 +9,11 @@
 #include <utility>
 
 #include "policy_runtime/profiles/loader.hpp"
-#include "policy_runtime/protocol/rpc/codec.hpp"
-#include "policy_runtime/robot/devices/cia402/axis.hpp"
+#include "policy_runtime/devices/rpc/codec.hpp"
+#include "policy_runtime/devices/cia402/axis.hpp"
 
 namespace policy_runtime {
 namespace {
-
-class RobotIoClientAdapter final : public RuntimeRobotIo {
- public:
-  explicit RobotIoClientAdapter(RobotIoClient client)
-      : client_(std::move(client)) {}
-
-  std::uint32_t axis_count() const noexcept override {
-    return client_.axis_count();
-  }
-  std::uint32_t servo_count() const noexcept override {
-    return client_.servo_count();
-  }
-
-  Result<Snapshot<AxisFeedback>> read_feedback() override {
-    return client_.read_feedback();
-  }
-  Result<Snapshot<St3215ServoFeedback>> read_servo_feedback() override {
-    return client_.read_servo_feedback();
-  }
-
-  Result<void> publish_commands(
-      std::span<const AxisCommand> axis_commands,
-      std::span<const St3215ServoCommand> servo_commands,
-      std::uint64_t sequence, std::int64_t timestamp_ns) override {
-    return client_.publish_commands(axis_commands, servo_commands, sequence,
-                                    timestamp_ns);
-  }
-
-  void close() noexcept override { static_cast<void>(client_.close()); }
-
- private:
-  RobotIoClient client_;
-};
 
 std::int64_t realtime_now_ns() noexcept {
   const auto value = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -248,10 +215,6 @@ std::optional<double> action_target(const nlohmann::json& value,
 
 }  // namespace
 
-std::unique_ptr<RuntimeRobotIo> make_runtime_robot_io(RobotIoClient client) {
-  return std::make_unique<RobotIoClientAdapter>(std::move(client));
-}
-
 Result<RuntimeHost> RuntimeHost::from_profiles(
     const std::filesystem::path& policy_profile,
     std::optional<std::filesystem::path> robot_profile,
@@ -325,6 +288,12 @@ Result<void> RuntimeHost::open() {
     return Result<void>::failure(
         {ErrorCode::invalid_argument,
          "robot I/O servo count does not match robot profile"});
+  }
+  if (robot_io_ &&
+      robot_io_->damiao_count() != robot_profile_.damiao_motors.size()) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument,
+         "robot I/O Damiao count does not match robot profile"});
   }
   open_ = true;
   return Result<void>::success();
@@ -432,6 +401,22 @@ Result<rpc::MessageEnvelope> RuntimeHost::handle(
             {"raw_position", value.raw_position},
             {"status_error", value.status_error},
         };
+      }
+    }
+    if (robot_io_ && !robot_profile_.damiao_motors.empty()) {
+      auto feedback = robot_io_->read_damiao_feedback();
+      if (!feedback.has_value()) {
+        return Result<rpc::MessageEnvelope>::success(error_envelope(
+            request, "runtime_error", "Damiao feedback is unavailable"));
+      }
+      for (std::size_t index = 0; index < robot_profile_.damiao_motors.size();
+           ++index) {
+        const auto& motor = robot_profile_.damiao_motors[index];
+        const auto& value = feedback.value().axes[index];
+        sensor_fields[motor.sensor_name] = {
+            {"motor_id", value.motor_id}, {"position", value.position},
+            {"velocity", value.velocity}, {"torque", value.torque},
+            {"error_code", value.error_code}};
       }
     }
 
@@ -568,6 +553,46 @@ Result<rpc::MessageEnvelope> RuntimeHost::handle(
             request, "runtime_error", published.error().message.empty()
                                           ? "robot command publication failed"
                                           : published.error().message));
+      }
+      std::array<DamiaoMitCommand, kRobotIoMaximumServos> damiao_commands{};
+      std::array<bool, kRobotIoMaximumServos> damiao_enabled{};
+      for (std::size_t index = 0; index < robot_profile_.damiao_motors.size();
+           ++index) {
+        const auto& motor = robot_profile_.damiao_motors[index];
+        std::string action_field = motor.actuator_name;
+        for (const auto& binding : profile_.outputs) {
+          if (binding.robot_data == motor.actuator_name) {
+            action_field = binding.canonical_field;
+            break;
+          }
+        }
+        const auto value = output.find(action_field);
+        if (value != output.end() && value->is_object()) {
+          auto number = [&](const char* key, float fallback) {
+            const auto field = value->find(key);
+            return field != value->end() && field->is_number()
+                       ? field->get<float>()
+                       : fallback;
+          };
+          damiao_commands[index] = {
+              number("position", 0.0F), number("velocity", 0.0F),
+              number("kp", 0.0F), number("kd", 0.0F),
+              number("torque", 0.0F)};
+          const auto enabled = value->find("enabled");
+          damiao_enabled[index] =
+              enabled == value->end() || !enabled->is_boolean() ||
+              enabled->get<bool>();
+        }
+      }
+      published = robot_io_->publish_damiao_commands(
+          std::span<const DamiaoMitCommand>(damiao_commands.data(),
+                                            robot_profile_.damiao_motors.size()),
+          std::span<const bool>(damiao_enabled.data(),
+                                robot_profile_.damiao_motors.size()),
+          sequence, timestamp_ns);
+      if (!published.has_value()) {
+        return Result<rpc::MessageEnvelope>::success(error_envelope(
+            request, "runtime_error", published.error().message));
       }
       command_sequence_ = sequence;
       last_command_timestamp_ns_ = timestamp_ns;

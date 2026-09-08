@@ -23,15 +23,15 @@
 #include <unistd.h>
 
 #include "policy_runtime/profiles/robot_profile.hpp"
-#include "policy_runtime/protocol/cia402/pdo.hpp"
-#include "policy_runtime/protocol/cia402/state_machine.hpp"
-#include "policy_runtime/robot/devices/cia402/axis.hpp"
-#include "policy_runtime/robot_io/daemon.hpp"
+#include "policy_runtime/devices/cia402/pdo.hpp"
+#include "policy_runtime/devices/cia402/state_machine.hpp"
+#include "policy_runtime/devices/cia402/axis.hpp"
+#include "policy_runtime/robot_io/daemon/daemon.hpp"
 #include "policy_runtime/robot_io/ipc_server.hpp"
-#include "policy_runtime/robot_io/realtime_loop.hpp"
+#include "policy_runtime/robot_io/daemon/realtime_loop.hpp"
 #include "policy_runtime/runtime/robot_io_client.hpp"
 #include "policy_runtime/transport/ethercat/backend.hpp"
-#include "policy_runtime/transport/ethercat/elmo_gold.hpp"
+#include "policy_runtime/devices/cia402/elmo_gold.hpp"
 #include "policy_runtime/transport/ethercat/master.hpp"
 
 namespace allocation_probe {
