@@ -78,7 +78,6 @@ add_library(policy_runtime_core
     src/devices/st3215/servo.cpp
     src/robot_io/daemon/daemon.cpp
     src/robot_io/dds/topic_registry.cpp
-    src/robot_io/daemon/can_transport_runtime.cpp
     src/robot_io/daemon/transport_runtime.cpp
     src/robot_io/daemon/transport_factory.cpp
     src/robot_io/daemon/realtime_loop.cpp

@@ -11,7 +11,7 @@
 
 #include <gtest/gtest.h>
 
-#include "policy_runtime/robot_io/daemon/can_transport_runtime.hpp"
+#include "policy_runtime/robot_io/daemon/transport_runtime.hpp"
 #include "policy_runtime/robot_io/daemon/transport_runtime.hpp"
 
 namespace policy_runtime::robot_io {
@@ -36,14 +36,14 @@ class FakeTransport final : public policy_runtime::Transport {
   std::uint32_t cycles{};
 };
 
-TEST(CanTransportRuntimeTest, SendsRawFramesWithoutKnowingDeviceProtocol) {
+TEST(TransportRuntimeTest, SendsRawFramesWithoutKnowingDeviceProtocol) {
   int sockets[2]{};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets), 0);
   ASSERT_GE(::fcntl(sockets[0], F_SETFL, O_NONBLOCK), 0);
   SocketCanTransport transport(sockets[0]);
   std::promise<DeviceFrame> received_promise;
   auto received = received_promise.get_future();
-  auto runtime = CanTransportRuntime::create(
+  auto runtime = TransportRuntime::create(
       std::move(transport),
       [&received_promise](const DeviceFrame& frame, std::uint64_t) {
         received_promise.set_value(frame);

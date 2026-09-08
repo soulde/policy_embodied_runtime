@@ -170,7 +170,7 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
     }
     damiao_bus_members[motor.path].push_back(index);
   }
-  std::vector<std::unique_ptr<robot_io::CanTransportRuntime>> damiao_buses;
+  std::vector<std::unique_ptr<robot_io::TransportRuntime>> damiao_buses;
   std::array<std::optional<robot_io::DeviceBinding>, kRobotIoMaximumServos>
       actuator_bindings;
   std::vector<DamiaoSensor> damiao_sensors;

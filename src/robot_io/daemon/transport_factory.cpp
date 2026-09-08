@@ -22,28 +22,28 @@ Result<void> TransportFactory::validate(const PhysicalTransportKey& key) {
   return Result<void>::success();
 }
 
-Result<std::unique_ptr<CanTransportRuntime>> TransportFactory::create_socketcan(
-    const PhysicalTransportKey& key, CanTransportRuntime::ReceiveCallback callback,
+Result<std::unique_ptr<TransportRuntime>> TransportFactory::create_socketcan(
+    const PhysicalTransportKey& key, TransportRuntime::ReceiveCallback callback,
     std::size_t actuator_slots) {
   if (auto checked = validate(key); !checked.has_value()) {
-    return Result<std::unique_ptr<CanTransportRuntime>>::failure(checked.error());
+    return Result<std::unique_ptr<TransportRuntime>>::failure(checked.error());
   }
   if (key.kind != PhysicalTransportKind::socketcan) {
-    return Result<std::unique_ptr<CanTransportRuntime>>::failure(
+    return Result<std::unique_ptr<TransportRuntime>>::failure(
         {ErrorCode::invalid_argument,
          "SocketCAN factory requires a socketcan transport key"});
   }
   auto opened = SocketCanTransport::open(key.path);
   if (!opened.has_value()) {
-    return Result<std::unique_ptr<CanTransportRuntime>>::failure(opened.error());
+    return Result<std::unique_ptr<TransportRuntime>>::failure(opened.error());
   }
-  auto runtime = CanTransportRuntime::create(std::move(opened.value()),
+  auto runtime = TransportRuntime::create(std::move(opened.value()),
                                           std::move(callback), actuator_slots);
   if (!runtime.has_value()) {
-    return Result<std::unique_ptr<CanTransportRuntime>>::failure(runtime.error());
+    return Result<std::unique_ptr<TransportRuntime>>::failure(runtime.error());
   }
-  return Result<std::unique_ptr<CanTransportRuntime>>::success(
-      std::make_unique<CanTransportRuntime>(std::move(runtime.value())));
+  return Result<std::unique_ptr<TransportRuntime>>::success(
+      std::make_unique<TransportRuntime>(std::move(runtime.value())));
 }
 
 Result<std::shared_ptr<SerialTransport>> TransportFactory::create_serial(
