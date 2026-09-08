@@ -32,7 +32,7 @@ and `src/` (both consumed by the CMake build):
 | `common/` | `Result<T>` error type shared by every layer |
 | `transport/` | EtherCAT/IgH backend + Elmo Gold PDO mapping, SocketCAN, USB serial, USB-CAN virtual serial framing |
 | `protocol/` | CiA402 PDO/state machine, ST3215, Damiao MIT CAN codec, RPC JSON envelope codec |
-| `robot/devices/` | `Cia402Axis`, `St3215Servo`, `DamiaoMotorDevice`/`DamiaoMotorBus` typed sensor/actuator adapters |
+| `robot/devices/` | Directional `SensorDevice`/`ActuatorDevice` implementations, including Damiao sensor and actuator codecs |
 | `robot_io/` | daemon, versioned IPC, snapshot exchange, safety supervisor, transport scheduler |
 | `runtime/` | `policy-runtime-host` pipeline, host CLI, daemon client |
 | `profiles/` | robot/policy JSON profile loader with static validation |
@@ -79,9 +79,10 @@ Damiao CAN motors use the vendor MIT-mode protocol over SocketCAN or a
 USB-CAN virtual serial port, configured statically in the robot profile
 (`damiao_motor` devices; see
 `policy_embodied_runtime/examples/robot_profiles/damiao_can_robot_profile.json`).
-Each `DamiaoMotorBus` is a hard-realtime transport performing one nonblocking
-send and at most one bounded receive per cycle; faults latch and recovery is
-restart-only.
+SocketCAN is represented by one physical `TransportRuntime` per interface.
+The runtime performs raw frame I/O only; Damiao sensors decode received frames
+and Damiao actuators encode outgoing frames independently. Multiple protocols
+may share one physical transport.
 
 The daemon/host IPC is versioned. Axis-only profiles use the compact v1
 layout; profiles containing ST3215 devices use v2 with independent bounded

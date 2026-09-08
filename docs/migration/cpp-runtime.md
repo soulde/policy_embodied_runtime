@@ -110,10 +110,7 @@ one sensor and one actuator entry sharing `motor_id`, `position_max`,
 `policy_embodied_runtime/examples/robot_profiles/damiao_can_robot_profile.json`.
 
 Realtime behavior matches the rest of the native runtime: descriptors are
-opened before the loop and left nonblocking, each cycle performs exactly one
-send and at most one bounded receive, and any write error, short write,
-malformed frame, range violation, motor-ID mismatch, or feedback staleness
-latches a fault with no retry, reopen, or reinitialization. Recovery is
-performed by restarting the process. `DamiaoMotorBus` implements the
-`Transport` interface so the scheduler registers each motor like any other
-hard-realtime transport.
+opened before the loop and left nonblocking. `TransportRuntime` performs raw
+frame I/O; directional Damiao sensors decode feedback and directional
+actuators encode commands. A physical SocketCAN transport may carry multiple
+devices and protocols, while device bindings remain independent.
