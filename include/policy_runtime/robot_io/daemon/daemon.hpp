@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <limits>
 
 #include <signal.h>
 
@@ -162,6 +163,10 @@ class RobotIoDaemon {
   bool master_handler_bound_{};
   std::array<std::uint16_t, kMaximumSt3215Servos>
       serial_axis_stop_masks_{};
+  // Index of each physical ST3215 servo in the DDS state-channel list. A
+  // missing entry means the profile does not expose that sensor externally.
+  std::array<std::size_t, kMaximumSt3215Servos>
+      st3215_dds_sensor_indices_{};
 
   struct StagedCommandEvent {
     std::uint64_t publication{};

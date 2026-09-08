@@ -266,6 +266,18 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
   if (!serial_configured.has_value()) {
     return serial_configured;
   }
+  st3215_dds_sensor_indices_.fill(std::numeric_limits<std::size_t>::max());
+  std::size_t st3215_sensor_index = 0U;
+  for (const auto& sensor : profile.sensors) {
+    if (sensor.device.type != "st3215") continue;
+    for (std::size_t servo = 0; servo < profile.st3215_servos.size(); ++servo) {
+      if (profile.st3215_servos[servo].sensor_name == sensor.name) {
+        st3215_dds_sensor_indices_[servo] = st3215_sensor_index;
+        break;
+      }
+    }
+    ++st3215_sensor_index;
+  }
   for (std::size_t servo = 0; servo < profile.st3215_servos.size(); ++servo) {
     for (std::size_t axis = 0; axis < profile.axes.size(); ++axis) {
       if (profile.st3215_servos[servo].safety_group ==
@@ -613,7 +625,7 @@ void RobotIoDaemon::process_device_cycle_owned(
     value.flags |= decisions.feedback_flags[axis];
     cycle_feedback_[axis] = value;
     safety_flags |= decisions.feedback_flags[axis];
-    if (dds_.has_value()) {
+    if (dds_.has_value() && process_data_valid) {
       static_cast<void>(dds_->enqueue_cia402_sensor_realtime(
           axis, robot_io::dds::Cia402SensorEvent{
                     cycle_sequence_.load(std::memory_order_relaxed) + 1U, now,
@@ -667,6 +679,25 @@ bool RobotIoDaemon::owns_cycle() const noexcept {
 void RobotIoDaemon::cycle_owned(const CycleContext& context) noexcept {
   static_cast<void>(refresh_commands_owned());
   serial_devices_.cycle(context);
+  if (dds_.has_value()) {
+    const auto now = clock_->now_ns();
+    for (std::size_t servo = 0; servo < serial_devices_.servo_count(); ++servo) {
+      const auto dds_index = st3215_dds_sensor_indices_[servo];
+      if (dds_index == std::numeric_limits<std::size_t>::max()) continue;
+      const auto feedback = serial_devices_.feedback(servo, now);
+      if ((feedback.flags & kSt3215FeedbackValid) == 0U ||
+          (feedback.flags & kSt3215FeedbackStale) != 0U) {
+        continue;
+      }
+      static_cast<void>(dds_->enqueue_st3215_sensor_realtime(
+          dds_index,
+          robot_io::dds::St3215SensorEvent{
+              feedback.feedback_sequence, feedback.timestamp_ns,
+              context.sequence, feedback.flags, feedback.position_rad,
+              static_cast<std::uint16_t>(feedback.raw_position),
+              static_cast<std::uint16_t>(feedback.status_error)}));
+    }
+  }
   if (ethercat_master_ != nullptr) {
     ethercat_master_->cycle(context);
   } else {
