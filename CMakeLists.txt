@@ -202,6 +202,12 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         PRIVATE policy_runtime_core GTest::gtest_main)
     policy_runtime_configure_target(dds_topic_registry_test)
 
+    add_executable(dds_realtime_mailbox_test
+        tests/cpp/unit/dds_realtime_mailbox_test.cpp)
+    target_link_libraries(dds_realtime_mailbox_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(dds_realtime_mailbox_test)
+
     add_executable(damiao_transport_test tests/cpp/integration/damiao_transport_test.cpp)
     target_link_libraries(damiao_transport_test
         PRIVATE policy_runtime_core GTest::gtest_main)
@@ -322,6 +328,8 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(dds_topic_registry_test
         TEST_PREFIX dds_topic_registry_test. DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(dds_realtime_mailbox_test
+        TEST_PREFIX dds_realtime_mailbox_test. DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(ipc_test TEST_PREFIX ipc_test.
         DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(cia402_state_machine_test TEST_PREFIX cia402_state_machine_test.
