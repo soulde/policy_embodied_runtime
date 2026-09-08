@@ -127,6 +127,8 @@ class EthercatMailbox final : public ObjectDictionaryTransport {
 
 class EthercatMaster final : public CyclicTransport {
  public:
+  using ProcessImageHandler = void (*)(void*, std::span<std::byte>,
+                                       const DomainHealth&, bool) noexcept;
   using CycleHandler = void (*)(void*, std::span<Cia402PdoView>) noexcept;
   using SupervisedCycleHandler = void (*)(void*, std::span<Cia402PdoView>,
                                           const DomainHealth&, bool) noexcept;
@@ -148,6 +150,8 @@ class EthercatMaster final : public CyclicTransport {
   Result<void> register_cyclic_output(CyclicField field) override;
 
   Result<void> set_cycle_handler(CycleHandler handler, void* context);
+  Result<void> set_process_image_handler(ProcessImageHandler handler,
+                                          void* context);
   Result<void> set_supervised_cycle_handler(SupervisedCycleHandler handler,
                                             void* context);
   Result<void> clear_supervised_cycle_handler(void* context);
@@ -187,6 +191,8 @@ class EthercatMaster final : public CyclicTransport {
   std::vector<CyclicField> registered_outputs_;
   std::vector<EthercatProcessImageField> process_image_fields_;
   CycleHandler cycle_handler_{};
+  ProcessImageHandler process_image_handler_{};
+  void* process_image_handler_context_{};
   SupervisedCycleHandler supervised_cycle_handler_{};
   void* cycle_handler_context_{};
   std::mutex lifecycle_mutex_;

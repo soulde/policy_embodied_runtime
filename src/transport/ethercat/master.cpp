@@ -669,6 +669,11 @@ void EthercatMaster::cycle(const CycleContext&) noexcept {
     }
   }
 
+  if (process_image_handler_ != nullptr) {
+    process_image_handler_(process_image_handler_context_, image, domain,
+                           valid_image);
+  }
+
   if (valid_image && cycle_handler_ != nullptr) {
     cycle_handler_(cycle_handler_context_, pdo_views_);
   }
@@ -814,6 +819,19 @@ Result<void> EthercatMaster::set_cycle_handler(CycleHandler handler, void* conte
   }
   cycle_handler_ = handler;
   cycle_handler_context_ = context;
+  return Result<void>::success();
+}
+
+Result<void> EthercatMaster::set_process_image_handler(
+    ProcessImageHandler handler, void* context) {
+  if (admission_is_open() || handler == nullptr ||
+      (cycle_handler_ != nullptr && cycle_handler_context_ != context)) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument,
+         "process-image handler must be installed before open"});
+  }
+  process_image_handler_ = handler;
+  process_image_handler_context_ = context;
   return Result<void>::success();
 }
 
