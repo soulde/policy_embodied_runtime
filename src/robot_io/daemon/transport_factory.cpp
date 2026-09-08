@@ -46,6 +46,18 @@ Result<std::unique_ptr<TransportRuntime>> TransportFactory::create_socketcan(
       std::make_unique<TransportRuntime>(std::move(runtime.value())));
 }
 
+Result<std::shared_ptr<SerialTransport>> TransportFactory::create_serial(
+    SerialConfig config) {
+  if (config.path.empty() || config.baud_rate == 0U ||
+      config.maximum_frame_size == 0U) {
+    return Result<std::shared_ptr<SerialTransport>>::failure(
+        {ErrorCode::invalid_argument,
+         "serial transport requires path, baud rate, and frame size"});
+  }
+  return Result<std::shared_ptr<SerialTransport>>::success(
+      std::make_shared<SerialTransport>(std::move(config)));
+}
+
 Result<std::unique_ptr<EthercatMaster>> TransportFactory::create_ethercat(
     std::shared_ptr<EthercatBackend> backend,
     std::vector<EthercatAxisConfiguration> configurations) {

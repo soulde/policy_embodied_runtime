@@ -9,6 +9,7 @@
 #include "policy_runtime/robot_io/daemon/transport_runtime.hpp"
 #include "policy_runtime/transport/ethercat/backend.hpp"
 #include "policy_runtime/transport/ethercat/master.hpp"
+#include "policy_runtime/transport/serial/serial_transport.hpp"
 
 namespace policy_runtime::robot_io {
 
@@ -21,6 +22,9 @@ class TransportFactory final {
   static Result<std::unique_ptr<TransportRuntime>> create_socketcan(
       const PhysicalTransportKey& key, TransportRuntime::ReceiveCallback callback,
       std::size_t actuator_slots = 32U);
+
+  static Result<std::shared_ptr<SerialTransport>> create_serial(
+      SerialConfig config);
 
   static Result<std::unique_ptr<EthercatMaster>> create_ethercat(
       std::shared_ptr<EthercatBackend> backend,

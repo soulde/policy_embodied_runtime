@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "policy_runtime/protocol/st3215/protocol.hpp"
+#include "policy_runtime/robot_io/daemon/transport_factory.hpp"
 #include "policy_runtime/transport/serial/serial_transport.hpp"
 
 namespace policy_runtime {
@@ -490,17 +491,20 @@ Result<void> St3215DeviceRegistry::configure(
           return candidate.serial.path == profile.serial.path;
         });
     if (bus == buses.end()) {
-      auto transport = std::make_shared<SerialTransport>(SerialConfig{
+      auto transport = robot_io::TransportFactory::create_serial(SerialConfig{
           serial.path,
           serial.baud_rate,
           serial.read_buffer_size,
           serial.maximum_frame_size,
           serial.read_timeout,
           serial.write_timeout});
+      if (!transport.has_value()) {
+        return Result<void>::failure(transport.error());
+      }
       buses.push_back(BusEntry{
           serial,
           std::make_unique<St3215Bus>(
-              std::move(transport),
+              std::move(transport.value()),
               St3215BusOptions{profile.serial.service_period})});
       bus = std::prev(buses.end());
     } else if (bus->serial.baud_rate != serial.baud_rate ||
