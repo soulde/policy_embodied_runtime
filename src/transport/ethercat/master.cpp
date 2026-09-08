@@ -588,6 +588,17 @@ Result<void> EthercatMaster::open() {
     }
   }
 
+  for (auto& field : process_image_fields_) {
+    auto location = backend_->bind_pdo_entry(
+        field.slave, field.address, field.bit_length);
+    if (!location.has_value()) {
+      backend_->deactivate();
+      return Result<void>::failure(location.error());
+    }
+    field.location = location.value();
+    field.bound = true;
+  }
+
   auto activated = backend_->activate();
   if (!activated.has_value()) {
     backend_->deactivate();
@@ -826,6 +837,75 @@ Result<void> EthercatMaster::register_cyclic_input(CyclicField field) {
 
 Result<void> EthercatMaster::register_cyclic_output(CyclicField field) {
   return register_field(field, false);
+}
+
+Result<void> EthercatMaster::register_process_image_field(
+    EthercatSlaveAddress slave, ObjectAddress address, PdoDirection direction,
+    std::uint8_t bit_length, CyclicFieldId id) {
+  if (admission_is_open() || id == 0U ||
+      (bit_length != 8U && bit_length != 16U && bit_length != 32U)) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument,
+         "process-image fields require a unique id and 8/16/32-bit width"});
+  }
+  const auto duplicate = std::any_of(
+      process_image_fields_.begin(), process_image_fields_.end(),
+      [id](const auto& field) { return field.id == id; });
+  if (duplicate) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument, "process-image field id is already registered"});
+  }
+  process_image_fields_.push_back(
+      EthercatProcessImageField{slave, address, direction, bit_length, id});
+  return Result<void>::success();
+}
+
+std::optional<std::uint32_t> EthercatMaster::read_process_image_field(
+    CyclicFieldId id) const noexcept {
+  const auto found = std::find_if(
+      process_image_fields_.begin(), process_image_fields_.end(),
+      [id](const auto& field) { return field.id == id; });
+  if (found == process_image_fields_.end() || !found->bound ||
+      found->direction != PdoDirection::input) {
+    return std::nullopt;
+  }
+  const auto image = backend_->process_image();
+  if (found->location.byte_offset > image.size() ||
+      found->bit_length / 8U > image.size() - found->location.byte_offset) {
+    return std::nullopt;
+  }
+  std::uint32_t value{};
+  for (std::size_t index = 0U; index < found->bit_length / 8U; ++index) {
+    value |= static_cast<std::uint32_t>(std::to_integer<unsigned char>(
+                  image[found->location.byte_offset + index]))
+             << (index * 8U);
+  }
+  return value;
+}
+
+bool EthercatMaster::write_process_image_field(CyclicFieldId id,
+                                                std::uint32_t value) noexcept {
+  const auto found = std::find_if(
+      process_image_fields_.begin(), process_image_fields_.end(),
+      [id](const auto& field) { return field.id == id; });
+  if (found == process_image_fields_.end() || !found->bound ||
+      found->direction != PdoDirection::output) {
+    return false;
+  }
+  auto image = backend_->process_image();
+  if (found->location.byte_offset > image.size() ||
+      found->bit_length / 8U > image.size() - found->location.byte_offset) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < found->bit_length / 8U; ++index) {
+    image[found->location.byte_offset + index] = std::byte{
+        static_cast<unsigned char>(value >> (index * 8U))};
+  }
+  return true;
+}
+
+std::size_t EthercatMaster::process_image_field_count() const noexcept {
+  return process_image_fields_.size();
 }
 
 Result<void> EthercatMaster::set_cycle_handler(CycleHandler handler, void* context) {

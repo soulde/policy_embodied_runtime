@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <span>
 #include <vector>
@@ -33,6 +34,18 @@ struct Cia402PdoHandles {
   TypedPdoField<std::int32_t> target_position;
   TypedPdoField<std::int32_t> target_velocity;
   TypedPdoField<std::int16_t> target_torque;
+};
+
+// A protocol-neutral process-image field. Protocol/device adapters may use
+// this for PDO data that is not part of the built-in CiA402 compatibility path.
+struct EthercatProcessImageField {
+  EthercatSlaveAddress slave{};
+  ObjectAddress address{};
+  PdoDirection direction{PdoDirection::input};
+  std::uint8_t bit_length{};
+  CyclicFieldId id{};
+  PdoFieldLocation location{};
+  bool bound{};
 };
 
 class EthercatMailbox final : public ObjectDictionaryTransport {
@@ -140,6 +153,16 @@ class EthercatMaster final : public CyclicTransport {
   Result<void> clear_supervised_cycle_handler(void* context);
   std::span<Cia402PdoView> pdo_views() noexcept;
   std::span<const Cia402PdoHandles> pdo_handles() const noexcept;
+  Result<void> register_process_image_field(EthercatSlaveAddress slave,
+                                            ObjectAddress address,
+                                            PdoDirection direction,
+                                            std::uint8_t bit_length,
+                                            CyclicFieldId id);
+  std::optional<std::uint32_t> read_process_image_field(
+      CyclicFieldId id) const noexcept;
+  bool write_process_image_field(CyclicFieldId id,
+                                 std::uint32_t value) noexcept;
+  std::size_t process_image_field_count() const noexcept;
   ObjectDictionaryTransport& mailbox(std::size_t axis_index);
 
  private:
@@ -162,6 +185,7 @@ class EthercatMaster final : public CyclicTransport {
   std::vector<std::unique_ptr<EthercatMailbox>> mailboxes_;
   std::vector<CyclicField> registered_inputs_;
   std::vector<CyclicField> registered_outputs_;
+  std::vector<EthercatProcessImageField> process_image_fields_;
   CycleHandler cycle_handler_{};
   SupervisedCycleHandler supervised_cycle_handler_{};
   void* cycle_handler_context_{};

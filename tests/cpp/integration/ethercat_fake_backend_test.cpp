@@ -459,6 +459,25 @@ TEST(EthercatFakeBackendTest, ConfiguresAndBindsBeforeActivation) {
   EXPECT_FALSE(master.pdo_handles()[0].target_torque.is_bound());
 }
 
+TEST(EthercatFakeBackendTest, BindsAndExposesNonCia402PdoFields) {
+  auto backend = std::make_shared<FakeEthercatBackend>();
+  EthercatMaster master{backend, {EthercatAxisConfiguration{axis_config(), {}}}};
+  ASSERT_TRUE(master.register_process_image_field(
+      EthercatSlaveAddress{0U, 0U}, ObjectAddress{0x2000U, 0U},
+      policy_runtime::PdoDirection::input, 32U, 100U)
+                  .has_value());
+  ASSERT_TRUE(master.register_process_image_field(
+      EthercatSlaveAddress{0U, 0U}, ObjectAddress{0x2001U, 0U},
+      policy_runtime::PdoDirection::output, 16U, 101U)
+                  .has_value());
+
+  ASSERT_TRUE(master.open().has_value());
+  ASSERT_TRUE(master.write_process_image_field(101U, 0x1234U));
+  EXPECT_EQ(master.read_process_image_field(100U), 0U);
+  EXPECT_EQ(master.process_image_field_count(), 2U);
+  EXPECT_EQ(backend->bind_count(), 9U);
+}
+
 TEST(EthercatFakeBackendTest, StagesTwoAliasesWithTheSameRelativePositionIndependently) {
   auto backend = std::make_shared<FakeEthercatBackend>();
   auto first = axis_config();
