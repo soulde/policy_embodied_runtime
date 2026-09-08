@@ -79,6 +79,7 @@ add_library(policy_runtime_core
     src/robot_io/daemon/daemon.cpp
     src/robot_io/dds/topic_registry.cpp
     src/robot_io/daemon/transport_runtime.cpp
+    src/robot_io/daemon/transport_factory.cpp
     src/robot_io/daemon/realtime_loop.cpp
     src/robot_io/daemon/safety_supervisor.cpp
     src/robot_io/daemon/topology.cpp
@@ -307,6 +308,12 @@ if(POLICY_RUNTIME_BUILD_TESTS)
     policy_runtime_configure_target(transport_runtime_test)
     gtest_discover_tests(transport_runtime_test
         TEST_PREFIX transport_runtime_test. DISCOVERY_MODE PRE_TEST)
+    add_executable(transport_factory_test
+        tests/cpp/unit/transport_factory_test.cpp)
+    target_link_libraries(transport_factory_test PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(transport_factory_test)
+    gtest_discover_tests(transport_factory_test
+        TEST_PREFIX transport_factory_test. DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(dds_realtime_mailbox_test
         TEST_PREFIX dds_realtime_mailbox_test. DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(physical_topology_test

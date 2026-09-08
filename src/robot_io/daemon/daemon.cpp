@@ -15,6 +15,7 @@
 
 #include "policy_runtime/transport/ethercat/master.hpp"
 #include "policy_runtime/robot_io/daemon/topology.hpp"
+#include "policy_runtime/robot_io/daemon/transport_factory.hpp"
 
 namespace policy_runtime {
 namespace {
@@ -181,13 +182,11 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
     damiao_actuators.emplace_back(motor.motor_id, motor.limits);
   }
   for (const auto& [path, members] : damiao_bus_members) {
-    auto transport = SocketCanTransport::open(path);
-    if (!transport.has_value()) {
-      return Result<void>::failure(transport.error());
-    }
+    const robot_io::PhysicalTransportKey transport_key{
+        robot_io::PhysicalTransportKind::socketcan, path};
     const auto transport_index = damiao_buses.size();
-    auto runtime = robot_io::TransportRuntime::create(
-        std::move(transport.value()),
+    auto runtime = robot_io::TransportFactory::create_socketcan(
+        transport_key,
         [this, members](const DeviceFrame& frame, std::uint64_t sequence) {
           if (!dds_.has_value()) {
             return;
@@ -240,8 +239,7 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
       route.transmit_slot = transport_slot;
       actuator_bindings[global_index] = route;
     }
-    damiao_buses.push_back(
-        std::make_unique<robot_io::TransportRuntime>(std::move(runtime.value())));
+    damiao_buses.push_back(std::move(runtime.value()));
   }
 
   std::array<std::optional<Cia402Axis>, kRobotIoMaximumAxes> configured_axes;
@@ -429,13 +427,17 @@ Result<void> RobotIoDaemon::start() {
       for (const auto& axis : axis_configurations_) {
         configurations.push_back({axis, {}});
       }
-      owned_ethercat_master_ = std::make_unique<EthercatMaster>(
+      auto created = robot_io::TransportFactory::create_ethercat(
           std::move(backend), std::move(configurations));
+      if (!created.has_value()) {
+        return Result<void>::failure(created.error());
+      }
+      owned_ethercat_master_ = std::move(created.value());
       ethercat_master_ = owned_ethercat_master_.get();
     } catch (const std::exception& error) {
       return Result<void>::failure(
           {ErrorCode::internal,
-           std::string("failed to create EtherCAT transport: ") + error.what()});
+           std::string("failed to prepare EtherCAT transport: ") + error.what()});
     }
   }
 
