@@ -19,11 +19,12 @@ TEST(PhysicalTopologyTest, DeduplicatesPairedDevicesAndSharedCanBus) {
   auto topology = policy_runtime::robot_io::compile_physical_topology(profile);
   ASSERT_TRUE(topology.has_value()) << topology.error().message;
   ASSERT_EQ(topology.value().buses.size(), 1U);
-  EXPECT_EQ(topology.value().devices.size(), 3U);
+  EXPECT_EQ(topology.value().sensors.size(), 1U);
+  EXPECT_EQ(topology.value().actuators.size(), 2U);
   EXPECT_EQ(topology.value().buses.front().path, "vcan0");
-  EXPECT_EQ(topology.value().devices[0].transport_slot, 0U);
-  EXPECT_EQ(topology.value().devices[1].transport_slot, 1U);
-  EXPECT_EQ(topology.value().devices[2].transport_slot, 2U);
+  EXPECT_EQ(topology.value().sensors[0].transport_slot, 0U);
+  EXPECT_EQ(topology.value().actuators[0].transport_slot, 1U);
+  EXPECT_EQ(topology.value().actuators[1].transport_slot, 2U);
 }
 
 TEST(PhysicalTopologyTest, KeepsDifferentPhysicalConnectionsSeparate) {

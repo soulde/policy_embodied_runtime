@@ -216,9 +216,8 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
       const auto global_index = members[local_index];
       std::size_t transport_slot = local_index;
       const auto& motor = profile.damiao_motors[global_index];
-      for (const auto& binding : compiled_topology.value().devices) {
-        if (binding.direction != robot_io::DeviceDirection::actuator ||
-            binding.profile_index >= profile.actuators.size()) {
+      for (const auto& binding : compiled_topology.value().actuators) {
+        if (binding.profile_index >= profile.actuators.size()) {
           continue;
         }
         const auto& actuator = profile.actuators[binding.profile_index];

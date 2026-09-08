@@ -10,7 +10,6 @@
 
 namespace policy_runtime::robot_io {
 
-enum class DeviceDirection { sensor, actuator };
 enum class PhysicalTransportKind { ethercat, socketcan, usb_can, serial };
 
 struct PhysicalBusKey {
@@ -20,16 +19,18 @@ struct PhysicalBusKey {
   auto operator<=>(const PhysicalBusKey&) const = default;
 };
 
-struct DeviceBinding {
-  DeviceDirection direction{};
+struct SensorBinding {
   std::size_t profile_index{};
   std::size_t bus_index{};
   std::size_t transport_slot{};
 };
 
+using ActuatorBinding = SensorBinding;
+
 struct CompiledTopology {
   std::vector<PhysicalBusKey> buses;
-  std::vector<DeviceBinding> devices;
+  std::vector<SensorBinding> sensors;
+  std::vector<ActuatorBinding> actuators;
 };
 
 Result<CompiledTopology> compile_physical_topology(
