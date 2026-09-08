@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <utility>
+#include "policy_runtime/devices/cia402/cia402.hpp"
 #include "policy_runtime/profiles/robot_profile.hpp"
 #include "policy_runtime/protocol/cia402/pdo.hpp"
 #include "policy_runtime/protocol/cia402/units.hpp"
@@ -12,7 +13,7 @@ namespace policy_runtime {
 
 class Cia402Actuator final {
  public:
-  explicit Cia402Actuator(profiles::AxisConfig config) : config_(std::move(config)) {}
+  explicit Cia402Actuator(Cia402Config config) : config_(std::move(config)) {}
 
   Result<void> encode_setpoint(const AxisCommand& command,
                                Cia402PdoView& pdo) const noexcept {

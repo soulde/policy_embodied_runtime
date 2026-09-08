@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include "policy_runtime/devices/damiao.hpp"
+#include "policy_runtime/devices/damiao/damiao.hpp"
 
 namespace {
 
@@ -42,6 +43,20 @@ TEST(DamiaoDeviceDirectionTest, SensorAndActuatorCanBeManagedAsSeparateCollectio
   EXPECT_TRUE(sensors.front().accepts(feedback));
   actuators.front().set_disable();
   EXPECT_TRUE(actuators.front().encode_frame().has_value());
+}
+
+TEST(DamiaoDeviceDirectionTest, SharedConfigConstructsBothDirections) {
+  const policy_runtime::DamiaoConfig config{
+      9U, policy_runtime::DamiaoLimits{12.5F, 30.0F, 10.0F}};
+  policy_runtime::DamiaoSensor sensor(config);
+  policy_runtime::DamiaoActuator actuator(config);
+
+  policy_runtime::DeviceFrame frame;
+  frame.address = config.motor_id;
+  frame.size = 8U;
+  EXPECT_TRUE(sensor.accepts(frame));
+  actuator.set_disable();
+  EXPECT_TRUE(actuator.encode_frame().has_value());
 }
 
 }  // namespace

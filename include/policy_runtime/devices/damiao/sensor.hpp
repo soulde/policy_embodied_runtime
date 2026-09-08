@@ -1,5 +1,6 @@
 #pragma once
 
+#include "policy_runtime/devices/damiao/damiao.hpp"
 #include "policy_runtime/protocol/damiao/protocol.hpp"
 #include "policy_runtime/devices/device.hpp"
 
@@ -7,11 +8,13 @@ namespace policy_runtime {
 
 class DamiaoSensor final : public SensorDevice {
  public:
+  explicit DamiaoSensor(DamiaoConfig config) noexcept : config_(config) {}
+
   DamiaoSensor(std::uint8_t motor_id, DamiaoLimits limits) noexcept
-      : motor_id_(motor_id), limits_(limits) {}
+      : DamiaoSensor(DamiaoConfig{motor_id, limits}) {}
 
   bool accepts(const DeviceFrame& frame) const noexcept override {
-    return frame.address == motor_id_ && frame.size == 8U;
+    return frame.address == config_.motor_id && frame.size == 8U;
   }
 
   Result<DamiaoFeedback> decode(const DeviceFrame& frame) const noexcept {
@@ -20,12 +23,11 @@ class DamiaoSensor final : public SensorDevice {
           {ErrorCode::protocol, "Damiao sensor frame does not match motor"});
     }
     return DamiaoProtocol::decode_feedback(frame.address, frame.bytes.data(),
-                                           frame.size, limits_);
+                                           frame.size, config_.limits);
   }
 
  private:
-  std::uint8_t motor_id_{};
-  DamiaoLimits limits_{};
+  DamiaoConfig config_{};
 };
 
 }  // namespace policy_runtime

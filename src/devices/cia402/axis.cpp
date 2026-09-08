@@ -46,7 +46,7 @@ bool valid_positive_limit(double value) noexcept {
 
 }  // namespace
 
-Cia402Axis::Cia402Axis(profiles::AxisConfig config) : config_(std::move(config)) {
+Cia402Axis::Cia402Axis(Cia402Config config) : config_(std::move(config)) {
   if (!valid_positive_limit(config_.slew_limit) ||
       !valid_positive_limit(config_.following_error_limit)) {
     throw std::invalid_argument("CiA 402 safety limits must be finite and positive");

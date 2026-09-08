@@ -4,6 +4,7 @@
 #include <optional>
 
 #include "policy_runtime/common/result.hpp"
+#include "policy_runtime/devices/cia402/cia402.hpp"
 #include "policy_runtime/profiles/robot_profile.hpp"
 #include "policy_runtime/protocol/cia402/pdo.hpp"
 #include "policy_runtime/protocol/cia402/state_machine.hpp"
@@ -25,7 +26,7 @@ inline constexpr std::uint32_t kAxisFeedbackInvalidCommand = 1U << 4U;
 class Cia402Axis {
  public:
   // Construction occurs before the realtime loop and rejects unsafe limits.
-  explicit Cia402Axis(profiles::AxisConfig config);
+  explicit Cia402Axis(Cia402Config config);
 
   AxisFeedback cycle(const AxisCommand& command, Cia402PdoView& pdo) noexcept;
   Result<void> verify_mode(std::int8_t mode_display) const;

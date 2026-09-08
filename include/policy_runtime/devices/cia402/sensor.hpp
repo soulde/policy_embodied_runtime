@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <utility>
+#include "policy_runtime/devices/cia402/cia402.hpp"
 #include "policy_runtime/profiles/robot_profile.hpp"
 #include "policy_runtime/protocol/cia402/pdo.hpp"
 #include "policy_runtime/protocol/cia402/units.hpp"
@@ -11,7 +12,7 @@ namespace policy_runtime {
 
 class Cia402Sensor final {
  public:
-  explicit Cia402Sensor(profiles::AxisConfig config) : config_(std::move(config)) {}
+  explicit Cia402Sensor(Cia402Config config) : config_(std::move(config)) {}
 
   AxisFeedback decode(const Cia402PdoView& pdo, std::uint64_t sequence,
                       std::int64_t timestamp_ns) const noexcept {

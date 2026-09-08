@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "policy_runtime/common/result.hpp"
+#include "policy_runtime/devices/st3215/st3215.hpp"
 #include "policy_runtime/profiles/robot_profile.hpp"
 #include "policy_runtime/robot_io/daemon/messages.hpp"
 #include "policy_runtime/robot_io/daemon/local_snapshot.hpp"
@@ -29,18 +30,6 @@ inline constexpr std::uint32_t kSt3215FeedbackIo = 1U << 3U;
 inline constexpr std::uint32_t kSt3215FeedbackProtocol = 1U << 4U;
 inline constexpr std::uint32_t kSt3215FeedbackDeviceError = 1U << 5U;
 inline constexpr std::uint32_t kSt3215FeedbackDisabled = 1U << 6U;
-
-struct St3215ServoConfig {
-  std::string name;
-  std::uint8_t device_id{};
-  std::uint16_t servo_id{};
-  std::uint16_t max_position_units{4095U};
-  std::uint16_t speed_units{};
-  std::uint16_t time_units{};
-  std::chrono::milliseconds feedback_timeout{250};
-  std::chrono::nanoseconds command_timeout{};
-  std::chrono::nanoseconds maximum_command_future{};
-};
 
 static_assert(std::is_trivially_copyable_v<St3215ServoCommand>);
 static_assert(std::is_trivially_copyable_v<St3215ServoFeedback>);
