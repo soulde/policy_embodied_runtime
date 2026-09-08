@@ -143,14 +143,14 @@ class RobotIoDaemon {
   SafetySupervisor command_ingress_;
   TransportScheduler scheduler_;
   St3215DeviceRegistry serial_devices_;
-  struct DamiaoBusRoute {
-    std::size_t bus_index{};
+  struct DamiaoTransportRoute {
+    std::size_t transport_index{};
     std::size_t local_index{};
   };
   std::vector<std::unique_ptr<robot_io::TransportRuntime>> transport_runtimes_;
   std::vector<DamiaoSensor> damiao_sensors_;
   std::vector<DamiaoActuator> damiao_actuators_;
-  std::array<std::optional<DamiaoBusRoute>, kRobotIoMaximumServos>
+  std::array<std::optional<DamiaoTransportRoute>, kRobotIoMaximumServos>
       damiao_routes_{};
   EthercatMaster* ethercat_master_{};
   std::optional<robot_io::dds::DdsDaemonEndpoint> dds_;

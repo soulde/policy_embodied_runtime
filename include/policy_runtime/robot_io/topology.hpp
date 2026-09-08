@@ -12,23 +12,23 @@ namespace policy_runtime::robot_io {
 
 enum class PhysicalTransportKind { ethercat, socketcan, usb_can, serial };
 
-struct PhysicalBusKey {
+struct PhysicalTransportKey {
   PhysicalTransportKind kind{};
   std::string path;
 
-  auto operator<=>(const PhysicalBusKey&) const = default;
+  auto operator<=>(const PhysicalTransportKey&) const = default;
 };
 
 struct SensorBinding {
   std::size_t profile_index{};
-  std::size_t bus_index{};
+  std::size_t transport_index{};
   std::size_t transport_slot{};
 };
 
 using ActuatorBinding = SensorBinding;
 
 struct CompiledTopology {
-  std::vector<PhysicalBusKey> buses;
+  std::vector<PhysicalTransportKey> transports;
   std::vector<SensorBinding> sensors;
   std::vector<ActuatorBinding> actuators;
 };

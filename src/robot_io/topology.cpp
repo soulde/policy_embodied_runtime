@@ -47,7 +47,7 @@ std::string canonical_path(PhysicalTransportKind kind, std::string path) {
 Result<void> append_devices(
     const std::vector<profiles::DeviceConfig>& devices,
     bool sensor, CompiledTopology& topology,
-    std::map<PhysicalBusKey, std::size_t>& bus_indices) {
+    std::map<PhysicalTransportKey, std::size_t>& transport_indices) {
   for (std::size_t index = 0; index < devices.size(); ++index) {
     const auto& device = devices[index];
     auto kind = transport_kind(device);
@@ -59,21 +59,21 @@ Result<void> append_devices(
           {ErrorCode::invalid_argument,
            "device '" + device.name + "' requires a transport path"});
     }
-    PhysicalBusKey key{kind.value(),
-                       canonical_path(kind.value(), device.device.path)};
+    PhysicalTransportKey key{kind.value(),
+                             canonical_path(kind.value(), device.device.path)};
     const auto [entry, inserted] =
-        bus_indices.emplace(key, topology.buses.size());
+        transport_indices.emplace(key, topology.transports.size());
     if (inserted) {
-      topology.buses.push_back(std::move(key));
+      topology.transports.push_back(std::move(key));
     }
     std::size_t slot = 0U;
     for (const auto& binding : topology.sensors) {
-      if (binding.bus_index == entry->second) {
+      if (binding.transport_index == entry->second) {
         slot = std::max(slot, binding.transport_slot + 1U);
       }
     }
     for (const auto& binding : topology.actuators) {
-      if (binding.bus_index == entry->second) {
+      if (binding.transport_index == entry->second) {
         slot = std::max(slot, binding.transport_slot + 1U);
       }
     }
@@ -91,17 +91,17 @@ Result<void> append_devices(
 Result<CompiledTopology> compile_physical_topology(
     const profiles::RobotProfile& profile) {
   CompiledTopology topology;
-  topology.buses.reserve(profile.sensors.size() + profile.actuators.size());
+  topology.transports.reserve(profile.sensors.size() + profile.actuators.size());
   topology.sensors.reserve(profile.sensors.size());
   topology.actuators.reserve(profile.actuators.size());
-  std::map<PhysicalBusKey, std::size_t> bus_indices;
+  std::map<PhysicalTransportKey, std::size_t> transport_indices;
   auto appended = append_devices(profile.sensors, true,
-                                 topology, bus_indices);
+                                 topology, transport_indices);
   if (!appended.has_value()) {
     return Result<CompiledTopology>::failure(appended.error());
   }
   appended = append_devices(profile.actuators, false,
-                            topology, bus_indices);
+                            topology, transport_indices);
   if (!appended.has_value()) {
     return Result<CompiledTopology>::failure(appended.error());
   }

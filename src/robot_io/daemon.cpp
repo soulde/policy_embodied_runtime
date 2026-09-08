@@ -169,7 +169,7 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
     damiao_bus_members[motor.path].push_back(index);
   }
   std::vector<std::unique_ptr<robot_io::TransportRuntime>> damiao_buses;
-  std::array<std::optional<DamiaoBusRoute>, kRobotIoMaximumServos> damiao_routes;
+  std::array<std::optional<DamiaoTransportRoute>, kRobotIoMaximumServos> damiao_routes;
   std::vector<DamiaoSensor> damiao_sensors;
   std::vector<DamiaoActuator> damiao_actuators;
   damiao_sensors.reserve(profile.damiao_motors.size());
@@ -183,7 +183,7 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
     if (!transport.has_value()) {
       return Result<void>::failure(transport.error());
     }
-    const auto bus_index = damiao_buses.size();
+    const auto transport_index = damiao_buses.size();
     auto runtime = robot_io::TransportRuntime::create(
         std::move(transport.value()),
         [this, members](const DeviceFrame& frame, std::uint64_t sequence) {
@@ -222,13 +222,14 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
         }
         const auto& actuator = profile.actuators[binding.profile_index];
         if (actuator.name == motor.actuator_name &&
-            binding.bus_index < compiled_topology.value().buses.size() &&
-            compiled_topology.value().buses[binding.bus_index].path == path) {
+            binding.transport_index < compiled_topology.value().transports.size() &&
+            compiled_topology.value().transports[binding.transport_index].path == path) {
           transport_slot = binding.transport_slot;
           break;
         }
       }
-      damiao_routes[global_index] = DamiaoBusRoute{bus_index, transport_slot};
+      damiao_routes[global_index] =
+          DamiaoTransportRoute{transport_index, transport_slot};
     }
     damiao_buses.push_back(
         std::make_unique<robot_io::TransportRuntime>(std::move(runtime.value())));
@@ -351,8 +352,8 @@ Result<void> RobotIoDaemon::attach_dds(
         auto outgoing = frame.value();
         outgoing.sequence = value.sequence;
         const auto route = *damiao_routes_[index];
-        if (route.bus_index < transport_runtimes_.size()) {
-          static_cast<void>(transport_runtimes_[route.bus_index]->stage(
+        if (route.transport_index < transport_runtimes_.size()) {
+          static_cast<void>(transport_runtimes_[route.transport_index]->stage(
               route.local_index, outgoing));
         }
       };
