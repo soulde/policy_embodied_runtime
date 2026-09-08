@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "policy_runtime/robot/devices/damiao.hpp"
+#include "policy_runtime/robot/devices/damiao/motor.hpp"
 
 namespace {
 
@@ -27,6 +28,18 @@ TEST(DamiaoDeviceDirectionTest, ActuatorEmitsControlAndMitFrames) {
   ASSERT_TRUE(mit.has_value());
   EXPECT_EQ(mit.value().size, 8U);
   EXPECT_NE(mit.value().bytes, disabled.value().bytes);
+}
+
+TEST(DamiaoDeviceDirectionTest, MotorExposesIndependentSensorAndActuatorDevices) {
+  policy_runtime::DamiaoMotor motor(5U, {12.5F, 30.0F, 10.0F});
+  policy_runtime::DeviceFrame feedback;
+  feedback.address = 5U;
+  feedback.size = 8U;
+  EXPECT_TRUE(motor.sensor().accepts(feedback));
+  motor.actuator().set_enabled(false);
+  auto command = motor.actuator().encode_frame();
+  ASSERT_TRUE(command.has_value());
+  EXPECT_EQ(command.value().address, 5U);
 }
 
 }  // namespace
