@@ -76,15 +76,15 @@ add_library(policy_runtime_core
     src/protocol/rpc/codec.cpp
     src/devices/cia402/axis.cpp
     src/devices/st3215/servo.cpp
-    src/robot_io/daemon.cpp
+    src/robot_io/daemon/daemon.cpp
     src/robot_io/dds/topic_registry.cpp
-    src/robot_io/transport_runtime.cpp
-    src/robot_io/realtime_loop.cpp
-    src/robot_io/safety_supervisor.cpp
-    src/robot_io/topology.cpp
+    src/robot_io/daemon/transport_runtime.cpp
+    src/robot_io/daemon/realtime_loop.cpp
+    src/robot_io/daemon/safety_supervisor.cpp
+    src/robot_io/daemon/topology.cpp
     src/runtime/runtime_host.cpp
     src/runtime/runtime_host_cli.cpp
-    src/robot_io/transport_scheduler.cpp
+    src/robot_io/daemon/transport_scheduler.cpp
     src/transport/ethercat/elmo_gold.cpp
     src/transport/ethercat/igh_backend.cpp
     src/transport/ethercat/master.cpp

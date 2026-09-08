@@ -6,7 +6,7 @@
 
 #include <gtest/gtest.h>
 
-#include "policy_runtime/robot_io/transport_scheduler.hpp"
+#include "policy_runtime/robot_io/daemon/transport_scheduler.hpp"
 #include "policy_runtime/transport/object_dictionary_transport.hpp"
 
 namespace {

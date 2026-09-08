@@ -3,7 +3,7 @@
 #include <array>
 #include <cstdint>
 
-#include "policy_runtime/robot_io/messages.hpp"
+#include "policy_runtime/robot_io/daemon/messages.hpp"
 #include "policy_runtime/protocol/damiao/protocol.hpp"
 
 namespace policy_runtime {

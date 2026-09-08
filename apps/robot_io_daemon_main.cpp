@@ -2,7 +2,7 @@
 #include <string_view>
 
 #include "policy_runtime/profiles/loader.hpp"
-#include "policy_runtime/robot_io/daemon.hpp"
+#include "policy_runtime/robot_io/daemon/daemon.hpp"
 
 namespace {
 constexpr std::string_view kUsage = "Usage: robot-io-daemon ROBOT_PROFILE\n";

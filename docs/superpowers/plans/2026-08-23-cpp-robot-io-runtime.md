@@ -268,8 +268,8 @@ git commit -m "Port runtime profile loading to C++"
 - Create: `include/policy_runtime/transport/frame_transport.hpp`
 - Create: `include/policy_runtime/transport/cyclic_transport.hpp`
 - Create: `include/policy_runtime/transport/object_dictionary_transport.hpp`
-- Create: `include/policy_runtime/robot_io/transport_scheduler.hpp`
-- Create: `src/robot_io/transport_scheduler.cpp`
+- Create: `include/policy_runtime/robot_io/daemon/transport_scheduler.hpp`
+- Create: `src/robot_io/daemon/transport_scheduler.cpp`
 - Create: `tests/cpp/unit/transport_scheduler_test.cpp`
 
 **Interfaces:**
@@ -542,12 +542,12 @@ git commit -m "Add IgH EtherCAT transport"
 ### Task 8: Robot I/O Daemon, Real-Time Loop, and Safety
 
 **Files:**
-- Create: `include/policy_runtime/robot_io/daemon.hpp`
-- Create: `include/policy_runtime/robot_io/realtime_loop.hpp`
-- Create: `include/policy_runtime/robot_io/safety_supervisor.hpp`
-- Create: `src/robot_io/daemon.cpp`
-- Create: `src/robot_io/realtime_loop.cpp`
-- Create: `src/robot_io/safety_supervisor.cpp`
+- Create: `include/policy_runtime/robot_io/daemon/daemon.hpp`
+- Create: `include/policy_runtime/robot_io/daemon/realtime_loop.hpp`
+- Create: `include/policy_runtime/robot_io/daemon/safety_supervisor.hpp`
+- Create: `src/robot_io/daemon/daemon.cpp`
+- Create: `src/robot_io/daemon/realtime_loop.cpp`
+- Create: `src/robot_io/daemon/safety_supervisor.cpp`
 - Create: `apps/robot_io_daemon_main.cpp`
 - Create: `tests/cpp/integration/robot_io_daemon_test.cpp`
 

@@ -5,7 +5,7 @@
 #include "policy_runtime/profiles/robot_profile.hpp"
 #include "policy_runtime/protocol/cia402/pdo.hpp"
 #include "policy_runtime/protocol/cia402/units.hpp"
-#include "policy_runtime/robot_io/messages.hpp"
+#include "policy_runtime/robot_io/daemon/messages.hpp"
 
 namespace policy_runtime {
 

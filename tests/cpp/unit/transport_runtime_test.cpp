@@ -10,7 +10,7 @@
 
 #include <gtest/gtest.h>
 
-#include "policy_runtime/robot_io/transport_runtime.hpp"
+#include "policy_runtime/robot_io/daemon/transport_runtime.hpp"
 
 namespace policy_runtime::robot_io {
 namespace {

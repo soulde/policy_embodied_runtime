@@ -10,8 +10,8 @@
 #include "policy_runtime/profiles/robot_profile.hpp"
 #include "policy_runtime/protocol/cia402/pdo.hpp"
 #include "policy_runtime/protocol/cia402/state_machine.hpp"
-#include "policy_runtime/robot_io/messages.hpp"
-#include "policy_runtime/robot_io/value_snapshot.hpp"
+#include "policy_runtime/robot_io/daemon/messages.hpp"
+#include "policy_runtime/robot_io/daemon/value_snapshot.hpp"
 
 namespace policy_runtime {
 

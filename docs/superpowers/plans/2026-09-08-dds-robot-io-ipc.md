@@ -290,8 +290,8 @@ git commit -m "Add static DDS robot profile configuration"
 - Create: `include/policy_runtime/robot_io/dds/daemon_endpoint.hpp`
 - Create: `src/robot_io/dds/daemon_endpoint.cpp`
 - Create: `tests/cpp/integration/dds_daemon_endpoint_test.cpp`
-- Modify: `include/policy_runtime/robot_io/daemon.hpp`
-- Modify: `src/robot_io/daemon.cpp`
+- Modify: `include/policy_runtime/robot_io/daemon/daemon.hpp`
+- Modify: `src/robot_io/daemon/daemon.cpp`
 - Modify: `CMakeLists.txt`
 
 **Interfaces:**
@@ -348,7 +348,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit daemon DDS bridge**
 
 ```bash
-git add CMakeLists.txt include/policy_runtime/robot_io/dds src/robot_io/dds include/policy_runtime/robot_io/daemon.hpp src/robot_io/daemon.cpp tests/cpp/integration/dds_daemon_endpoint_test.cpp
+git add CMakeLists.txt include/policy_runtime/robot_io/dds src/robot_io/dds include/policy_runtime/robot_io/daemon/daemon.hpp src/robot_io/daemon/daemon.cpp tests/cpp/integration/dds_daemon_endpoint_test.cpp
 git commit -m "Bridge robot I/O daemon to Cyclone DDS"
 ```
 
@@ -545,8 +545,8 @@ git commit -m "Run robot I/O service over Cyclone DDS"
 - Delete: `src/runtime/robot_io_client.cpp`
 - Delete: `src/runtime/robot_io_service.cpp`
 - Delete: `tests/cpp/integration/ipc_test.cpp`
-- Modify: `include/policy_runtime/robot_io/daemon.hpp`
-- Modify: `src/robot_io/daemon.cpp`
+- Modify: `include/policy_runtime/robot_io/daemon/daemon.hpp`
+- Modify: `src/robot_io/daemon/daemon.cpp`
 - Modify: `include/policy_runtime/runtime/runtime_host.hpp`
 - Modify: `src/runtime/runtime_host.cpp`
 - Modify: `include/policy_runtime/runtime/runtime_host_cli.hpp`
@@ -560,12 +560,12 @@ git commit -m "Run robot I/O service over Cyclone DDS"
 
 **Interfaces:**
 - Removes: `RobotIoIpcServer`, `RobotIoClient`, `RobotIoServiceListener`, `connect_robot_io_service`, socket/generation CLI options, shared-memory ABI.
-- Retains: transport-neutral command/feedback value types in a new `include/policy_runtime/robot_io/messages.hpp` included by DDS and runtime code.
+- Retains: transport-neutral command/feedback value types in a new `include/policy_runtime/robot_io/daemon/messages.hpp` included by DDS and runtime code.
 
 - [ ] **Step 1: Move semantic value types out of the IPC ABI header**
 
 ```cpp
-// include/policy_runtime/robot_io/messages.hpp
+// include/policy_runtime/robot_io/daemon/messages.hpp
 struct AxisCommand { /* existing semantic fields */ };
 struct AxisFeedback { /* existing semantic fields */ };
 struct St3215ServoCommand { /* existing semantic fields */ };

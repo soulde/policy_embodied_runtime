@@ -15,7 +15,7 @@
 #include "policy_runtime/profiles/policy_profile.hpp"
 #include "policy_runtime/profiles/robot_profile.hpp"
 #include "policy_runtime/protocol/rpc/messages.hpp"
-#include "policy_runtime/robot_io/value_snapshot.hpp"
+#include "policy_runtime/robot_io/daemon/value_snapshot.hpp"
 
 namespace policy_runtime {
 

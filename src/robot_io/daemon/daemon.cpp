@@ -1,4 +1,4 @@
-#include "policy_runtime/robot_io/daemon.hpp"
+#include "policy_runtime/robot_io/daemon/daemon.hpp"
 
 #include <cerrno>
 #include <chrono>
@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 #include "policy_runtime/transport/ethercat/master.hpp"
-#include "policy_runtime/robot_io/topology.hpp"
+#include "policy_runtime/robot_io/daemon/topology.hpp"
 
 namespace policy_runtime {
 namespace {

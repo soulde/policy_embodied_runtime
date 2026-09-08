@@ -14,10 +14,10 @@
 
 #include "policy_runtime/common/result.hpp"
 #include "policy_runtime/profiles/robot_profile.hpp"
-#include "policy_runtime/robot_io/messages.hpp"
-#include "policy_runtime/robot_io/local_snapshot.hpp"
-#include "policy_runtime/robot_io/value_snapshot.hpp"
-#include "policy_runtime/robot_io/transport_scheduler.hpp"
+#include "policy_runtime/robot_io/daemon/messages.hpp"
+#include "policy_runtime/robot_io/daemon/local_snapshot.hpp"
+#include "policy_runtime/robot_io/daemon/value_snapshot.hpp"
+#include "policy_runtime/robot_io/daemon/transport_scheduler.hpp"
 #include "policy_runtime/transport/frame_transport.hpp"
 
 namespace policy_runtime {
