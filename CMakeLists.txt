@@ -86,7 +86,7 @@ add_library(policy_runtime_core
     src/runtime/runtime_host.cpp
     src/runtime/runtime_host_cli.cpp
     src/robot_io/daemon/transport_scheduler.cpp
-    src/transport/ethercat/elmo_gold.cpp
+    src/devices/cia402/elmo_gold.cpp
     src/transport/ethercat/igh_backend.cpp
     src/transport/ethercat/master.cpp
     src/devices/cia402/ethercat_binding.cpp
@@ -252,7 +252,7 @@ if(POLICY_RUNTIME_BUILD_TESTS)
     add_executable(igh_sdo_semantics_test
         tests/cpp/integration/igh_sdo_semantics_test.cpp
         tests/cpp/support/igh_shim.cpp
-        src/transport/ethercat/elmo_gold.cpp
+        src/devices/cia402/elmo_gold.cpp
         src/transport/ethercat/igh_backend.cpp
         src/transport/ethercat/master.cpp
         src/devices/cia402/ethercat_binding.cpp)

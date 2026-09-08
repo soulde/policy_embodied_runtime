@@ -6,7 +6,7 @@
 #include <utility>
 
 #include "policy_runtime/devices/cia402/ethercat_binding.hpp"
-#include "policy_runtime/transport/ethercat/elmo_gold.hpp"
+#include "policy_runtime/devices/cia402/elmo_gold.hpp"
 
 namespace policy_runtime {
 namespace {

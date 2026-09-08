@@ -5,7 +5,7 @@
 #include <gtest/gtest.h>
 
 #include "igh_shim.hpp"
-#include "policy_runtime/transport/ethercat/elmo_gold.hpp"
+#include "policy_runtime/devices/cia402/elmo_gold.hpp"
 #include "policy_runtime/transport/ethercat/master.hpp"
 
 namespace {

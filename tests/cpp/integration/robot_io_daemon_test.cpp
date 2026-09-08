@@ -31,7 +31,7 @@
 #include "policy_runtime/robot_io/daemon/realtime_loop.hpp"
 #include "policy_runtime/runtime/robot_io_client.hpp"
 #include "policy_runtime/transport/ethercat/backend.hpp"
-#include "policy_runtime/transport/ethercat/elmo_gold.hpp"
+#include "policy_runtime/devices/cia402/elmo_gold.hpp"
 #include "policy_runtime/transport/ethercat/master.hpp"
 
 namespace allocation_probe {
