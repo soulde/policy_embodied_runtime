@@ -216,15 +216,17 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
       const auto global_index = members[local_index];
       std::size_t transport_slot = local_index;
       const auto& motor = profile.damiao_motors[global_index];
-      for (const auto& binding : compiled_topology.value().actuators) {
-        if (binding.profile_index >= profile.actuators.size()) {
+      for (const auto& binding : compiled_topology.value().devices) {
+        if (!binding.actuator_profile_index.has_value() ||
+            *binding.actuator_profile_index >= profile.actuators.size()) {
           continue;
         }
-        const auto& actuator = profile.actuators[binding.profile_index];
+        const auto& actuator =
+            profile.actuators[*binding.actuator_profile_index];
         if (actuator.name == motor.actuator_name &&
             binding.transport_index < compiled_topology.value().transports.size() &&
             compiled_topology.value().transports[binding.transport_index].path == path) {
-          transport_slot = binding.transport_slot;
+          transport_slot = binding.transmit_slot;
           break;
         }
       }
