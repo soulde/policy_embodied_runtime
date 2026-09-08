@@ -4,6 +4,7 @@
 #include <chrono>
 #include <exception>
 #include <map>
+#include <memory>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -277,6 +278,7 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
     }
   }
   axes_ = std::move(configured_axes);
+  axis_configurations_ = profile.axes;
   transport_runtimes_ = std::move(damiao_buses);
   actuator_bindings_ = actuator_bindings;
   damiao_sensors_ = std::move(damiao_sensors);
@@ -416,6 +418,24 @@ Result<void> RobotIoDaemon::start() {
     auto started = dds_->start();
     if (!started.has_value()) {
       return started;
+    }
+  }
+
+  if (ethercat_master_ == nullptr && axis_count_ > 0U) {
+    try {
+      auto backend = std::make_shared<IghBackend>();
+      std::vector<EthercatAxisConfiguration> configurations;
+      configurations.reserve(axis_count_);
+      for (const auto& axis : axis_configurations_) {
+        configurations.push_back({axis, {}});
+      }
+      owned_ethercat_master_ = std::make_unique<EthercatMaster>(
+          std::move(backend), std::move(configurations));
+      ethercat_master_ = owned_ethercat_master_.get();
+    } catch (const std::exception& error) {
+      return Result<void>::failure(
+          {ErrorCode::internal,
+           std::string("failed to create EtherCAT transport: ") + error.what()});
     }
   }
 

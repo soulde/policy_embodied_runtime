@@ -1,13 +1,8 @@
 #include <iostream>
-#include <memory>
 #include <string_view>
-#include <utility>
-#include <vector>
 
 #include "policy_runtime/profiles/loader.hpp"
 #include "policy_runtime/robot_io/daemon.hpp"
-#include "policy_runtime/transport/ethercat/backend.hpp"
-#include "policy_runtime/transport/ethercat/master.hpp"
 
 namespace {
 constexpr std::string_view kUsage = "Usage: robot-io-daemon ROBOT_PROFILE\n";
@@ -39,25 +34,11 @@ int main(int argc, char** argv) {
     std::cerr << installed.error().message << '\n';
     return 1;
   }
-  auto backend = std::make_shared<policy_runtime::IghBackend>();
-  std::vector<policy_runtime::EthercatAxisConfiguration> configurations;
-  configurations.reserve(profile.value().axes.size());
-  for (const auto& axis : profile.value().axes) {
-    configurations.push_back({axis, {}});
-  }
-  policy_runtime::EthercatMaster master{backend, std::move(configurations)};
   policy_runtime::RobotIoDaemon daemon;
   auto configured = daemon.configure(profile.value());
   if (!configured.has_value()) {
     std::cerr << configured.error().message << '\n';
     return 1;
-  }
-  if (!profile.value().axes.empty()) {
-    auto attached_master = daemon.attach_ethercat(master);
-    if (!attached_master.has_value()) {
-      std::cerr << attached_master.error().message << '\n';
-      return 1;
-    }
   }
   auto attached_dds = daemon.attach_dds(profile.value());
   if (!attached_dds.has_value()) {

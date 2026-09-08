@@ -145,10 +145,12 @@ class RobotIoDaemon {
   TransportScheduler scheduler_;
   St3215DeviceRegistry serial_devices_;
   std::vector<std::unique_ptr<robot_io::TransportRuntime>> transport_runtimes_;
+  std::vector<profiles::AxisConfig> axis_configurations_;
   std::vector<DamiaoSensor> damiao_sensors_;
   std::vector<DamiaoActuator> damiao_actuators_;
   std::array<std::optional<robot_io::DeviceBinding>, kRobotIoMaximumServos>
       actuator_bindings_{};
+  std::unique_ptr<EthercatMaster> owned_ethercat_master_;
   EthercatMaster* ethercat_master_{};
   std::optional<robot_io::dds::DdsDaemonEndpoint> dds_;
   std::array<std::optional<Cia402Axis>, kRobotIoMaximumAxes> axes_{};
