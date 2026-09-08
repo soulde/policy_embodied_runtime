@@ -14,7 +14,6 @@
 #include "policy_runtime/devices/cia402/pdo.hpp"
 #include "policy_runtime/transport/cyclic_transport.hpp"
 #include "policy_runtime/transport/ethercat/backend.hpp"
-#include "policy_runtime/transport/object_dictionary_transport.hpp"
 
 namespace policy_runtime {
 
@@ -48,7 +47,7 @@ struct EthercatProcessImageField {
   bool bound{};
 };
 
-class EthercatMailbox final : public ObjectDictionaryTransport {
+class EthercatMailbox final : public Transport {
  public:
   Result<void> open() override;
   void close() noexcept override;
@@ -57,10 +56,10 @@ class EthercatMailbox final : public ObjectDictionaryTransport {
   void cycle(const CycleContext& context) noexcept override;
 
   Result<MailboxRequestId> queue_download(
-      ObjectAddress address, std::span<const std::byte> data) override;
-  Result<MailboxRequestId> queue_upload(ObjectAddress address) override;
+      ObjectAddress address, std::span<const std::byte> data);
+  Result<MailboxRequestId> queue_upload(ObjectAddress address);
   std::optional<MailboxRequestStatus> mailbox_status(
-      MailboxRequestId request_id) const override;
+      MailboxRequestId request_id) const;
 
  private:
   struct OwnerLifecycle {
@@ -167,7 +166,7 @@ class EthercatMaster final : public CyclicTransport {
   bool write_process_image_field(CyclicFieldId id,
                                  std::uint32_t value) noexcept;
   std::size_t process_image_field_count() const noexcept;
-  ObjectDictionaryTransport& mailbox(std::size_t axis_index);
+  EthercatMailbox& mailbox(std::size_t axis_index);
 
  private:
   static constexpr std::uint64_t kCycleOpenBit = std::uint64_t{1U} << 63U;

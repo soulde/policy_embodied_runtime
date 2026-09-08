@@ -109,7 +109,7 @@ class SerialTransport::Impl {
   explicit Impl(SerialConfig value) : config(std::move(value)) {}
 
   struct Frame {
-    ChannelId channel{};
+    SerialChannelId channel{};
     std::size_t size{};
     std::array<std::byte, kMaximumFrameStorage> data{};
   };
@@ -612,7 +612,7 @@ void SerialTransport::cycle(const CycleContext&) noexcept {
   }
 }
 
-Result<void> SerialTransport::write(ChannelId channel,
+Result<void> SerialTransport::write(SerialChannelId channel,
                                     std::span<const std::byte> data) {
   if (!impl_->opened.load(std::memory_order_acquire)) {
     return Result<void>::failure(
@@ -639,7 +639,7 @@ Result<void> SerialTransport::write(ChannelId channel,
   return Result<void>::success();
 }
 
-Result<std::size_t> SerialTransport::read(ChannelId channel,
+Result<std::size_t> SerialTransport::read(SerialChannelId channel,
                                           std::span<std::byte> buffer) {
   if (!impl_->opened.load(std::memory_order_acquire)) {
     return Result<std::size_t>::failure(

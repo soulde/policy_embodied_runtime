@@ -866,7 +866,7 @@ std::span<const Cia402PdoHandles> EthercatMaster::pdo_handles() const noexcept {
   return pdo_handles_;
 }
 
-ObjectDictionaryTransport& EthercatMaster::mailbox(std::size_t axis_index) {
+EthercatMailbox& EthercatMaster::mailbox(std::size_t axis_index) {
   return *mailboxes_.at(axis_index);
 }
 

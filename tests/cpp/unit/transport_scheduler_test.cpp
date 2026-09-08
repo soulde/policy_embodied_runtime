@@ -7,7 +7,7 @@
 #include <gtest/gtest.h>
 
 #include "policy_runtime/robot_io/daemon/transport_scheduler.hpp"
-#include "policy_runtime/transport/object_dictionary_transport.hpp"
+#include "policy_runtime/transport/ethercat/backend.hpp"
 
 namespace {
 
@@ -40,23 +40,23 @@ class FakeTransport final : public policy_runtime::Transport {
   policy_runtime::SchedulingClass scheduling_class_;
 };
 
-class FakeObjectDictionaryTransport final : public policy_runtime::ObjectDictionaryTransport {
+class FakeEthercatMailbox final {
  public:
-  policy_runtime::Result<void> open() override {
+  policy_runtime::Result<void> open() {
     return policy_runtime::Result<void>::success();
   }
 
-  void close() noexcept override {}
+  void close() noexcept {}
 
-  policy_runtime::TransportHealth health() const noexcept override {
+  policy_runtime::TransportHealth health() const noexcept {
     return policy_runtime::TransportHealth::healthy;
   }
 
-  policy_runtime::SchedulingClass scheduling_class() const noexcept override {
+  policy_runtime::SchedulingClass scheduling_class() const noexcept {
     return policy_runtime::SchedulingClass::blocking_event_driven;
   }
 
-  void cycle(const policy_runtime::CycleContext&) noexcept override {
+  void cycle(const policy_runtime::CycleContext&) noexcept {
     for (auto& [request_id, request] : requests_) {
       (void)request_id;
       auto& status = request.status;
@@ -78,17 +78,17 @@ class FakeObjectDictionaryTransport final : public policy_runtime::ObjectDiction
   }
 
   policy_runtime::Result<policy_runtime::MailboxRequestId> queue_download(
-      policy_runtime::ObjectAddress, std::span<const std::byte>) override {
+      policy_runtime::ObjectAddress, std::span<const std::byte>) {
     return enqueue(false);
   }
 
   policy_runtime::Result<policy_runtime::MailboxRequestId> queue_upload(
-      policy_runtime::ObjectAddress) override {
+      policy_runtime::ObjectAddress) {
     return enqueue(true);
   }
 
   std::optional<policy_runtime::MailboxRequestStatus> mailbox_status(
-      policy_runtime::MailboxRequestId request_id) const override {
+      policy_runtime::MailboxRequestId request_id) const {
     const auto status = requests_.find(request_id);
     return status == requests_.end() ? std::nullopt
                                      : std::optional<policy_runtime::MailboxRequestStatus>{
@@ -176,8 +176,8 @@ TEST(TransportSchedulerTest, RemoveClearsAssignmentBeforeAddressReuse) {
   replacement->~FakeTransport();
 }
 
-TEST(ObjectDictionaryTransportTest, QueuesMailboxRequestsAndReportsCompletionOrError) {
-  FakeObjectDictionaryTransport transport;
+TEST(EthercatMailboxTest, QueuesMailboxRequestsAndReportsCompletionOrError) {
+  FakeEthercatMailbox transport;
   const std::array<std::byte, 1> value{std::byte{0x01}};
 
   EXPECT_EQ(transport.scheduling_class(),

@@ -8,7 +8,7 @@
 #include <span>
 #include <string>
 
-#include "policy_runtime/transport/frame_transport.hpp"
+#include "policy_runtime/transport/asynchronous_transport.hpp"
 
 namespace policy_runtime {
 
@@ -31,7 +31,9 @@ enum class SerialError : std::uint8_t {
   internal,
 };
 
-class SerialTransport final : public FrameTransport {
+using SerialChannelId = std::uint32_t;
+
+class SerialTransport final : public AsynchronousTransport {
  public:
   explicit SerialTransport(SerialConfig config);
   ~SerialTransport() override;
@@ -47,10 +49,10 @@ class SerialTransport final : public FrameTransport {
   SchedulingClass scheduling_class() const noexcept override;
   void cycle(const CycleContext& context) noexcept override;
 
-  Result<void> write(ChannelId channel,
-                     std::span<const std::byte> data) override;
-  Result<std::size_t> read(ChannelId channel,
-                           std::span<std::byte> buffer) override;
+  Result<void> write(SerialChannelId channel,
+                     std::span<const std::byte> data);
+  Result<std::size_t> read(SerialChannelId channel,
+                           std::span<std::byte> buffer);
 
   SerialError last_error() const noexcept;
   std::uint64_t timeout_count() const noexcept;

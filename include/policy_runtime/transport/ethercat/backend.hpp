@@ -9,9 +9,24 @@
 #include <type_traits>
 #include <vector>
 
-#include "policy_runtime/transport/object_dictionary_transport.hpp"
+#include "policy_runtime/transport/transport.hpp"
 
 namespace policy_runtime {
+
+struct ObjectAddress {
+  std::uint16_t index{};
+  std::uint8_t subindex{};
+};
+
+using MailboxRequestId = std::uint64_t;
+
+enum class MailboxRequestState { queued, completed, failed };
+
+struct MailboxRequestStatus {
+  MailboxRequestState state{};
+  std::optional<Error> error;
+  std::vector<std::byte> uploaded_bytes;
+};
 
 struct EthercatSlaveAddress {
   std::uint16_t alias{};

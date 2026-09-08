@@ -14,11 +14,8 @@
 
 #include "policy_runtime/robot_io/daemon/transport_runtime.hpp"
 #include "policy_runtime/transport/asynchronous_transport.hpp"
-#include "policy_runtime/transport/frame_transport.hpp"
 #include "policy_runtime/transport/socketcan/socketcan_transport.hpp"
 
-static_assert(std::is_base_of_v<policy_runtime::AsynchronousTransport,
-                                policy_runtime::FrameTransport>);
 static_assert(std::is_base_of_v<policy_runtime::AsynchronousTransport,
                                 policy_runtime::SocketCanTransport>);
 
