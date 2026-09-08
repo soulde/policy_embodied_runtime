@@ -4,6 +4,9 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <thread>
 #include <variant>
@@ -16,6 +19,44 @@
 #include "policy_runtime/robot_io/dds/realtime_mailbox.hpp"
 
 namespace policy_runtime::robot_io::dds {
+
+namespace {
+
+Result<std::string> load_cyclone_config(const std::string& configured_path) {
+  if (configured_path.empty()) {
+    return Result<std::string>::success({});
+  }
+  std::filesystem::path path(configured_path);
+  if (!path.is_absolute()) {
+    auto candidate = std::filesystem::current_path();
+    for (unsigned depth = 0U; depth < 6U; ++depth) {
+      const auto resolved = candidate / configured_path;
+      if (std::filesystem::exists(resolved)) {
+        path = resolved;
+        break;
+      }
+      if (candidate == candidate.root_path()) break;
+      candidate = candidate.parent_path();
+    }
+  }
+  if (!std::filesystem::exists(path)) {
+    return Result<std::string>::failure(
+        {ErrorCode::unavailable,
+         "CycloneDDS configuration file does not exist: " +
+             configured_path});
+  }
+  std::ifstream input(path);
+  const std::string xml((std::istreambuf_iterator<char>(input)),
+                        std::istreambuf_iterator<char>());
+  if (xml.empty()) {
+    return Result<std::string>::failure(
+        {ErrorCode::io,
+         "CycloneDDS configuration file is empty: " + path.string()});
+  }
+  return Result<std::string>::success(xml);
+}
+
+}  // namespace
 
 template <typename Event>
 using EventQueue = std::variant<SensorEventQueue<Event, 16U>,
@@ -271,15 +312,38 @@ Result<DdsDaemonEndpoint> DdsDaemonEndpoint::create(
         {ErrorCode::invalid_argument, "DDS daemon endpoint requires DDS backend"});
   }
   try {
+    auto configuration = load_cyclone_config(profile.dds.cyclone_config);
+    if (!configuration.has_value()) {
+      return Result<DdsDaemonEndpoint>::failure(configuration.error());
+    }
+    dds_entity_t configured_domain = DDS_CYCLONEDDS_HANDLE;
+    bool owns_configured_domain = false;
+    if (!configuration.value().empty()) {
+      configured_domain = dds_create_domain(
+          profile.dds.local_domain_id, configuration.value().c_str());
+      if (configured_domain > 0) {
+        owns_configured_domain = true;
+      } else if (configured_domain != DDS_RETCODE_PRECONDITION_NOT_MET) {
+        return Result<DdsDaemonEndpoint>::failure(
+            {ErrorCode::io, "failed to create configured CycloneDDS domain"});
+      }
+    }
     auto registry = build_dds_topic_registry(profile, profile.dds.robot_id);
     if (!registry.has_value()) {
       return Result<DdsDaemonEndpoint>::failure(registry.error());
     }
-    return Result<DdsDaemonEndpoint>::success(DdsDaemonEndpoint(
-        std::make_unique<Impl>(profile.dds.local_domain_id,
-                               profile.dds.robot_id,
-                               profile.dds.sensor_queue_capacity,
-                               registry.value(), std::move(callbacks))));
+    try {
+      return Result<DdsDaemonEndpoint>::success(DdsDaemonEndpoint(
+          std::make_unique<Impl>(profile.dds.local_domain_id,
+                                 profile.dds.robot_id,
+                                 profile.dds.sensor_queue_capacity,
+                                 registry.value(), std::move(callbacks))));
+    } catch (...) {
+      if (owns_configured_domain) {
+        static_cast<void>(dds_delete(configured_domain));
+      }
+      throw;
+    }
   } catch (const ::dds::core::Exception& error) {
     return Result<DdsDaemonEndpoint>::failure(
         {ErrorCode::io, std::string("failed to create DDS participant: ") +

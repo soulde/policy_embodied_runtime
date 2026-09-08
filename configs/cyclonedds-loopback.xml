@@ -1,12 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<CycloneDDS xmlns="https://cdds.io/config"
-            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <Domain id="any">
+<CycloneDDS>
+  <Domain Id="any">
     <General>
       <Interfaces>
-        <NetworkInterface name="lo" multicast="false"/>
-        <PubSubMessageExchange type="iox" library="psmx_iox"
-                               config="LOG_LEVEL=WARN;" priority="10"/>
+        <NetworkInterface address="127.0.0.1" multicast="false"/>
       </Interfaces>
       <AllowMulticast>false</AllowMulticast>
     </General>
