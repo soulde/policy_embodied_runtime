@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <span>
 
-#include "policy_runtime/protocol/cia402/pdo.hpp"
+#include "policy_runtime/devices/cia402/pdo.hpp"
 #include "policy_runtime/profiles/robot_profile.hpp"
 #include "policy_runtime/transport/ethercat/backend.hpp"
 #include "policy_runtime/transport/ethercat/master.hpp"
@@ -12,7 +12,7 @@ namespace policy_runtime {
 
 // CiA402-specific EtherCAT PDO binding. EthercatMaster owns the physical
 // transport; this adapter owns the CiA402 object dictionary and typed fields.
-class Cia402PdoAdapter final {
+class Cia402EthercatBinding final {
  public:
   static Result<Cia402PdoHandles> configure_axis(
       EthercatBackend& backend, const EthercatAxisConfiguration& configuration);

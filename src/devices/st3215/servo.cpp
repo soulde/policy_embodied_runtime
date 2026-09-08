@@ -7,7 +7,7 @@
 #include <limits>
 #include <utility>
 
-#include "policy_runtime/protocol/st3215/protocol.hpp"
+#include "policy_runtime/devices/st3215/protocol.hpp"
 #include "policy_runtime/robot_io/daemon/transport_factory.hpp"
 #include "policy_runtime/transport/serial/serial_transport.hpp"
 

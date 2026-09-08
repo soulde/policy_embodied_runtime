@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "policy_runtime/profiles/robot_profile.hpp"
-#include "policy_runtime/protocol/cia402/pdo.hpp"
+#include "policy_runtime/devices/cia402/pdo.hpp"
 #include "policy_runtime/transport/cyclic_transport.hpp"
 #include "policy_runtime/transport/ethercat/backend.hpp"
 #include "policy_runtime/transport/object_dictionary_transport.hpp"

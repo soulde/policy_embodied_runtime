@@ -194,7 +194,7 @@ class TypedPdoField {
 
 class EthercatMaster;
 class EthercatMailbox;
-class Cia402PdoAdapter;
+class Cia402EthercatBinding;
 
 class EthercatBackend {
  public:
@@ -230,7 +230,7 @@ class EthercatBackend {
 
  private:
   friend class EthercatMaster;
-  friend class Cia402PdoAdapter;
+  friend class Cia402EthercatBinding;
   friend class EthercatMailbox;
 };
 

@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <utility>
 
-#include "policy_runtime/protocol/cia402/units.hpp"
+#include "policy_runtime/devices/cia402/units.hpp"
 
 namespace policy_runtime {
 namespace {

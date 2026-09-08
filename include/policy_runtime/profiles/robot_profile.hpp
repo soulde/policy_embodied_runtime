@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "policy_runtime/protocol/damiao/protocol.hpp"
+#include "policy_runtime/devices/damiao/protocol.hpp"
 
 namespace policy_runtime::profiles {
 

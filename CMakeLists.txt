@@ -70,9 +70,9 @@ add_library(policy_runtime_core
     src/policy/dummy_policy.cpp
     src/policy/pipeline.cpp
     src/profiles/loader.cpp
-    src/protocol/cia402/state_machine.cpp
-    src/protocol/damiao/protocol.cpp
-    src/protocol/st3215/protocol.cpp
+    src/devices/cia402/state_machine.cpp
+    src/devices/damiao/protocol.cpp
+    src/devices/st3215/protocol.cpp
     src/protocol/rpc/codec.cpp
     src/devices/cia402/axis.cpp
     src/devices/st3215/servo.cpp
@@ -89,7 +89,7 @@ add_library(policy_runtime_core
     src/transport/ethercat/elmo_gold.cpp
     src/transport/ethercat/igh_backend.cpp
     src/transport/ethercat/master.cpp
-    src/transport/ethercat/cia402_adapter.cpp
+    src/devices/cia402/ethercat_binding.cpp
     src/transport/serial/serial_transport.cpp
     src/transport/serial/virtual_can_transport.cpp
     src/transport/socketcan/socketcan_transport.cpp)
@@ -254,7 +254,8 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         tests/cpp/support/igh_shim.cpp
         src/transport/ethercat/elmo_gold.cpp
         src/transport/ethercat/igh_backend.cpp
-        src/transport/ethercat/master.cpp)
+        src/transport/ethercat/master.cpp
+        src/devices/cia402/ethercat_binding.cpp)
     target_include_directories(igh_sdo_semantics_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp/support
         ${CMAKE_CURRENT_SOURCE_DIR}/include)

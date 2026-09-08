@@ -11,8 +11,8 @@
 
 #include "policy_runtime/common/result.hpp"
 #include "policy_runtime/profiles/robot_profile.hpp"
-#include "policy_runtime/protocol/cia402/pdo.hpp"
-#include "policy_runtime/protocol/cia402/state_machine.hpp"
+#include "policy_runtime/devices/cia402/pdo.hpp"
+#include "policy_runtime/devices/cia402/state_machine.hpp"
 #include "policy_runtime/devices/cia402/axis.hpp"
 #include "policy_runtime/devices/damiao.hpp"
 #include "policy_runtime/robot_io/daemon/transport_runtime.hpp"

@@ -13,7 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "policy_runtime/profiles/robot_profile.hpp"
-#include "policy_runtime/protocol/st3215/protocol.hpp"
+#include "policy_runtime/devices/st3215/protocol.hpp"
 #include "policy_runtime/devices/st3215/servo.hpp"
 #include "policy_runtime/devices/st3215/st3215.hpp"
 #include "policy_runtime/devices/st3215/actuator.hpp"

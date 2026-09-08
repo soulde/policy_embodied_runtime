@@ -3,7 +3,7 @@
 
 #include <gtest/gtest.h>
 
-#include "policy_runtime/protocol/cia402/state_machine.hpp"
+#include "policy_runtime/devices/cia402/state_machine.hpp"
 
 namespace {
 

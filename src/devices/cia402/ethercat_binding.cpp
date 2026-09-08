@@ -1,4 +1,4 @@
-#include "policy_runtime/transport/ethercat/cia402_adapter.hpp"
+#include "policy_runtime/devices/cia402/ethercat_binding.hpp"
 
 #include <utility>
 
@@ -6,7 +6,7 @@
 
 namespace policy_runtime {
 
-Result<Cia402PdoHandles> Cia402PdoAdapter::configure_axis(
+Result<Cia402PdoHandles> Cia402EthercatBinding::configure_axis(
     EthercatBackend& backend, const EthercatAxisConfiguration& configuration) {
   const auto slave = EthercatSlaveAddress{configuration.axis.alias,
                                           configuration.axis.position};
@@ -82,7 +82,7 @@ Result<Cia402PdoHandles> Cia402PdoAdapter::configure_axis(
   return Result<Cia402PdoHandles>::success(std::move(handles));
 }
 
-bool Cia402PdoAdapter::read_inputs(const Cia402PdoHandles& handles,
+bool Cia402EthercatBinding::read_inputs(const Cia402PdoHandles& handles,
                                    std::span<const std::byte> image,
                                    Cia402PdoView& pdo) noexcept {
   const auto status_word = handles.status_word.read(image);
@@ -102,7 +102,7 @@ bool Cia402PdoAdapter::read_inputs(const Cia402PdoHandles& handles,
   return true;
 }
 
-bool Cia402PdoAdapter::write_outputs(const Cia402PdoHandles& handles,
+bool Cia402EthercatBinding::write_outputs(const Cia402PdoHandles& handles,
                                      std::span<std::byte> image,
                                      const Cia402PdoView& pdo,
                                      profiles::Cia402Mode mode,

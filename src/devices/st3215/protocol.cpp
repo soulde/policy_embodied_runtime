@@ -1,4 +1,4 @@
-#include "policy_runtime/protocol/st3215/protocol.hpp"
+#include "policy_runtime/devices/st3215/protocol.hpp"
 
 #include <algorithm>
 #include <cmath>

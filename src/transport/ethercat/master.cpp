@@ -5,7 +5,7 @@
 #include <set>
 #include <utility>
 
-#include "policy_runtime/transport/ethercat/cia402_adapter.hpp"
+#include "policy_runtime/devices/cia402/ethercat_binding.hpp"
 #include "policy_runtime/transport/ethercat/elmo_gold.hpp"
 
 namespace policy_runtime {
@@ -512,7 +512,7 @@ Result<void> EthercatMaster::open() {
   handles.reserve(axes_.size());
   for (std::size_t axis_index = 0; axis_index < axes_.size(); ++axis_index) {
     const auto& configuration = axes_[axis_index];
-    auto configured = Cia402PdoAdapter::configure_axis(*backend_, configuration);
+    auto configured = Cia402EthercatBinding::configure_axis(*backend_, configuration);
     if (!configured.has_value()) {
       backend_->deactivate();
       return Result<void>::failure(configured.error());
@@ -664,7 +664,7 @@ void EthercatMaster::cycle(const CycleContext&) noexcept {
     for (std::size_t axis_index = 0; axis_index < pdo_handles_.size(); ++axis_index) {
       const auto& handles = pdo_handles_[axis_index];
       auto& pdo = pdo_views_[axis_index];
-      valid_image = Cia402PdoAdapter::read_inputs(handles, image, pdo) &&
+      valid_image = Cia402EthercatBinding::read_inputs(handles, image, pdo) &&
                     valid_image;
     }
   }
@@ -686,7 +686,7 @@ void EthercatMaster::cycle(const CycleContext&) noexcept {
   for (std::size_t axis_index = 0; axis_index < pdo_handles_.size(); ++axis_index) {
     const auto& handles = pdo_handles_[axis_index];
     const auto& pdo = pdo_views_[axis_index];
-    outputs_written = Cia402PdoAdapter::write_outputs(
+    outputs_written = Cia402EthercatBinding::write_outputs(
                           handles, image, pdo, axes_[axis_index].axis.mode,
                           outputs_enabled) &&
                       outputs_written;
