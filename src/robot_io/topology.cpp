@@ -1,5 +1,6 @@
 #include "policy_runtime/robot_io/topology.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <map>
 #include <string>
@@ -65,7 +66,13 @@ Result<void> append_devices(
     if (inserted) {
       topology.buses.push_back(std::move(key));
     }
-    topology.devices.push_back({direction, index, entry->second});
+    std::size_t slot = 0U;
+    for (const auto& binding : topology.devices) {
+      if (binding.bus_index == entry->second) {
+        slot = std::max(slot, binding.transport_slot + 1U);
+      }
+    }
+    topology.devices.push_back({direction, index, entry->second, slot});
   }
   return Result<void>::success();
 }

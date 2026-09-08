@@ -21,6 +21,9 @@ TEST(PhysicalTopologyTest, DeduplicatesPairedDevicesAndSharedCanBus) {
   ASSERT_EQ(topology.value().buses.size(), 1U);
   EXPECT_EQ(topology.value().devices.size(), 3U);
   EXPECT_EQ(topology.value().buses.front().path, "vcan0");
+  EXPECT_EQ(topology.value().devices[0].transport_slot, 0U);
+  EXPECT_EQ(topology.value().devices[1].transport_slot, 1U);
+  EXPECT_EQ(topology.value().devices[2].transport_slot, 2U);
 }
 
 TEST(PhysicalTopologyTest, KeepsDifferentPhysicalConnectionsSeparate) {

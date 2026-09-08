@@ -24,6 +24,7 @@ struct DeviceBinding {
   DeviceDirection direction{};
   std::size_t profile_index{};
   std::size_t bus_index{};
+  std::size_t transport_slot{};
 };
 
 struct CompiledTopology {
