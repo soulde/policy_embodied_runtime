@@ -19,6 +19,7 @@
 #include "policy_runtime/devices/st3215/actuator.hpp"
 #include "policy_runtime/devices/st3215/sensor.hpp"
 #include "policy_runtime/robot_io/daemon/transport_scheduler.hpp"
+#include "policy_runtime/transport/serial/serial_transport.hpp"
 
 namespace {
 
@@ -42,8 +43,10 @@ Bytes bytes(std::initializer_list<std::uint8_t> values) {
   return output;
 }
 
-class RecordingSt3215Transport final : public policy_runtime::St3215Transport {
+class RecordingSerialTransport final : public policy_runtime::SerialTransport {
  public:
+  RecordingSerialTransport() : SerialTransport(policy_runtime::SerialConfig{}) {}
+
   policy_runtime::Result<void> open() override {
     ++open_calls;
     open_.store(true, std::memory_order_release);
@@ -282,7 +285,7 @@ void pump_cycles(St3215Bus& bus, unsigned count) {
 }
 
 TEST(St3215Test, SharedBusUsesOneCycleOwnerForAllPhysicalIo) {
-  auto transport = std::make_shared<RecordingSt3215Transport>();
+  auto transport = std::make_shared<RecordingSerialTransport>();
   transport->positions[1] = 100;
   transport->positions[2] = 200;
   auto first = std::make_shared<St3215Servo>(St3215ServoConfig{
@@ -326,7 +329,7 @@ TEST(St3215Test, RejectsStaleAndFutureCommandsAndStopsResendingExpiredEnable) {
   const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                           std::chrono::steady_clock::now().time_since_epoch())
                           .count();
-  auto transport = std::make_shared<RecordingSt3215Transport>();
+  auto transport = std::make_shared<RecordingSerialTransport>();
   auto servo = std::make_shared<St3215Servo>(St3215ServoConfig{
       "freshness", 1, 1, 4095, 0, 0, 250ms, 20ms, 5ms});
   EXPECT_EQ(servo->stage_command(
@@ -370,7 +373,7 @@ TEST(St3215Test, RejectsStaleAndFutureCommandsAndStopsResendingExpiredEnable) {
 }
 
 TEST(St3215Test, PublishesDeviceErrorBeforeSuccessShapeValidation) {
-  auto transport = std::make_shared<RecordingSt3215Transport>();
+  auto transport = std::make_shared<RecordingSerialTransport>();
   transport->status_error.store(4U, std::memory_order_release);
   auto servo = std::make_shared<St3215Servo>(St3215ServoConfig{
       "device-error", 1, 1, 4095, 0, 0, 250ms});
@@ -472,7 +475,7 @@ TEST(St3215Test, RegistryRejectsAWholeSnapshotBeforeStagingAnyServo) {
 }
 
 TEST(St3215Test, CycleContainsTransportExceptionsAndLatchesFault) {
-  auto transport = std::make_shared<RecordingSt3215Transport>();
+  auto transport = std::make_shared<RecordingSerialTransport>();
   transport->throw_on_write.store(true, std::memory_order_release);
   auto servo = std::make_shared<St3215Servo>(St3215ServoConfig{
       "servo", 1, 1, 4095, 0, 0, 250ms});
@@ -495,7 +498,7 @@ TEST(St3215Test, CycleContainsTransportExceptionsAndLatchesFault) {
 }
 
 TEST(St3215Test, StopWakesAOneSecondServicePeriodWithoutWaitingForDeadline) {
-  auto transport = std::make_shared<RecordingSt3215Transport>();
+  auto transport = std::make_shared<RecordingSerialTransport>();
   auto servo = std::make_shared<St3215Servo>(St3215ServoConfig{
       "bounded-stop", 1, 1, 4095, 0, 0, 250ms});
   St3215Bus bus{transport, St3215BusOptions{1s}};

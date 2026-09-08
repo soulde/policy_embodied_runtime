@@ -19,6 +19,7 @@
 #include "policy_runtime/robot_io/daemon/local_snapshot.hpp"
 #include "policy_runtime/robot_io/daemon/value_snapshot.hpp"
 #include "policy_runtime/robot_io/daemon/transport_scheduler.hpp"
+#include "policy_runtime/transport/serial/serial_transport.hpp"
 #include "policy_runtime/transport/transport.hpp"
 
 namespace policy_runtime {
@@ -85,20 +86,6 @@ struct St3215BusOptions {
   std::chrono::nanoseconds service_period{std::chrono::milliseconds{1}};
 };
 
-// ST3215's protocol-facing transport endpoint. The device owns framing and
-// decoding; this small interface only lets the device bind to a selected
-// physical serial implementation without introducing a generic frame layer.
-class St3215Transport : public virtual Transport {
- public:
-  ~St3215Transport() override = default;
-
-  virtual Result<void> write(std::uint32_t channel,
-                              std::span<const std::byte> data) = 0;
-  virtual Result<std::size_t> read(std::uint32_t channel,
-                                   std::span<std::byte> buffer) = 0;
-  virtual void request_stop() noexcept {}
-};
-
 // Hard-realtime shared ST3215 serial bus with the same one-shot contract as
 // the CAN paths: the owner's realtime loop calls cycle() once per period.
 // Each cycle performs at most one bounded receive (the response to the
@@ -109,7 +96,7 @@ class St3215Transport : public virtual Transport {
 // restart.
 class St3215Bus {
  public:
-  St3215Bus(std::shared_ptr<St3215Transport> transport,
+  St3215Bus(std::shared_ptr<SerialTransport> transport,
             St3215BusOptions options = {});
   ~St3215Bus();
 
@@ -129,7 +116,7 @@ class St3215Bus {
   bool fault_latched() const noexcept { return fault_latched_; }
   std::size_t servo_count() const noexcept;
   TransportHealth health() const noexcept;
-  std::shared_ptr<St3215Transport> transport() const noexcept;
+  std::shared_ptr<SerialTransport> transport() const noexcept;
 
  private:
   struct ServoRuntime {
@@ -155,7 +142,7 @@ class St3215Bus {
                                       std::uint32_t flags,
                                       std::int64_t now_ns) noexcept;
 
-  std::shared_ptr<St3215Transport> transport_;
+  std::shared_ptr<SerialTransport> transport_;
   St3215BusOptions options_;
   mutable std::mutex lifecycle_mutex_;
   std::vector<ServoRuntime> servos_;

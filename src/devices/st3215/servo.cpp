@@ -143,40 +143,7 @@ void St3215Servo::publish_feedback(
   feedback_.publish(feedback);
 }
 
-namespace {
-
-class SerialSt3215Transport final : public St3215Transport {
- public:
-  explicit SerialSt3215Transport(std::shared_ptr<SerialTransport> serial)
-      : serial_(std::move(serial)) {}
-
-  Result<void> open() override { return serial_->open(); }
-  void close() noexcept override { serial_->close(); }
-  TransportHealth health() const noexcept override { return serial_->health(); }
-  SchedulingClass scheduling_class() const noexcept override {
-    return serial_->scheduling_class();
-  }
-  void cycle(const CycleContext& context) noexcept override {
-    serial_->cycle(context);
-  }
-  void request_stop() noexcept override { serial_->request_stop(); }
-  void receive_once() noexcept { serial_->receive_once(); }
-  Result<void> write(std::uint32_t channel,
-                     std::span<const std::byte> data) override {
-    return serial_->write(channel, data);
-  }
-  Result<std::size_t> read(std::uint32_t channel,
-                           std::span<std::byte> buffer) override {
-    return serial_->read(channel, buffer);
-  }
-
- private:
-  std::shared_ptr<SerialTransport> serial_;
-};
-
-}  // namespace
-
-St3215Bus::St3215Bus(std::shared_ptr<St3215Transport> transport,
+St3215Bus::St3215Bus(std::shared_ptr<SerialTransport> transport,
                      St3215BusOptions options)
     : transport_(std::move(transport)), options_(options) {}
 
@@ -278,7 +245,7 @@ TransportHealth St3215Bus::health() const noexcept {
   return health_.load(std::memory_order_acquire);
 }
 
-std::shared_ptr<St3215Transport> St3215Bus::transport() const noexcept {
+std::shared_ptr<SerialTransport> St3215Bus::transport() const noexcept {
   return transport_;
 }
 
@@ -537,7 +504,7 @@ Result<void> St3215DeviceRegistry::configure(
       buses.push_back(BusEntry{
           serial,
           std::make_unique<St3215Bus>(
-              std::make_shared<SerialSt3215Transport>(std::move(transport.value())),
+              std::move(transport.value()),
               St3215BusOptions{profile.serial.service_period})});
       bus = std::prev(buses.end());
     } else if (bus->serial.baud_rate != serial.baud_rate ||
