@@ -12,7 +12,8 @@ class DamiaoActuator final : public ActuatorDevice {
   DamiaoActuator(std::uint8_t motor_id, DamiaoLimits limits) noexcept
       : motor_id_(motor_id), limits_(limits) {}
 
-  void set_enabled(bool enabled) noexcept { enabled_ = enabled; }
+  void set_enable() noexcept { enabled_ = true; }
+  void set_disable() noexcept { enabled_ = false; }
   void request_zero_position() noexcept { zero_requested_ = true; }
   void clear_zero_position() noexcept { zero_requested_ = false; }
   void set_command(const DamiaoMitCommand& command) noexcept { command_ = command; }

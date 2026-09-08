@@ -320,7 +320,8 @@ Result<void> RobotIoDaemon::attach_dds(
           return;
         }
         auto& actuator = damiao_actuators_[index];
-        actuator.set_enabled(value.enabled);
+        if (value.enabled) actuator.set_enable();
+        else actuator.set_disable();
         actuator.set_command({value.position, value.velocity, value.kp, value.kd,
                                value.torque});
         if (value.fault_reset) actuator.request_zero_position();
