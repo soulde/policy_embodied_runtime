@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string_view>
 
 #include "policy_runtime/common/result.hpp"
 
@@ -23,6 +24,14 @@ struct CanFrame {
 class SocketCanTransport {
  public:
   explicit SocketCanTransport(int fd) noexcept : fd_(fd) {}
+  ~SocketCanTransport();
+
+  SocketCanTransport(const SocketCanTransport&) = delete;
+  SocketCanTransport& operator=(const SocketCanTransport&) = delete;
+  SocketCanTransport(SocketCanTransport&& other) noexcept;
+  SocketCanTransport& operator=(SocketCanTransport&& other) noexcept;
+
+  static Result<SocketCanTransport> open(std::string_view interface_name);
 
   bool valid() const noexcept { return fd_ >= 0; }
 
@@ -31,6 +40,7 @@ class SocketCanTransport {
 
  private:
   int fd_;
+  bool owns_fd_{};
 };
 
 }  // namespace policy_runtime

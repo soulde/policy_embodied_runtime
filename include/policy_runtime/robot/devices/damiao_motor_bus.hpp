@@ -27,6 +27,8 @@ class DamiaoMotorBus final : public Transport {
   void stage_command(const DamiaoMitCommand& command) noexcept {
     staged_ = command;
   }
+  void set_enabled(bool enabled) noexcept { requested_enabled_ = enabled; }
+  void request_zero_position() noexcept { zero_requested_ = true; }
 
   const DamiaoMitCommand& staged_command() const noexcept { return staged_; }
 
@@ -61,17 +63,42 @@ class DamiaoMotorBus final : public Transport {
     const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
                          context.scheduled_start.time_since_epoch())
                          .count();
+    if (zero_requested_ || requested_enabled_ != enabled_) {
+      const auto control = zero_requested_
+                               ? DamiaoControl::zero_position
+                               : (requested_enabled_ ? DamiaoControl::enable
+                                                     : DamiaoControl::disable);
+      CanFrame frame;
+      frame.id = device_.command_can_id();
+      frame.data = DamiaoProtocol::encode_control(control);
+      frame.dlc = 8U;
+      last_cycle_ = std::visit(
+          [&](auto& transport) { return transport.send_frame(frame); },
+          transport_);
+      if (last_cycle_.has_value()) {
+        enabled_ = requested_enabled_;
+        zero_requested_ = false;
+      } else {
+        device_.latch_fault();
+      }
+      return;
+    }
+    if (!enabled_) {
+      return;
+    }
     last_cycle_ = std::visit(
         [&](auto& transport) {
           return device_.cycle(staged_, transport, device_.motor_id(), now);
-        },
-        transport_);
+        }, transport_);
   }
 
  private:
   DamiaoMotorDevice device_;
   CanTransport transport_;
   DamiaoMitCommand staged_{};
+  bool requested_enabled_{};
+  bool enabled_{};
+  bool zero_requested_{};
   Result<void> last_cycle_{Result<void>::success()};
 };
 

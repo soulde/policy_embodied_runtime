@@ -33,6 +33,7 @@ class DamiaoMotorDevice final : public MITMotorDevice {
   const DamiaoMotorConfig& config() const noexcept { return config_; }
   DamiaoMode mode() const noexcept { return config_.mode; }
   std::uint8_t motor_id() const noexcept { return config_.motor_id; }
+  std::uint64_t feedback_sequence() const noexcept { return feedback_sequence_; }
 
   bool feedback_stale(std::int64_t now_ns) const noexcept {
     return !has_feedback_ ||
@@ -62,6 +63,7 @@ class DamiaoMotorDevice final : public MITMotorDevice {
           {ErrorCode::protocol, "feedback motor ID does not match device"});
     }
     update_feedback(decoded.value());
+    ++feedback_sequence_;
     has_feedback_ = true;
     last_feedback_ns_ = now_ns;
     return Result<void>::success();
@@ -114,6 +116,7 @@ class DamiaoMotorDevice final : public MITMotorDevice {
   DamiaoMotorConfig config_{};
   std::int64_t last_feedback_ns_{};
   bool has_feedback_{false};
+  std::uint64_t feedback_sequence_{};
 };
 
 }  // namespace policy_runtime

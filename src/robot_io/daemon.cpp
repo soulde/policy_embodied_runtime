@@ -2,9 +2,8 @@
 
 #include <cerrno>
 #include <chrono>
-#include <condition_variable>
 #include <exception>
-#include <mutex>
+#include <map>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -55,17 +54,6 @@ SafetyBusState safety_bus_state(const DomainHealth& domain,
 
 std::uint64_t current_thread_token() noexcept {
   return static_cast<std::uint64_t>(::syscall(SYS_gettid));
-}
-
-constexpr std::uint8_t encode_control_fault(ErrorCode code) noexcept {
-  return static_cast<std::uint8_t>(code) + 1U;
-}
-
-Error control_fault_error(std::uint8_t encoded) {
-  const auto code = static_cast<ErrorCode>(encoded - 1U);
-  return {code, code == ErrorCode::internal
-                    ? "IPC peer monitor terminated unexpectedly"
-                    : "IPC peer monitor detected a connection failure"};
 }
 
 class CycleOwnerGuard {
@@ -161,6 +149,70 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
       !checked.has_value()) {
     return checked;
   }
+  if (profile.damiao_motors.size() > kRobotIoMaximumServos) {
+    return Result<void>::failure(
+        {ErrorCode::invalid_argument, "robot I/O daemon supports at most 32 Damiao motors"});
+  }
+  std::map<std::string, std::vector<std::size_t>> damiao_bus_members;
+  for (std::size_t index = 0; index < profile.damiao_motors.size(); ++index) {
+    const auto& motor = profile.damiao_motors[index];
+    if (motor.transport != profiles::DamiaoTransport::socketcan) {
+      return Result<void>::failure(
+          {ErrorCode::invalid_argument,
+           "Damiao daemon currently supports SocketCAN transport only"});
+    }
+    damiao_bus_members[motor.path].push_back(index);
+  }
+  std::vector<std::unique_ptr<robot_io::TransportRuntime>> damiao_buses;
+  std::array<std::optional<DamiaoBusRoute>, kRobotIoMaximumServos> damiao_routes;
+  std::vector<DamiaoSensor> damiao_sensors;
+  std::vector<DamiaoActuator> damiao_actuators;
+  damiao_sensors.reserve(profile.damiao_motors.size());
+  damiao_actuators.reserve(profile.damiao_motors.size());
+  for (const auto& motor : profile.damiao_motors) {
+    damiao_sensors.emplace_back(motor.motor_id, motor.limits);
+    damiao_actuators.emplace_back(motor.motor_id, motor.limits);
+  }
+  for (const auto& [path, members] : damiao_bus_members) {
+    auto transport = SocketCanTransport::open(path);
+    if (!transport.has_value()) {
+      return Result<void>::failure(transport.error());
+    }
+    const auto bus_index = damiao_buses.size();
+    auto runtime = robot_io::TransportRuntime::create(
+        std::move(transport.value()),
+        [this, members](const DeviceFrame& frame, std::uint64_t sequence) {
+          if (!dds_.has_value()) {
+            return;
+          }
+          std::size_t global_index = 0U;
+          for (const auto candidate : members) {
+            if (damiao_sensors_[candidate].accepts(frame)) {
+              global_index = candidate;
+              auto feedback = damiao_sensors_[candidate].decode(frame);
+              if (!feedback.has_value()) return;
+              static_cast<void>(dds_->enqueue_damiao_sensor_realtime(
+                  global_index,
+                  robot_io::dds::DamiaoSensorEvent{
+                      sequence, clock_->now_ns(), sequence, 0U,
+                      feedback.value().position, feedback.value().velocity,
+                      feedback.value().torque, feedback.value().motor_id,
+                      feedback.value().error_code,
+                      feedback.value().mos_temperature_c,
+                      feedback.value().rotor_temperature_c}));
+              return;
+            }
+          }
+        });
+    if (!runtime.has_value()) {
+      return Result<void>::failure(runtime.error());
+    }
+    for (std::size_t local_index = 0; local_index < members.size(); ++local_index) {
+      damiao_routes[members[local_index]] = DamiaoBusRoute{bus_index, local_index};
+    }
+    damiao_buses.push_back(
+        std::make_unique<robot_io::TransportRuntime>(std::move(runtime.value())));
+  }
 
   std::array<std::optional<Cia402Axis>, kRobotIoMaximumAxes> configured_axes;
   try {
@@ -196,6 +248,10 @@ Result<void> RobotIoDaemon::configure(const profiles::RobotProfile& profile) {
     }
   }
   axes_ = std::move(configured_axes);
+  transport_runtimes_ = std::move(damiao_buses);
+  damiao_routes_ = damiao_routes;
+  damiao_sensors_ = std::move(damiao_sensors);
+  damiao_actuators_ = std::move(damiao_actuators);
   axis_count_ = static_cast<std::uint32_t>(profile.axes.size());
   DaemonAxisSnapshot initial{};
   initial.axis_count = axis_count_;
@@ -215,19 +271,76 @@ Result<void> RobotIoDaemon::attach_ethercat(EthercatMaster& master) {
   return Result<void>::success();
 }
 
-Result<void> RobotIoDaemon::attach_ipc(RobotIoIpcServer server) {
-  if (!configured_ || running_.load(std::memory_order_acquire) || ipc_.has_value() ||
-      server.axis_count() != axis_count_ ||
-      server.servo_count() != serial_devices_.servo_count()) {
+Result<void> RobotIoDaemon::attach_dds(
+    const profiles::RobotProfile& profile) {
+  if (!configured_ || running_.load(std::memory_order_acquire) ||
+      dds_.has_value()) {
     return Result<void>::failure(
         {ErrorCode::invalid_argument,
-         "IPC endpoint must match the configured inactive daemon"});
+         "DDS endpoint requires a configured inactive daemon"});
   }
-  auto setup = server.send_setup();
-  if (!setup.has_value()) {
-    return setup;
+  robot_io::dds::DdsDaemonCallbacks callbacks;
+  callbacks.stage_ethercat_epoch =
+      [this](std::string_view, std::uint64_t epoch,
+             std::span<const robot_io::dds::Cia402CommandValue> values) {
+        if (values.size() != axis_count_) {
+          return;
+        }
+        Snapshot<AxisCommand> snapshot;
+        snapshot.sequence = epoch;
+        snapshot.axis_count = axis_count_;
+        for (std::size_t index = 0; index < values.size(); ++index) {
+          snapshot.timestamp_ns =
+              std::max(snapshot.timestamp_ns,
+                       values[index].source_timestamp_ns);
+          snapshot.axes[index] = {values[index].sequence,
+                                  values[index].source_timestamp_ns,
+                                  values[index].target,
+                                  values[index].flags,
+                                  0U};
+        }
+        static_cast<void>(stage_commands(snapshot));
+      };
+  callbacks.stage_st3215_command =
+      [this](std::size_t index,
+             const robot_io::dds::St3215CommandValue& value) {
+        St3215ServoCommand command;
+        command.sequence = value.sequence;
+        command.timestamp_ns = value.source_timestamp_ns;
+        command.target_position_rad = value.target_radians;
+        command.enabled = value.enabled;
+        command.emergency_stop = value.fault_reset;
+        static_cast<void>(stage_servo_command(index, command));
+      };
+  callbacks.stage_damiao_command =
+      [this](std::size_t index,
+             const robot_io::dds::DamiaoCommandValue& value) {
+        if (index >= damiao_routes_.size() || !damiao_routes_[index].has_value() ||
+            index >= damiao_actuators_.size()) {
+          return;
+        }
+        auto& actuator = damiao_actuators_[index];
+        actuator.set_enabled(value.enabled);
+        actuator.set_command({value.position, value.velocity, value.kp, value.kd,
+                               value.torque});
+        if (value.fault_reset) actuator.request_zero_position();
+        auto frame = actuator.encode_frame();
+        actuator.clear_zero_position();
+        if (!frame.has_value()) return;
+        auto outgoing = frame.value();
+        outgoing.sequence = value.sequence;
+        const auto route = *damiao_routes_[index];
+        if (route.bus_index < transport_runtimes_.size()) {
+          static_cast<void>(transport_runtimes_[route.bus_index]->stage(
+              route.local_index, outgoing));
+        }
+      };
+  auto endpoint = robot_io::dds::DdsDaemonEndpoint::create(
+      profile, std::move(callbacks));
+  if (!endpoint.has_value()) {
+    return Result<void>::failure(endpoint.error());
   }
-  ipc_.emplace(std::move(server));
+  dds_.emplace(std::move(endpoint.value()));
   return Result<void>::success();
 }
 
@@ -246,8 +359,6 @@ bool RobotIoDaemon::health_atomics_are_lock_free() const noexcept {
          serial_fault_count_.is_lock_free() &&
          serial_safety_flags_.is_lock_free() &&
          cycle_owner_token_.is_lock_free() &&
-         control_monitor_thread_token_.is_lock_free() &&
-         control_fault_code_.is_lock_free() &&
          rejected_command_publication_.is_lock_free() &&
          loop_.atomics_are_lock_free() &&
          command_handoff_.atomics_are_lock_free() &&
@@ -269,6 +380,12 @@ Result<void> RobotIoDaemon::start() {
   auto loop_config = loop_.validate_config();
   if (!loop_config.has_value()) {
     return loop_config;
+  }
+  if (dds_.has_value()) {
+    auto started = dds_->start();
+    if (!started.has_value()) {
+      return started;
+    }
   }
 
   if (ethercat_master_ != nullptr) {
@@ -308,6 +425,10 @@ Result<void> RobotIoDaemon::start() {
       master_registered_ = false;
     }
     return serial_started;
+  }
+  for (auto& bus : transport_runtimes_) {
+    auto started = bus->start();
+    if (!started.has_value()) return started;
   }
 
   accepting_commands_.store(true, std::memory_order_release);
@@ -388,50 +509,7 @@ CommandAcceptance RobotIoDaemon::refresh_commands_owned() noexcept {
     // publication) remains available for the following owner cycle.
     return acceptance;
   }
-  if (!ipc_.has_value()) {
-    return acceptance;
-  }
-  auto snapshot = ipc_->read_commands_realtime();
-  if (!snapshot.has_value()) {
-    if (snapshot.error().code == ErrorCode::protocol) {
-      Snapshot<AxisCommand> invalid{};
-      invalid.axis_count = kRobotIoMaximumAxes + 1U;
-      static_cast<void>(safety_.accept_commands(invalid, clock_->now_ns()));
-      return CommandAcceptance::rejected;
-    }
-    return acceptance;
-  }
-
-  const auto now = clock_->now_ns();
-  SafetySupervisor preview = safety_;
-  const auto ipc_acceptance = preview.accept_commands(snapshot.value(), now);
-  if (ipc_acceptance == CommandAcceptance::rejected) {
-    static_cast<void>(safety_.accept_commands(snapshot.value(), now));
-    return ipc_acceptance;
-  }
-  if (ipc_->servo_count() != 0U) {
-    auto servo_snapshot = ipc_->read_servo_commands_realtime();
-    const bool matching_epoch =
-        servo_snapshot.has_value() &&
-        servo_snapshot.value().sequence == snapshot.value().sequence &&
-        servo_snapshot.value().timestamp_ns == snapshot.value().timestamp_ns;
-    if (!matching_epoch ||
-        serial_devices_.stage_commands(servo_snapshot.value(), now) ==
-            St3215CommandAcceptance::rejected) {
-      Snapshot<AxisCommand> invalid{};
-      invalid.axis_count = kRobotIoMaximumAxes + 1U;
-      static_cast<void>(safety_.accept_commands(invalid, now));
-      return CommandAcceptance::rejected;
-    }
-  }
-  safety_ = preview;
-  if (ipc_acceptance == CommandAcceptance::accepted) {
-    last_command_sequence_.store(snapshot.value().sequence,
-                                 std::memory_order_release);
-    last_command_timestamp_ns_.store(snapshot.value().timestamp_ns,
-                                     std::memory_order_release);
-  }
-  return ipc_acceptance;
+  return acceptance;
 }
 
 void RobotIoDaemon::process_device_cycle(std::span<Cia402PdoView> pdos,
@@ -482,6 +560,15 @@ void RobotIoDaemon::process_device_cycle_owned(
     value.flags |= decisions.feedback_flags[axis];
     cycle_feedback_[axis] = value;
     safety_flags |= decisions.feedback_flags[axis];
+    if (dds_.has_value()) {
+      static_cast<void>(dds_->enqueue_cia402_sensor_realtime(
+          axis, robot_io::dds::Cia402SensorEvent{
+                    cycle_sequence_.load(std::memory_order_relaxed) + 1U, now,
+                    cycle_sequence_.load(std::memory_order_relaxed) + 1U,
+                    value.flags, value.position, value.velocity, value.effort,
+                    static_cast<std::uint16_t>(value.status_word),
+                    static_cast<std::int32_t>(value.mode_display)}));
+    }
   }
 
   const auto sequence = cycle_sequence_.fetch_add(1U, std::memory_order_acq_rel) + 1U;
@@ -508,21 +595,6 @@ void RobotIoDaemon::process_device_cycle_owned(
   }
   axis_publication_.publish(public_axes);
 
-  if (ipc_.has_value()) {
-    static_cast<void>(ipc_->publish_feedback_realtime(
-        std::span<const AxisFeedback>(cycle_feedback_.data(), axis_count_),
-        safety_.last_command_sequence(), now));
-    if (ipc_->servo_count() != 0U) {
-      std::array<St3215ServoFeedback, kMaximumSt3215Servos> feedback{};
-      for (std::size_t index = 0; index < ipc_->servo_count(); ++index) {
-        feedback[index] = serial_devices_.feedback(index, now);
-      }
-      static_cast<void>(ipc_->publish_servo_feedback_realtime(
-          std::span<const St3215ServoFeedback>(feedback.data(),
-                                               ipc_->servo_count()),
-          sequence, now));
-    }
-  }
 }
 
 void RobotIoDaemon::ethercat_cycle_handler(
@@ -576,41 +648,6 @@ Result<void> RobotIoDaemon::run() {
     return Result<void>::success();
   }
 
-  std::mutex control_monitor_mutex;
-  std::condition_variable control_monitor_wake;
-  std::jthread control_monitor;
-  if (ipc_.has_value()) {
-    try {
-      control_monitor = std::jthread([this, &control_monitor_mutex,
-                                      &control_monitor_wake](
-                                         std::stop_token stop_token) {
-        try {
-          while (!stop_token.stop_requested() &&
-                 !stop_requested_.load(std::memory_order_acquire)) {
-            auto controlled = poll_control();
-            if (!controlled.has_value()) {
-              return;
-            }
-            std::unique_lock lock(control_monitor_mutex);
-            control_monitor_wake.wait_for(
-                lock, std::chrono::milliseconds{1}, [&] {
-                  return stop_token.stop_requested() ||
-                         stop_requested_.load(std::memory_order_acquire);
-                });
-          }
-        } catch (...) {
-          control_fault_code_.store(encode_control_fault(ErrorCode::internal),
-                                    std::memory_order_release);
-          static_cast<void>(request_stop());
-        }
-      });
-    } catch (...) {
-      control_fault_code_.store(encode_control_fault(ErrorCode::internal),
-                                std::memory_order_release);
-      static_cast<void>(request_stop());
-    }
-  }
-
   auto realtime = loop_.prepare();
   if (!realtime.has_value()) {
     realtime_guarantee_.store(false, std::memory_order_release);
@@ -646,17 +683,7 @@ Result<void> RobotIoDaemon::run() {
         loop_.config().period});
   }
   loop_.release();
-  if (control_monitor.joinable()) {
-    control_monitor.request_stop();
-    control_monitor_wake.notify_all();
-    control_monitor.join();
-  }
   stop_transports();
-  const auto control_fault =
-      control_fault_code_.load(std::memory_order_acquire);
-  if (control_fault != 0U) {
-    return Result<void>::failure(control_fault_error(control_fault));
-  }
   return Result<void>::success();
 }
 
@@ -670,23 +697,14 @@ Result<void> RobotIoDaemon::request_stop() {
   return Result<void>::success();
 }
 
-Result<void> RobotIoDaemon::poll_control() {
-  control_monitor_thread_token_.store(current_thread_token(),
-                                      std::memory_order_release);
-  if (!ipc_.has_value()) {
-    return Result<void>::success();
-  }
-  auto peer = ipc_->check_peer();
-  if (!peer.has_value()) {
-    control_fault_code_.store(encode_control_fault(peer.error().code),
-                              std::memory_order_release);
-    static_cast<void>(request_stop());
-  }
-  return peer;
-}
-
 void RobotIoDaemon::stop_transports() noexcept {
+  if (dds_.has_value()) {
+    dds_->stop();
+  }
   serial_devices_.stop(scheduler_);
+  for (auto& bus : transport_runtimes_) {
+    bus->stop();
+  }
   if (ethercat_master_ != nullptr && master_handler_bound_) {
     ethercat_master_->close();
     static_cast<void>(ethercat_master_->clear_supervised_cycle_handler(this));
@@ -733,8 +751,7 @@ DaemonHealth RobotIoDaemon::health() const noexcept {
       sleep_error_.load(std::memory_order_acquire),
       serial_servo_count_.load(std::memory_order_acquire),
       serial_fault_count_.load(std::memory_order_acquire),
-      serial_safety_flags_.load(std::memory_order_acquire),
-      control_monitor_thread_token_.load(std::memory_order_acquire)};
+      serial_safety_flags_.load(std::memory_order_acquire)};
 }
 
 DaemonAxisSnapshot RobotIoDaemon::axis_snapshot() const noexcept {

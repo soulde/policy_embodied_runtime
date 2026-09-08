@@ -32,12 +32,19 @@ struct DamiaoFeedback {
   std::int8_t rotor_temperature_c{};
 };
 
+enum class DamiaoControl : std::uint8_t {
+  enable = 0xFC,
+  disable = 0xFD,
+  zero_position = 0xFE,
+};
+
 class DamiaoProtocol {
  public:
   using Frame = std::array<std::byte, 8>;
 
   static Result<Frame> encode_mit(const DamiaoMitCommand& command,
                                   const DamiaoLimits& limits) noexcept;
+  static Frame encode_control(DamiaoControl control) noexcept;
 
   static Result<DamiaoFeedback> decode_feedback(
       std::uint32_t can_id, const std::byte* frame, std::size_t length,

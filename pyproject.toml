@@ -25,6 +25,7 @@ policy-runtime-host = "policy_embodied_runtime.apps.runtime_host:main"
 policy-soarm101-command-publisher = "policy_embodied_runtime.apps.soarm101_command_publisher:main"
 policy-soarm101-sim = "policy_embodied_runtime.sim.soarm101.cli:main"
 policy-soarm101-verify-serial = "policy_embodied_runtime.sim.soarm101.verify_serial:main"
+policy-openarm-sim = "policy_embodied_runtime.sim.openarm.cli:main"
 
 [tool.setuptools]
 include-package-data = true

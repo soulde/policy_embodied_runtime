@@ -5,15 +5,13 @@
     <General>
       <Interfaces>
         <NetworkInterface name="lo" multicast="false"/>
+        <PubSubMessageExchange type="iox" library="psmx_iox"
+                               config="LOG_LEVEL=WARN;" priority="10"/>
       </Interfaces>
       <AllowMulticast>false</AllowMulticast>
     </General>
     <Discovery>
       <ParticipantIndex>auto</ParticipantIndex>
     </Discovery>
-    <SharedMemory>
-      <Enable>true</Enable>
-      <LogLevel>warn</LogLevel>
-    </SharedMemory>
   </Domain>
 </CycloneDDS>

@@ -65,6 +65,14 @@ Result<DamiaoProtocol::Frame> DamiaoProtocol::encode_mit(
   return Result<Frame>::success(frame);
 }
 
+DamiaoProtocol::Frame DamiaoProtocol::encode_control(
+    DamiaoControl control) noexcept {
+  Frame frame;
+  frame.fill(std::byte{0xFF});
+  frame.back() = static_cast<std::byte>(control);
+  return frame;
+}
+
 Result<DamiaoFeedback> DamiaoProtocol::decode_feedback(
     std::uint32_t can_id, const std::byte* frame, std::size_t length,
     const DamiaoLimits& limits) noexcept {

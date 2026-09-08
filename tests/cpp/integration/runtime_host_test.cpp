@@ -555,8 +555,6 @@ TEST(RuntimeHostCliTest, AcceptsArgparseEqualsSyntaxForValueFlags) {
       "--robot-profile=robot.json",
       "--endpoint=tcp://127.0.0.1:6000",
       "--timeout-ms=250",
-      "--robot-io-fd=7",
-      "--robot-io-generation=9",
   };
   auto parsed = policy_runtime::parse_runtime_host_cli(arguments);
 
@@ -566,26 +564,6 @@ TEST(RuntimeHostCliTest, AcceptsArgparseEqualsSyntaxForValueFlags) {
   EXPECT_EQ(*parsed.value().robot_profile, "robot.json");
   EXPECT_EQ(parsed.value().endpoint, "tcp://127.0.0.1:6000");
   EXPECT_EQ(parsed.value().timeout_ms, 250);
-  EXPECT_EQ(parsed.value().robot_io_fd, 7);
-  EXPECT_EQ(parsed.value().robot_io_generation, 9U);
-}
-
-TEST(RuntimeHostCliTest, AcceptsRobotIoServicePaths) {
-  const std::vector<std::string_view> arguments{
-      "policy-runtime-host",
-      "--policy-profile=policy.json",
-      "--robot-io-socket=/run/policy-runtime/robot-io.sock",
-      "--robot-io-generation-file=/run/policy-runtime/robot-io.generation",
-  };
-  auto parsed = policy_runtime::parse_runtime_host_cli(arguments);
-
-  ASSERT_TRUE(parsed.has_value()) << parsed.error().message;
-  EXPECT_EQ(parsed.value().robot_io_socket,
-            "/run/policy-runtime/robot-io.sock");
-  EXPECT_EQ(parsed.value().robot_io_generation_file,
-            "/run/policy-runtime/robot-io.generation");
-  EXPECT_FALSE(parsed.value().robot_io_fd.has_value());
-  EXPECT_FALSE(parsed.value().robot_io_generation.has_value());
 }
 
 TEST(RuntimeHostCliTest, RejectsMissingValuesUnknownFlagsAndIncompleteRobotIo) {

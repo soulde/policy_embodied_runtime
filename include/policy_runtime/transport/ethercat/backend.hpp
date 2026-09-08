@@ -232,7 +232,6 @@ class EthercatBackend {
   friend class EthercatMailbox;
 };
 
-#if POLICY_RUNTIME_WITH_IGH
 // IgH request buffers are fixed before master activation. Runtime downloads are
 // therefore limited to exact-size 1, 2, 4, or 8 byte scalar requests; other sizes
 // fail with invalid_argument. Uploads remain bounded by the mailbox capacity.
@@ -273,6 +272,5 @@ class IghBackend final : public EthercatBackend {
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
-#endif
 
 }  // namespace policy_runtime

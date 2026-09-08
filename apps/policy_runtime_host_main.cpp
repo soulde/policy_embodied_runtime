@@ -13,11 +13,8 @@
 #include <utility>
 #include <vector>
 
-#include <sys/socket.h>
-#include <sys/time.h>
-
-#include "policy_runtime/runtime/robot_io_client.hpp"
-#include "policy_runtime/runtime/robot_io_service.hpp"
+#include "policy_runtime/profiles/loader.hpp"
+#include "policy_runtime/runtime/dds_robot_io.hpp"
 #include "policy_runtime/runtime/runtime_host.hpp"
 #include "policy_runtime/runtime/runtime_host_cli.hpp"
 
@@ -136,40 +133,27 @@ int main(int argc, char** argv) {
   return 1;
 #else
   std::unique_ptr<policy_runtime::RuntimeRobotIo> robot_io;
-  if (options.value().robot_io_fd.has_value()) {
-    timeval timeout{options.value().timeout_ms / 1000,
-                    (options.value().timeout_ms % 1000) * 1000};
-    if (setsockopt(*options.value().robot_io_fd, SOL_SOCKET, SO_RCVTIMEO,
-                   &timeout, sizeof(timeout)) != 0) {
-      std::cerr << "unable to set robot I/O setup timeout\n";
-      return 1;
-    }
-    auto client = policy_runtime::RobotIoClient::connect(
-        *options.value().robot_io_fd,
-        *options.value().robot_io_generation);
-    if (!client.has_value()) {
-      std::cerr << client.error().message << '\n';
-      return 1;
-    }
-    robot_io = policy_runtime::make_runtime_robot_io(
-        std::move(client.value()));
-  } else if (options.value().robot_io_socket.has_value()) {
-    auto client = policy_runtime::connect_robot_io_service(
-        *options.value().robot_io_socket,
-        *options.value().robot_io_generation_file,
-        options.value().timeout_ms);
-    if (!client.has_value()) {
-      std::cerr << client.error().message << '\n';
-      return 1;
-    }
-    robot_io = policy_runtime::make_runtime_robot_io(
-        std::move(client.value()));
-  }
 
   const std::filesystem::path robot_profile =
       options.value().robot_profile.value_or(
           "policy_embodied_runtime/examples/robot_profiles/"
           "default_rpc_robot_profile.json");
+  auto loaded_robot_profile =
+      policy_runtime::profiles::load_robot_profile(robot_profile);
+  if (!loaded_robot_profile.has_value()) {
+    std::cerr << loaded_robot_profile.error().message << '\n';
+    return 1;
+  }
+  if (loaded_robot_profile.value().dds.backend ==
+      policy_runtime::profiles::RobotIoBackend::dds) {
+    auto endpoint = policy_runtime::make_dds_runtime_robot_io(
+        loaded_robot_profile.value());
+    if (!endpoint.has_value()) {
+      std::cerr << endpoint.error().message << '\n';
+      return 1;
+    }
+    robot_io = std::move(endpoint.value());
+  }
   auto host = policy_runtime::RuntimeHost::from_profiles(
       options.value().policy_profile, robot_profile, std::move(robot_io));
   if (!host.has_value()) {

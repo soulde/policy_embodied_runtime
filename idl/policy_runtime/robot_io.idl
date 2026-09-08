@@ -33,6 +33,8 @@ struct Cia402SensorState {
 
 struct DamiaoActuatorCommand {
   MessageHeader header;
+  boolean enabled;
+  boolean fault_reset;
   float position;
   float velocity;
   float kp;

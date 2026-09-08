@@ -7,7 +7,7 @@
 #include "policy_runtime/profiles/robot_profile.hpp"
 #include "policy_runtime/protocol/cia402/pdo.hpp"
 #include "policy_runtime/protocol/cia402/state_machine.hpp"
-#include "policy_runtime/robot_io/ipc_protocol.hpp"
+#include "policy_runtime/robot_io/messages.hpp"
 
 namespace policy_runtime {
 

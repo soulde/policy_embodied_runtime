@@ -14,12 +14,14 @@
 #include "policy_runtime/protocol/cia402/pdo.hpp"
 #include "policy_runtime/protocol/cia402/state_machine.hpp"
 #include "policy_runtime/robot/devices/cia402/axis.hpp"
+#include "policy_runtime/robot/devices/damiao.hpp"
+#include "policy_runtime/robot_io/transport_runtime.hpp"
 #include "policy_runtime/robot/devices/st3215/servo.hpp"
-#include "policy_runtime/robot_io/ipc_server.hpp"
 #include "policy_runtime/robot_io/local_snapshot.hpp"
 #include "policy_runtime/robot_io/realtime_loop.hpp"
 #include "policy_runtime/robot_io/safety_supervisor.hpp"
 #include "policy_runtime/robot_io/transport_scheduler.hpp"
+#include "policy_runtime/robot_io/dds/daemon_endpoint.hpp"
 #include "policy_runtime/transport/ethercat/backend.hpp"
 
 namespace policy_runtime {
@@ -57,7 +59,6 @@ struct DaemonHealth {
   std::uint32_t serial_servo_count{};
   std::uint32_t serial_fault_count{};
   std::uint32_t serial_safety_flags{};
-  std::uint64_t control_monitor_thread_token{};
 };
 
 struct DaemonAxisSnapshot {
@@ -97,7 +98,7 @@ class RobotIoDaemon {
   Result<void> configure(const profiles::RobotProfile& profile);
   // The attached master remains owned by the caller and must outlive the daemon.
   Result<void> attach_ethercat(EthercatMaster& master);
-  Result<void> attach_ipc(RobotIoIpcServer server);
+  Result<void> attach_dds(const profiles::RobotProfile& profile);
   Result<void> start();
   Result<void> run();
   void cycle() noexcept;
@@ -133,7 +134,6 @@ class RobotIoDaemon {
                                   bool process_data_valid) noexcept;
   bool owns_cycle() const noexcept;
   CommandAcceptance consume_staged_commands() noexcept;
-  Result<void> poll_control();
   void stop_transports() noexcept;
   bool health_atomics_are_lock_free() const noexcept;
 
@@ -143,8 +143,17 @@ class RobotIoDaemon {
   SafetySupervisor command_ingress_;
   TransportScheduler scheduler_;
   St3215DeviceRegistry serial_devices_;
+  struct DamiaoBusRoute {
+    std::size_t bus_index{};
+    std::size_t local_index{};
+  };
+  std::vector<std::unique_ptr<robot_io::TransportRuntime>> transport_runtimes_;
+  std::vector<DamiaoSensor> damiao_sensors_;
+  std::vector<DamiaoActuator> damiao_actuators_;
+  std::array<std::optional<DamiaoBusRoute>, kRobotIoMaximumServos>
+      damiao_routes_{};
   EthercatMaster* ethercat_master_{};
-  std::optional<RobotIoIpcServer> ipc_;
+  std::optional<robot_io::dds::DdsDaemonEndpoint> dds_;
   std::array<std::optional<Cia402Axis>, kRobotIoMaximumAxes> axes_{};
   std::array<Cia402PdoView, kRobotIoMaximumAxes> standalone_pdos_{};
   std::array<AxisFeedback, kRobotIoMaximumAxes> cycle_feedback_{};
@@ -189,8 +198,6 @@ class RobotIoDaemon {
   std::atomic<std::uint32_t> serial_fault_count_{};
   std::atomic<std::uint32_t> serial_safety_flags_{};
   std::atomic<std::uint64_t> cycle_owner_token_{};
-  std::atomic<std::uint64_t> control_monitor_thread_token_{};
-  std::atomic<std::uint8_t> control_fault_code_{};
 };
 
 }  // namespace policy_runtime

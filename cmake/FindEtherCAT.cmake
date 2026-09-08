@@ -13,7 +13,7 @@ find_library(EtherCAT_LIBRARY
 find_package_handle_standard_args(EtherCAT
     REQUIRED_VARS EtherCAT_INCLUDE_DIR EtherCAT_LIBRARY
     REASON_FAILURE_MESSAGE
-        "POLICY_RUNTIME_WITH_IGH=ON requires the IgH EtherCAT userspace development header ecrt.h and libethercat. Install them or set EtherCAT_ROOT")
+        "IgH EtherCAT userspace development header ecrt.h and libethercat are required. Install them or set EtherCAT_ROOT")
 
 if(EtherCAT_FOUND AND NOT TARGET EtherCAT::EtherCAT)
     add_library(EtherCAT::EtherCAT UNKNOWN IMPORTED)
