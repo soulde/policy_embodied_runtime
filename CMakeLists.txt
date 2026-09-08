@@ -13,6 +13,7 @@ include(FetchContent)
 include(GNUInstallDirs)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(PolicyRuntimeZmq)
+include(PolicyRuntimeDds)
 
 if(POLICY_RUNTIME_WITH_IGH)
     find_package(EtherCAT REQUIRED)
@@ -385,4 +386,12 @@ if(POLICY_RUNTIME_BUILD_TESTS)
                 PROPERTIES LABELS build)
         endforeach()
     endforeach()
+
+    add_test(NAME cyclonedds_package_probe
+        COMMAND ${CMAKE_COMMAND}
+            -S ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/cyclonedds_probe
+            -B ${CMAKE_CURRENT_BINARY_DIR}/cyclonedds-probe
+            -DPOLICY_RUNTIME_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -DCMAKE_PREFIX_PATH=${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/cyclonedds_probe/fake)
+    set_tests_properties(cyclonedds_package_probe PROPERTIES LABELS build)
 endif()
