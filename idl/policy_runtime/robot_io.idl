@@ -1,0 +1,82 @@
+module policy_runtime {
+module robot_io {
+
+const unsigned long DDS_SCHEMA_VERSION = 1;
+
+struct MessageHeader {
+  unsigned long schema_version;
+  string<64> robot_id;
+  string<64> device_id;
+  string<64> session_id;
+  unsigned long long sequence;
+  long long source_timestamp_ns;
+  unsigned long long bus_cycle;
+  unsigned long flags;
+};
+
+struct Cia402ActuatorCommand {
+  MessageHeader header;
+  double target;
+  long mode;
+  unsigned long command_flags;
+  unsigned long long command_epoch;
+};
+
+struct Cia402SensorState {
+  MessageHeader header;
+  double position;
+  double velocity;
+  double torque;
+  unsigned short status_word;
+  long mode_display;
+};
+
+struct DamiaoActuatorCommand {
+  MessageHeader header;
+  float position;
+  float velocity;
+  float kp;
+  float kd;
+  float torque;
+};
+
+struct DamiaoSensorState {
+  MessageHeader header;
+  float position;
+  float velocity;
+  float torque;
+  octet motor_id;
+  octet error_code;
+  short mos_temperature_c;
+  short rotor_temperature_c;
+};
+
+struct St3215ActuatorCommand {
+  MessageHeader header;
+  double target_radians;
+  boolean enabled;
+  boolean fault_reset;
+};
+
+struct St3215SensorState {
+  MessageHeader header;
+  double position_radians;
+  unsigned short position_units;
+  unsigned short error_flags;
+};
+
+struct EthercatCommandCommit {
+  MessageHeader header;
+  string<64> execution_group;
+  unsigned long long command_epoch;
+};
+
+struct RobotIoHealth {
+  MessageHeader header;
+  unsigned long health_flags;
+  unsigned long dropped_samples;
+  string<128> diagnostic;
+};
+
+};
+};

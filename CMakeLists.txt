@@ -80,6 +80,7 @@ add_library(policy_runtime_core
     src/robot/devices/cia402/axis.cpp
     src/robot/devices/st3215/servo.cpp
     src/robot_io/daemon.cpp
+    src/robot_io/dds/topic_registry.cpp
     src/robot_io/ipc_server.cpp
     src/robot_io/realtime_loop.cpp
     src/robot_io/safety_supervisor.cpp
@@ -100,6 +101,15 @@ target_include_directories(policy_runtime_core
 target_link_libraries(policy_runtime_core PUBLIC nlohmann_json::nlohmann_json)
 find_package(Threads REQUIRED)
 target_link_libraries(policy_runtime_core PUBLIC Threads::Threads)
+if(POLICY_RUNTIME_HAS_DDS)
+    policy_runtime_add_dds_types(
+        TARGET policy_runtime_dds_types
+        IDL "${CMAKE_CURRENT_SOURCE_DIR}/idl/policy_runtime/robot_io.idl")
+    target_link_libraries(policy_runtime_core PRIVATE
+        policy_runtime_dds_types
+        "${POLICY_RUNTIME_DDS_C_TARGET}"
+        "${POLICY_RUNTIME_DDS_CXX_TARGET}")
+endif()
 target_compile_definitions(policy_runtime_core
     PUBLIC POLICY_RUNTIME_WITH_IGH=$<BOOL:${POLICY_RUNTIME_WITH_IGH}>)
 if(POLICY_RUNTIME_WITH_IGH)
@@ -185,6 +195,12 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         PRIVATE policy_runtime_core GTest::gtest_main)
     policy_runtime_configure_target(damiao_protocol_test)
     add_test(NAME damiao_protocol_test COMMAND damiao_protocol_test)
+
+    add_executable(dds_topic_registry_test
+        tests/cpp/unit/dds_topic_registry_test.cpp)
+    target_link_libraries(dds_topic_registry_test
+        PRIVATE policy_runtime_core GTest::gtest_main)
+    policy_runtime_configure_target(dds_topic_registry_test)
 
     add_executable(damiao_transport_test tests/cpp/integration/damiao_transport_test.cpp)
     target_link_libraries(damiao_transport_test
@@ -304,6 +320,8 @@ if(POLICY_RUNTIME_BUILD_TESTS)
         DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(transport_scheduler_test TEST_PREFIX transport_scheduler_test.
         DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(dds_topic_registry_test
+        TEST_PREFIX dds_topic_registry_test. DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(ipc_test TEST_PREFIX ipc_test.
         DISCOVERY_MODE PRE_TEST)
     gtest_discover_tests(cia402_state_machine_test TEST_PREFIX cia402_state_machine_test.
