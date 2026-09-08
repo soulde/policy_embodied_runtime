@@ -7,6 +7,8 @@
 
 #include "policy_runtime/protocol/cia402/units.hpp"
 #include "policy_runtime/devices/cia402/axis.hpp"
+#include "policy_runtime/devices/cia402/actuator.hpp"
+#include "policy_runtime/devices/cia402/sensor.hpp"
 
 namespace {
 
